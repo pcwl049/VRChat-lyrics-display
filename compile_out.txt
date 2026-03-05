@@ -1,0 +1,9 @@
+========================================
+  MoeKoeVRChat C++ Build (Test)
+========================================
+
+[Compiling test version...]
+main.cpp
+D:\Program Files\VScode\VC\Tools\MSVC\14.50.35717\include\experimental/coroutine(34): fatal error C1189: #error:  The <experimental/coroutine> and <experimental/resumable> headers are only supported with /await and implement pre-C++20 coroutine support. Use <coroutine> for standard C++20 coroutines.
+
+[ERROR] Build failed

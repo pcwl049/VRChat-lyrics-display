@@ -1,0 +1,39 @@
+﻿# Build outputs
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Build directories  
+cpp/build/
+cpp/bin/
+cpp/x64/
+__pycache__/
+node_modules/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Logs and temp
+*.log
+*.txt
+osc_logs/
+lyrics_cache/
+
+# User config
+config.json
+config_gui.json
+play_stats.json
+calibration.json
+
+# Reference project (don't include)
+参考项目/
+
+# KuGouMusicApi (submodule)
+KuGouMusicApi/

@@ -1,0 +1,12 @@
+'EnableDelayedExpansion' is not recognized as an internal or external command,
+operable program or batch file.
+'rlevel' is not recognized as an internal or external command,
+operable program or batch file.
+'[ERROR]' is not recognized as an internal or external command,
+operable program or batch file.
+'/b' is not recognized as an internal or external command,
+operable program or batch file.
+'D:\Project\音乐显示\cpp' is not recognized as an internal or external command,
+operable program or batch file.
+'cl' is not recognized as an internal or external command,
+operable program or batch file.

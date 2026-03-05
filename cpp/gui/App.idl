@@ -1,0 +1,8 @@
+// App.idl - 应用程序接口定义
+namespace MoeKoeGUI
+{
+    runtimeclass App : Microsoft.UI.Xaml.Application
+    {
+        App();
+    }
+}
