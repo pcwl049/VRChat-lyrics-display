@@ -2,8 +2,7 @@
 setlocal EnableDelayedExpansion
 
 echo ========================================
-echo   MoeKoeGUI Build
-echo   MoeKoeMusic WebSocket Client
+echo   VRChat Lyrics Display Build
 echo ========================================
 echo.
 
@@ -20,16 +19,16 @@ echo [Compiling...]
 cl /std:c++20 /EHsc /W3 /O2 /MD /utf-8 ^
     main_gui.cpp glass_window.cpp moekoe_ws.cpp netease_ws.cpp ^
     runtimeobject.lib windowsapp.lib dwmapi.lib ole32.lib user32.lib gdi32.lib shell32.lib ws2_32.lib msimg32.lib winhttp.lib ^
-    /Fe:..\bin\MoeKoeGUI.exe
+    /Fe:..\bin\VRCLyricsDisplay.exe
 
 if %errorlevel% equ 0 (
     echo.
     echo ========================================
     echo   Build Success!
-    echo   Output: ..\bin\MoeKoeGUI.exe
+    echo   Output: ..\bin\VRCLyricsDisplay.exe
     echo ========================================
     echo.
-    echo Make sure MoeKoeMusic is running with API enabled (port 6520)
+    echo Make sure MoeKoeMusic or Netease Music is running
 ) else (
     echo.
     echo [ERROR] Build failed

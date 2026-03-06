@@ -13,7 +13,7 @@ namespace winrt::MoeKoeGUI::implementation
     MainWindow::MainWindow()
     {
         // 设置窗口标题
-        Title(L"MoeKoeVRChat");
+        Title(L"VRChat Lyrics Display");
         
         // 设置窗口大小
         this->ExtendsContentIntoTitleBar(true);
