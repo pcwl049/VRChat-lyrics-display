@@ -11,7 +11,7 @@
 
 ## 使用
 
-1. 启动 `MoeKoeGUI.exe`
+1. 启动 `VRChat-lyrics-display.exe`
 2. 开启 MoeKoeMusic 的 API 模式（端口 6520）
 3. 或启动网易云音乐并开启远程调试（端口 9222）
 4. 在 VRChat 中开启 OSC
