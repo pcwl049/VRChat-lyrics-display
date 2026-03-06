@@ -1,4 +1,0 @@
-python-osc>=1.8.0
-voicemeeter-api>=2.7.0
-openvr>=2.12.0
-deep-translator>=1.11.4
