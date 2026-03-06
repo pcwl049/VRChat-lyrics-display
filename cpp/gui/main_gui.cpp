@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.1"
-#define APP_VERSION_NUM 100  // 0.1 -> 0*10000 + 1*100 + 0 = 100
+#define APP_VERSION "0.2"
+#define APP_VERSION_NUM 200  // 0.2 -> 0*10000 + 2*100 + 0 = 200
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
@@ -12,6 +12,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
+#include <wincrypt.h>
 #include <dwmapi.h>
 #include <psapi.h>
 #include <cstdio>
@@ -49,20 +50,27 @@ static void MainDebugLog(const char* msg) {
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
 
-// Colors
+// Colors - DeepBlue Theme (毛玻璃深空蓝主题)
+#define COLOR_BG_START RGB(15, 20, 35)
+#define COLOR_BG_END RGB(25, 35, 55)
 #define COLOR_BG RGB(18, 18, 24)
-#define COLOR_CARD RGB(30, 30, 42)
-#define COLOR_ACCENT RGB(88, 166, 255)
-#define COLOR_TEXT RGB(245, 245, 250)
-#define COLOR_TEXT_DIM RGB(160, 160, 180)
-#define COLOR_BORDER RGB(55, 55, 75)
-#define COLOR_TITLEBAR RGB(22, 22, 30)
-#define COLOR_EDIT_BG RGB(42, 42, 58)
+#define COLOR_CARD RGB(30, 40, 60)
+#define COLOR_CARD_BORDER RGB(50, 70, 100)
+#define COLOR_ACCENT RGB(80, 180, 255)
+#define COLOR_ACCENT_GLOW RGB(60, 140, 220)
+#define COLOR_TEXT RGB(240, 245, 255)
+#define COLOR_TEXT_DIM RGB(140, 150, 170)
+#define COLOR_BORDER RGB(50, 70, 100)
+#define COLOR_TITLEBAR RGB(20, 28, 45)
+#define COLOR_EDIT_BG RGB(35, 45, 65)
+#define COLOR_GLASS_TINT RGB(20, 30, 50)
+#define GLASS_ALPHA 220
 
 // Tray icon
 #define TRAY_ICON_ID 1
@@ -75,8 +83,8 @@ const DWORD OSC_PAUSE_INTERVAL = 3000;
 // Window size (scaled for high DPI)
 const int WIN_W_DEFAULT = 650;
 const int WIN_H_DEFAULT = 720;
-const int WIN_W_MIN = 500;
-const int WIN_H_MIN = 500;
+const int WIN_W_MIN = 600;
+const int WIN_H_MIN = 620;
 int g_winW = WIN_W_DEFAULT;
 int g_winH = WIN_H_DEFAULT;
 int g_winX = -1;  // Window position (saved on close)
@@ -120,6 +128,26 @@ bool g_neteaseBoxHover = false;
 
 // Edit controls
 
+// Custom Dialog System
+enum DialogType { DIALOG_INFO, DIALOG_CONFIRM, DIALOG_ERROR, DIALOG_UPDATE };
+struct DialogConfig {
+    DialogType type = DIALOG_INFO;
+    std::wstring title;
+    std::wstring content;      // Main content (can be multi-line with \n)
+    std::wstring btn1Text;     // Primary button (accent)
+    std::wstring btn2Text;     // Secondary button (border)
+    std::wstring btn3Text;     // Third button (for update dialog: Skip)
+    bool hasBtn2 = false;
+    bool hasBtn3 = false;
+};
+// Dialog result: 0 = closed/cancel, 1 = btn1 (primary), 2 = btn2 (secondary), 3 = btn3 (skip)
+int g_dialogResult = 0;
+HWND g_dialogHwnd = nullptr;
+bool g_dialogClosed = false;
+int g_dialogBtnHover = -1;
+DialogConfig g_dialogConfig;
+int g_dialogWidth = 400;
+int g_dialogHeight = 200;
 
 // Fonts
 HFONT g_fontTitle = nullptr;
@@ -128,6 +156,15 @@ HFONT g_fontNormal = nullptr;
 HFONT g_fontSmall = nullptr;
 HFONT g_fontLyric = nullptr;
 HFONT g_fontLabel = nullptr;
+
+// Forward declarations for custom dialogs
+bool ShowInfoDialog(const std::wstring& title, const std::wstring& content);
+bool ShowErrorDialog(const std::wstring& title, const std::wstring& content);
+bool ShowConfirmDialog(const std::wstring& title, const std::wstring& content, const std::wstring& btnYes = L"确定", const std::wstring& btnNo = L"取消");
+
+// Forward declarations for auto-start
+bool CheckAutoStart();
+void SetAutoStart(bool enable);
 
 // Brushes
 HBRUSH g_brushBg = nullptr;
@@ -141,7 +178,10 @@ POINT g_dragStart = {0, 0};
 // Update checking
 std::wstring g_latestVersion = L"";
 std::wstring g_downloadUrl = L"";
+std::wstring g_downloadSha256Url = L"";  // URL to SHA256 checksum file
+std::wstring g_downloadSha256 = L"";  // Expected SHA256 checksum
 std::wstring g_latestChangelog = L"";  // Update changelog
+std::wstring g_skipVersion = L"";      // Version to skip
 bool g_updateAvailable = false;
 bool g_checkingUpdate = false;
 bool g_downloadingUpdate = false;
@@ -157,6 +197,56 @@ int ParseVersion(const std::wstring& ver) {
     return major * 10000 + minor * 100 + patch;
 }
 
+// Calculate SHA256 hash of a file
+std::string CalculateSHA256(const wchar_t* filePath) {
+    std::string result;
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return result;
+    
+    if (!CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        CloseHandle(hFile);
+        return result;
+    }
+    
+    if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+        CryptReleaseContext(hProv, 0);
+        CloseHandle(hFile);
+        return result;
+    }
+    
+    BYTE buffer[8192];
+    DWORD bytesRead;
+    while (ReadFile(hFile, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        if (!CryptHashData(hHash, buffer, bytesRead, 0)) {
+            CryptDestroyHash(hHash);
+            CryptReleaseContext(hProv, 0);
+            CloseHandle(hFile);
+            return result;
+        }
+    }
+    
+    DWORD hashLen = 0;
+    DWORD hashLenSize = sizeof(DWORD);
+    if (CryptGetHashParam(hHash, HP_HASHSIZE, (BYTE*)&hashLen, &hashLenSize, 0) && hashLen == 32) {
+        BYTE hashData[32];
+        if (CryptGetHashParam(hHash, HP_HASHVAL, hashData, &hashLen, 0)) {
+            char hex[65];
+            for (int i = 0; i < 32; i++) {
+                sprintf_s(hex + i * 2, 3, "%02x", hashData[i]);
+            }
+            hex[64] = '\0';
+            result = hex;
+        }
+    }
+    
+    CryptDestroyHash(hHash);
+    CryptReleaseContext(hProv, 0);
+    CloseHandle(hFile);
+    return result;
+}
+
 // Check for updates from GitHub
 bool CheckForUpdate(bool manualCheck = false) {
     if (g_checkingUpdate) return false;
@@ -166,6 +256,13 @@ bool CheckForUpdate(bool manualCheck = false) {
     
     HINTERNET hSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) { g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
+    
+    // Set timeouts: 5s connect, 10s receive
+    DWORD timeout = 5000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    timeout = 10000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
     
     HINTERNET hConnect = WinHttpConnect(hSession, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
@@ -203,7 +300,8 @@ bool CheckForUpdate(bool manualCheck = false) {
                 g_latestVersion.resize(len - 1);
                 
                 int latestVer = ParseVersion(g_latestVersion);
-                g_updateAvailable = (latestVer > APP_VERSION_NUM);
+                // Check if newer and not skipped
+                g_updateAvailable = (latestVer > APP_VERSION_NUM) && (g_latestVersion != g_skipVersion);
             }
         }
         
@@ -253,9 +351,10 @@ bool CheckForUpdate(bool manualCheck = false) {
             }
         }
         
-        // Find download URL for .exe
+        // Find download URL for .exe and SHA256
         size_t assetsPos = response.find("\"assets\"");
         if (assetsPos != std::string::npos) {
+            // Find .exe download URL
             size_t exePos = response.find(".exe\"", assetsPos);
             if (exePos != std::string::npos) {
                 size_t urlStart = response.rfind("\"browser_download_url\"", exePos);
@@ -267,6 +366,22 @@ bool CheckForUpdate(bool manualCheck = false) {
                         int len = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, NULL, 0);
                         g_downloadUrl.resize(len - 1);
                         MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, &g_downloadUrl[0], len);
+                    }
+                }
+            }
+            // Find SHA256 checksum file URL
+            g_downloadSha256Url.clear();
+            size_t sha256Pos = response.find(".sha256\"", assetsPos);
+            if (sha256Pos != std::string::npos) {
+                size_t shaUrlStart = response.rfind("\"browser_download_url\"", sha256Pos);
+                if (shaUrlStart != std::string::npos && shaUrlStart > assetsPos) {
+                    shaUrlStart = response.find("\"", shaUrlStart + 22) + 1;
+                    size_t shaUrlEnd = response.find("\"", shaUrlStart);
+                    if (shaUrlStart != std::string::npos && shaUrlEnd != std::string::npos) {
+                        std::string shaUrl = response.substr(shaUrlStart, shaUrlEnd - shaUrlStart);
+                        int len = MultiByteToWideChar(CP_UTF8, 0, shaUrl.c_str(), -1, NULL, 0);
+                        g_downloadSha256Url.resize(len - 1);
+                        MultiByteToWideChar(CP_UTF8, 0, shaUrl.c_str(), -1, &g_downloadSha256Url[0], len);
                     }
                 }
             }
@@ -302,6 +417,13 @@ bool DownloadAndInstallUpdate() {
     // Download file
     HINTERNET hSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) { g_downloadingUpdate = false; return false; }
+    
+    // Set timeouts: 10s connect, 60s receive (for large files)
+    DWORD timeout = 10000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    timeout = 60000;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
     
     // Parse URL
     std::string url = WstringToUtf8(g_downloadUrl);
@@ -378,6 +500,65 @@ bool DownloadAndInstallUpdate() {
         return false;
     }
     
+    // Verify SHA256 if available
+    if (!g_downloadSha256Url.empty()) {
+        // Download SHA256 checksum file
+        std::string sha256Content;
+        HINTERNET hShaSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+        if (hShaSession) {
+            DWORD timeout = 5000;
+            WinHttpSetOption(hShaSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+            WinHttpSetOption(hShaSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+            
+            std::string shaUrl = WstringToUtf8(g_downloadSha256Url);
+            size_t pos = shaUrl.find("://");
+            if (pos != std::string::npos) {
+                std::string afterProto = shaUrl.substr(pos + 3);
+                size_t slashPos = afterProto.find("/");
+                if (slashPos != std::string::npos) {
+                    std::string host = afterProto.substr(0, slashPos);
+                    std::string path = afterProto.substr(slashPos);
+                    std::wstring whost = Utf8ToWstring(host);
+                    std::wstring wpath = Utf8ToWstring(path);
+                    
+                    HINTERNET hShaConnect = WinHttpConnect(hShaSession, whost.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+                    if (hShaConnect) {
+                        HINTERNET hShaRequest = WinHttpOpenRequest(hShaConnect, L"GET", wpath.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+                        if (hShaRequest && WinHttpSendRequest(hShaRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(hShaRequest, NULL)) {
+                            DWORD dwSize = 0;
+                            do {
+                                DWORD dwDownloaded = 0;
+                                char buffer[1024];
+                                if (WinHttpReadData(hShaRequest, buffer, sizeof(buffer), &dwDownloaded)) {
+                                    sha256Content.append(buffer, dwDownloaded);
+                                }
+                            } while (WinHttpQueryDataAvailable(hShaRequest, &dwSize) && dwSize > 0);
+                            WinHttpCloseHandle(hShaRequest);
+                        }
+                        WinHttpCloseHandle(hShaConnect);
+                    }
+                }
+            }
+            WinHttpCloseHandle(hShaSession);
+        }
+        
+        // Parse SHA256 (first 64 hex characters)
+        if (sha256Content.length() >= 64) {
+            std::string expectedSha256 = sha256Content.substr(0, 64);
+            // Convert to lowercase
+            for (char& c : expectedSha256) { if (c >= 'A' && c <= 'F') c += 32; }
+            
+            // Calculate actual SHA256
+            std::string actualSha256 = CalculateSHA256(tempFile);
+            
+            if (actualSha256 != expectedSha256) {
+                // SHA256 mismatch - delete downloaded file
+                DeleteFileW(tempFile);
+                return false;
+            }
+        }
+    }
+    
     // Get current exe path
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -422,7 +603,7 @@ bool DownloadAndInstallUpdate() {
 // Button animations
 Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
-bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false;
+bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false;
 
 // Song data
 std::wstring g_pendingTitle, g_pendingArtist, g_pendingTime;
@@ -440,6 +621,11 @@ bool g_playStateChanged = false;
 std::wstring g_cachedPreviewMsg;
 DWORD g_lastPreviewUpdate = 0;
 const DWORD PREVIEW_UPDATE_INTERVAL = 500;  // Update preview every 500ms
+
+// Redraw optimization
+bool g_needsRedraw = true;         // Dirty flag for redraw
+DWORD g_lastContentChange = 0;     // Last time content actually changed
+const DWORD IDLE_REDRAW_INTERVAL = 1000;  // Redraw every 1s when idle
 
 // Stats
 int g_todayPlays = 0;
@@ -478,9 +664,12 @@ int g_moekoePort = 6520;
 bool g_oscEnabled = true;
 bool g_minimizeToTray = true;
 bool g_showPerfOnPause = true;  // Show performance stats when paused
-bool g_autoUpdate = true;      // Auto check for updates on startup
-bool g_showPlatform = true;     // Show platform name in OSC message       // Auto check for updates on startup
+bool g_autoUpdate = true;       // Auto check for updates on startup
+bool g_showPlatform = true;     // Show platform name in OSC message
+bool g_autoStart = false;       // Auto start with Windows
+bool g_runAsAdmin = false;      // Run as administrator on startup
 bool g_isConnected = false;
+HANDLE g_mutex = nullptr;       // Single instance mutex
 std::vector<std::wstring> g_noLyricMsgs;
 int g_lastNoLyricIdx = -1;
 
@@ -674,6 +863,11 @@ void LoadConfig(const wchar_t* path) {
     g_autoUpdate = getBool("auto_update", true);
     g_showPlatform = getBool("show_platform", true);
     
+    // Auto-start: sync with registry (registry is source of truth)
+    g_autoStart = CheckAutoStart();
+    // Run as admin: load from config
+    g_runAsAdmin = getBool("run_as_admin", false);
+    
     // Load window size and position
     int winW = getInt("win_width", 0);
     int winH = getInt("win_height", 0);
@@ -681,18 +875,55 @@ void LoadConfig(const wchar_t* path) {
     if (winH >= WIN_H_MIN) g_winH = winH;
     g_winX = getInt("win_x", -1);
     g_winY = getInt("win_y", -1);
+    
+    // Load skipped version
+    g_skipVersion = getStr("skip_version");
 }
 
 void SaveConfig(const wchar_t* path) {
     FILE* f = _wfopen(path, L"wb");
     if (!f) return;
     fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%ls\",\n    \"port\": %d\n  },\n", g_oscIp.c_str(), g_oscPort);
-    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n", 
+    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"auto_start\": %s,\n", 
             g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false", 
-            g_showPerfOnPause ? "true" : "false", g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false");
-    fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d\n}\n",
+            g_showPerfOnPause ? "true" : "false", g_autoUpdate ? "true" : "false", 
+            g_showPlatform ? "true" : "false", g_autoStart ? "true" : "false");
+    fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
+    fprintf(f, "  \"skip_version\": \"%ls\"\n}\n", g_skipVersion.c_str());
     fclose(f);
+}
+
+// Auto-start with Windows (Registry)
+bool CheckAutoStart() {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 
+                      0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return false;
+    }
+    wchar_t value[MAX_PATH] = {0};
+    DWORD size = MAX_PATH * sizeof(wchar_t);
+    LRESULT result = RegQueryValueExW(hKey, L"VRCLyricsDisplay", nullptr, nullptr, 
+                                       (LPBYTE)value, &size);
+    RegCloseKey(hKey);
+    return result == ERROR_SUCCESS && wcslen(value) > 0;
+}
+
+void SetAutoStart(bool enable) {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 
+                      0, KEY_WRITE, &hKey) != ERROR_SUCCESS) {
+        return;
+    }
+    if (enable) {
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        RegSetValueExW(hKey, L"VRCLyricsDisplay", 0, REG_SZ, 
+                       (const BYTE*)exePath, (DWORD)(wcslen(exePath) + 1) * sizeof(wchar_t));
+    } else {
+        RegDeleteValueW(hKey, L"VRCLyricsDisplay");
+    }
+    RegCloseKey(hKey);
 }
 
 // Export logs to a file for bug reporting
@@ -809,9 +1040,9 @@ void ExportLogs(HWND hwnd) {
         fclose(out);
         
         std::wstring successMsg = L"\x65E5\x5FD7\x5DF2\x5BFC\x51FA\x5230:\n" + std::wstring(filePath);
-        MessageBoxW(hwnd, successMsg.c_str(), L"\x5BFC\x51FA\x6210\x529F", MB_OK | MB_ICONINFORMATION);
+        ShowInfoDialog(L"\x5BFC\x51FA\x6210\x529F", successMsg);
     } else {
-        MessageBoxW(hwnd, L"\x5BFC\x51FA\x5931\x8D25\xFF0C\x8BF7\x68C0\x67E5\x6587\x4EF6\x8DEF\x5F84", L"\x9519\x8BEF", MB_OK | MB_ICONERROR);
+        ShowErrorDialog(L"\x9519\x8BEF", L"\x5BFC\x51FA\x5931\x8D25\xFF0C\x8BF7\x68C0\x67E5\x6587\x4EF6\x8DEF\x5F84");
     }
 }
 
@@ -1037,8 +1268,72 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         }
     }
     
-    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+    if (g_hwnd) g_needsRedraw = true;
     LeaveCriticalSection(&g_cs);
+}
+
+// Enable blur behind effect (Windows 10/11)
+void EnableBlurBehind(HWND hwnd) {
+    typedef struct _ACCENT_POLICY {
+        int AccentState;
+        int AccentFlags;
+        int GradientColor;
+        int AnimationId;
+    } ACCENT_POLICY;
+    
+    HMODULE hUser = LoadLibraryW(L"user32.dll");
+    if (!hUser) return;
+    
+    typedef BOOL(WINAPI* SetWindowCompositionAttribute_t)(HWND, void*);
+    auto fn = (SetWindowCompositionAttribute_t)GetProcAddress(hUser, "SetWindowCompositionAttribute");
+    
+    if (fn) {
+        ACCENT_POLICY policy = { 4, 2, (COLOR_GLASS_TINT & 0xFFFFFF) | (GLASS_ALPHA << 24), 0 };
+        struct _WINDOWCOMPOSITIONATTRIBDATA {
+            int Attrib;
+            void* pvData;
+            int cbData;
+        } data = { 19, &policy, sizeof(policy) };
+        fn(hwnd, &data);
+    }
+    
+    FreeLibrary(hUser);
+}
+
+// Check if running as administrator
+bool IsRunningAsAdmin() {
+    BOOL isAdmin = FALSE;
+    PSID adminGroup = nullptr;
+    SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
+    
+    if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, 
+                                  DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+        CheckTokenMembership(nullptr, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+    return isAdmin == TRUE;
+}
+
+// Restart as administrator
+void RestartAsAdmin(HWND hwnd) {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    
+    SHELLEXECUTEINFOW sei = {0};
+    sei.cbSize = sizeof(sei);
+    sei.lpVerb = L"runas";
+    sei.lpFile = exePath;
+    sei.nShow = SW_SHOWNORMAL;
+    
+    if (ShellExecuteExW(&sei)) {
+        // Release mutex before closing to allow new instance to start
+        if (g_mutex) {
+            ReleaseMutex(g_mutex);
+            CloseHandle(g_mutex);
+            g_mutex = nullptr;
+        }
+        PostMessage(hwnd, WM_CLOSE, 0, 0);
+    }
 }
 
 void CreateTrayIcon(HWND hwnd) {
@@ -1095,6 +1390,444 @@ void DrawTextLeft(HDC hdc, const wchar_t* text, int x, int y, COLORREF color, HF
     SelectObject(hdc, oldFont);
 }
 
+// Draw text vertically centered in a given rect area (for checkboxes)
+void DrawTextVCentered(HDC hdc, const wchar_t* text, int x, int y, int h, COLORREF color, HFONT font) {
+    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
+    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
+    TextOutW(hdc, x, y + (h - sz.cy) / 2, text, (int)wcslen(text));
+    SelectObject(hdc, oldFont);
+}
+
+// Draw text centered both horizontally and vertically (for buttons)
+void DrawTextCenteredBoth(HDC hdc, const wchar_t* text, int x, int y, int w, int h, COLORREF color, HFONT font) {
+    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
+    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
+    TextOutW(hdc, x + (w - sz.cx) / 2, y + (h - sz.cy) / 2, text, (int)wcslen(text));
+    SelectObject(hdc, oldFont);
+}
+
+// === Custom Dialog Implementation ===
+LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            // Enable blur behind effect for dialog
+            EnableBlurBehind(hwnd);
+            SetTimer(hwnd, 1, 16, nullptr);
+            return 0;
+        }
+        case WM_TIMER: {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+            
+            // Background
+            HBRUSH bgBrush = CreateSolidBrush(COLOR_BG);
+            FillRect(memDC, &rc, bgBrush);
+            DeleteObject(bgBrush);
+            
+            // Card with rounded corners
+            DrawRoundRect(memDC, 0, 0, w, h, 16, COLOR_CARD);
+            
+            // Accent bar - color based on type
+            COLORREF accentColor = COLOR_ACCENT;
+            if (g_dialogConfig.type == DIALOG_ERROR) accentColor = RGB(255, 100, 100);
+            else if (g_dialogConfig.type == DIALOG_CONFIRM) accentColor = RGB(255, 180, 50);
+            DrawRoundRect(memDC, 0, 0, 5, h, 2, accentColor);
+            
+            // Title (use main window's subtitle font, or default if not initialized)
+            SetTextColor(memDC, COLOR_TEXT);
+            SetBkMode(memDC, TRANSPARENT);
+            HFONT titleFont = g_fontSubtitle ? g_fontSubtitle : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            HFONT oldFont = (HFONT)SelectObject(memDC, titleFont);
+            if (!g_dialogConfig.title.empty()) {
+                TextOutW(memDC, 30, 25, g_dialogConfig.title.c_str(), (int)g_dialogConfig.title.length());
+            }
+            SelectObject(memDC, oldFont);
+            
+            // Content (multi-line support, use main window's normal font)
+            HFONT contentFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            oldFont = (HFONT)SelectObject(memDC, contentFont);
+            int lineY = 70;
+            int lineH = 32;
+            
+            // Split content by \n
+            std::wstring content = g_dialogConfig.content;
+            size_t pos = 0;
+            while (pos < content.length()) {
+                size_t nextPos = content.find(L'\n', pos);
+                if (nextPos == std::wstring::npos) nextPos = content.length();
+                std::wstring line = content.substr(pos, nextPos - pos);
+                TextOutW(memDC, 25, lineY, line.c_str(), (int)line.length());
+                lineY += lineH;
+                pos = nextPos + 1;
+            }
+            SelectObject(memDC, oldFont);
+            
+            // Buttons layout
+            int btnW = 110, btnH = 42;
+            int btnY = h - 65;
+            int btn1X, btn2X, btn3X;
+            
+            if (g_dialogConfig.hasBtn3) {
+                // Three buttons: Primary | Secondary | Skip
+                btnW = 100;
+                int totalW = btnW * 3 + 30;
+                btn1X = (w - totalW) / 2;
+                btn2X = btn1X + btnW + 10;
+                btn3X = btn2X + btnW + 10;
+            } else if (g_dialogConfig.hasBtn2) {
+                // Two buttons
+                btn1X = w/2 - btnW - 15;
+                btn2X = w/2 + 15;
+            } else {
+                // Single button (centered)
+                btn1X = w/2 - btnW/2;
+                btn2X = btn1X;
+                btn3X = btn1X;
+            }
+            
+            // Button 1 (Primary - accent)
+            COLORREF btn1Bg = (g_dialogBtnHover == 0) ? RGB(110, 190, 255) : COLOR_ACCENT;
+            if (g_dialogConfig.type == DIALOG_ERROR) btn1Bg = (g_dialogBtnHover == 0) ? RGB(255, 120, 120) : RGB(220, 80, 80);
+            DrawRoundRect(memDC, btn1X, btnY, btnW, btnH, 8, btn1Bg);
+            HFONT btnFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+            oldFont = (HFONT)SelectObject(memDC, btnFont);
+            SetTextColor(memDC, RGB(0, 0, 0));
+            RECT btn1Rc = {btn1X, btnY, btn1X + btnW, btnY + btnH};
+            if (!g_dialogConfig.btn1Text.empty()) {
+                DrawTextW(memDC, g_dialogConfig.btn1Text.c_str(), (int)g_dialogConfig.btn1Text.length(), &btn1Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            
+            // Button 2 (Secondary - border style)
+            if (g_dialogConfig.hasBtn2) {
+                COLORREF btn2Bg = (g_dialogBtnHover == 1) ? RGB(70, 70, 90) : RGB(50, 50, 65);
+                DrawRoundRect(memDC, btn2X, btnY, btnW, btnH, 8, btn2Bg);
+                HPEN borderPen = CreatePen(PS_SOLID, 1, COLOR_BORDER);
+                HPEN oldPen = (HPEN)SelectObject(memDC, borderPen);
+                SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, btn2X, btnY, btn2X + btnW, btnY + btnH, 16, 16);
+                SelectObject(memDC, oldPen);
+                DeleteObject(borderPen);
+                SetTextColor(memDC, COLOR_TEXT);
+                RECT btn2Rc = {btn2X, btnY, btn2X + btnW, btnY + btnH};
+                if (!g_dialogConfig.btn2Text.empty()) {
+                    DrawTextW(memDC, g_dialogConfig.btn2Text.c_str(), (int)g_dialogConfig.btn2Text.length(), &btn2Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+            
+            // Button 3 (Tertiary - for Skip Version)
+            if (g_dialogConfig.hasBtn3) {
+                COLORREF btn3Bg = (g_dialogBtnHover == 2) ? RGB(50, 50, 60) : RGB(35, 35, 45);
+                DrawRoundRect(memDC, btn3X, btnY, btnW, btnH, 8, btn3Bg);
+                SetTextColor(memDC, COLOR_TEXT_DIM);
+                RECT btn3Rc = {btn3X, btnY, btn3X + btnW, btnY + btnH};
+                if (!g_dialogConfig.btn3Text.empty()) {
+                    DrawTextW(memDC, g_dialogConfig.btn3Text.c_str(), (int)g_dialogConfig.btn3Text.length(), &btn3Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+            }
+            
+            SelectObject(memDC, oldFont);
+            
+            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int x = LOWORD(lParam), y = HIWORD(lParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            int btnW = 110, btnH = 42;
+            int btnY = h - 65;
+            int btn1X, btn2X, btn3X;
+            
+            if (g_dialogConfig.hasBtn3) {
+                btnW = 100;
+                int totalW = btnW * 3 + 30;
+                btn1X = (w - totalW) / 2;
+                btn2X = btn1X + btnW + 10;
+                btn3X = btn2X + btnW + 10;
+            } else if (g_dialogConfig.hasBtn2) {
+                btn1X = w/2 - btnW - 15;
+                btn2X = w/2 + 15;
+                btn3X = btn2X;
+            } else {
+                btn1X = w/2 - btnW/2;
+                btn2X = btn1X;
+                btn3X = btn1X;
+            }
+            
+            int oldHover = g_dialogBtnHover;
+            if (x >= btn1X && x < btn1X + btnW && y >= btnY && y < btnY + btnH) {
+                g_dialogBtnHover = 0;
+            } else if (g_dialogConfig.hasBtn2 && x >= btn2X && x < btn2X + btnW && y >= btnY && y < btnY + btnH) {
+                g_dialogBtnHover = 1;
+            } else if (g_dialogConfig.hasBtn3 && x >= btn3X && x < btn3X + btnW && y >= btnY && y < btnY + btnH) {
+                g_dialogBtnHover = 2;
+            } else {
+                g_dialogBtnHover = -1;
+            }
+            if (oldHover != g_dialogBtnHover) InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            int x = LOWORD(lParam), y = HIWORD(lParam);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            int btnW = 110, btnH = 42;
+            int btnY = h - 65;
+            int btn1X, btn2X, btn3X;
+            
+            if (g_dialogConfig.hasBtn3) {
+                btnW = 100;
+                int totalW = btnW * 3 + 30;
+                btn1X = (w - totalW) / 2;
+                btn2X = btn1X + btnW + 10;
+                btn3X = btn2X + btnW + 10;
+            } else if (g_dialogConfig.hasBtn2) {
+                btn1X = w/2 - btnW - 15;
+                btn2X = w/2 + 15;
+                btn3X = btn2X;
+            } else {
+                btn1X = w/2 - btnW/2;
+                btn2X = btn1X;
+                btn3X = btn1X;
+            }
+            
+            if (x >= btn1X && x < btn1X + btnW && y >= btnY && y < btnY + btnH) {
+                g_dialogResult = 1;
+                g_dialogClosed = true;
+                DestroyWindow(hwnd);
+            } else if (g_dialogConfig.hasBtn2 && x >= btn2X && x < btn2X + btnW && y >= btnY && y < btnY + btnH) {
+                g_dialogResult = 2;
+                g_dialogClosed = true;
+                DestroyWindow(hwnd);
+            } else if (g_dialogConfig.hasBtn3 && x >= btn3X && x < btn3X + btnW && y >= btnY && y < btnY + btnH) {
+                g_dialogResult = 3;
+                g_dialogClosed = true;
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        case WM_KEYDOWN: {
+            if (wParam == VK_ESCAPE) {
+                g_dialogResult = false;
+                g_dialogClosed = true;
+                DestroyWindow(hwnd);
+            } else if (wParam == VK_RETURN) {
+                g_dialogResult = true;
+                g_dialogClosed = true;
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        case WM_DESTROY: {
+            KillTimer(hwnd, 1);
+            g_dialogHwnd = nullptr;
+            // Don't call PostQuitMessage - it would affect the main window's message loop
+            // The dialog's message loop exits via g_dialogClosed flag
+            return 0;
+        }
+        case WM_CLOSE: {
+            g_dialogResult = 0;
+            g_dialogClosed = true;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool ShowCustomDialog(const DialogConfig& config) {
+    g_dialogConfig = config;
+    g_dialogBtnHover = -1;
+    
+    // Calculate dialog size based on content
+    int lineCount = 1;
+    for (size_t i = 0; i < config.content.length(); i++) {
+        if (config.content[i] == L'\n') lineCount++;
+    }
+    g_dialogWidth = 520;
+    g_dialogHeight = 160 + lineCount * 32 + 30;
+    if (g_dialogHeight < 220) g_dialogHeight = 220;
+    
+    // Register window class (only once)
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = DialogProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"VRCLyricsDialog_Class";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    
+    // Center on parent window (or screen if no parent)
+    int x, y;
+    if (g_hwnd && IsWindow(g_hwnd)) {
+        RECT parentRect;
+        GetWindowRect(g_hwnd, &parentRect);
+        int parentW = parentRect.right - parentRect.left;
+        int parentH = parentRect.bottom - parentRect.top;
+        x = parentRect.left + (parentW - g_dialogWidth) / 2;
+        y = parentRect.top + (parentH - g_dialogHeight) / 2;
+    } else {
+        // Fallback to screen center
+        int screenW = GetSystemMetrics(SM_CXSCREEN);
+        int screenH = GetSystemMetrics(SM_CYSCREEN);
+        x = (screenW - g_dialogWidth) / 2;
+        y = (screenH - g_dialogHeight) / 2;
+    }
+    
+    g_dialogHwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"VRCLyricsDialog_Class",
+        config.title.c_str(),
+        WS_POPUP,
+        x, y, g_dialogWidth, g_dialogHeight,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    
+    if (!g_dialogHwnd) {
+        // Window creation failed
+        return false;
+    }
+    
+    // Rounded corners
+    typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (hDwm) {
+        auto fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        if (fn) {
+            int corner = 2;
+            fn(g_dialogHwnd, 33, &corner, sizeof(corner));
+        }
+        FreeLibrary(hDwm);
+    }
+    
+    SetLayeredWindowAttributes(g_dialogHwnd, 0, 255, LWA_ALPHA);
+    ShowWindow(g_dialogHwnd, SW_SHOW);
+    SetForegroundWindow(g_dialogHwnd);
+    UpdateWindow(g_dialogHwnd);
+    
+    // Message loop - only process messages for this dialog
+    MSG msg;
+    g_dialogClosed = false;
+    while (!g_dialogClosed) {
+        // Use GetMessage with dialog hwnd to only get dialog messages
+        BOOL ret = GetMessageW(&msg, g_dialogHwnd, 0, 0);
+        if (ret == 0 || ret == -1) {
+            // WM_QUIT received or error - exit loop
+            break;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    
+    // Ensure dialog is destroyed
+    if (g_dialogHwnd && IsWindow(g_dialogHwnd)) {
+        DestroyWindow(g_dialogHwnd);
+        g_dialogHwnd = nullptr;
+    }
+    
+    return g_dialogResult;
+}
+
+// Convenience functions
+bool ShowInfoDialog(const std::wstring& title, const std::wstring& content) {
+    DialogConfig config;
+    config.type = DIALOG_INFO;
+    config.title = title;
+    config.content = content;
+    config.btn1Text = L"\x786E\x5B9A";  // 确定
+    config.hasBtn2 = false;
+    return ShowCustomDialog(config);
+}
+
+bool ShowErrorDialog(const std::wstring& title, const std::wstring& content) {
+    DialogConfig config;
+    config.type = DIALOG_ERROR;
+    config.title = title;
+    config.content = content;
+    config.btn1Text = L"\x786E\x5B9A";  // 确定
+    config.hasBtn2 = false;
+    return ShowCustomDialog(config);
+}
+
+bool ShowConfirmDialog(const std::wstring& title, const std::wstring& content, const std::wstring& btnYes, const std::wstring& btnNo) {
+    DialogConfig config;
+    config.type = DIALOG_CONFIRM;
+    config.title = title;
+    config.content = content;
+    config.btn1Text = btnYes;
+    config.btn2Text = btnNo;
+    config.hasBtn2 = true;
+    return ShowCustomDialog(config) == 1;
+}
+
+// Update dialog with 3 buttons: Update | Cancel | Skip this version
+// Returns: 0=cancel/closed, 1=update, 2=cancel, 3=skip
+int ShowUpdateDialog(const std::wstring& title, const std::wstring& content) {
+    DialogConfig config;
+    config.type = DIALOG_UPDATE;
+    config.title = title;
+    config.content = content;
+    config.btn1Text = L"\x66F4\x65B0";  // 更新
+    config.btn2Text = L"\x53D6\x6D88";  // 取消
+    config.btn3Text = L"\x8DF3\x8FC7";  // 跳过
+    config.hasBtn2 = true;
+    config.hasBtn3 = true;
+    return ShowCustomDialog(config);
+}
+
+bool ShowFirstRunDialog() {
+    DialogConfig config;
+    config.type = DIALOG_INFO;
+    config.title = L"VRChat Lyrics Display";
+    
+    // Check if running as admin
+    bool isAdmin = IsRunningAsAdmin();
+    std::wstring content;
+    if (!isAdmin) {
+        content = L"\x5EFA\x8BAE\x4EE5\x7BA1\x7406\x5458\x8EAB\x4EFD\x8FD0\x884C\x4EE5\x4FDD\x8BC1\x529F\x80FD\x6B63\x5E38\n\n";
+    }
+    content += L"\x8BF7\x9009\x62E9\x5173\x95ED\x65B9\x5F0F:\n";
+    content += L"\x2022 \x6700\x5C0F\x5316\x5230\x6258\x76D8 \x2212 \x7EE7\x7EED\x540E\x53F0\x8FD0\x884C\n";
+    content += L"\x2022 \x76F4\x63A5\x9000\x51FA \x2212 \x5173\x95ED\x7A0B\x5E8F\n\n";
+    content += L"\x53EF\x5728\x8BBE\x7F6E\x4E2D\x968F\x65F6\x66F4\x6539";
+    config.content = content;
+    config.btn1Text = L"\x6258\x76D8";  // 托盘
+    config.btn2Text = L"\x9000\x51FA";    // 退出
+    config.hasBtn2 = true;
+    return ShowCustomDialog(config);
+}
+// === End Custom Dialog ===
+
 void DrawTextRight(HDC hdc, const wchar_t* text, int rightX, int y, COLORREF color, HFONT font) {
     SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
     HFONT oldFont = (HFONT)SelectObject(hdc, font);
@@ -1130,7 +1863,8 @@ void DrawButtonAnim(HDC hdc, int x, int y, int w, int h, const wchar_t* text, An
     SelectObject(hdc, oldPen);
     DeleteObject(borderPen);
     
-    DrawTextCentered(hdc, text, x + w/2, y + (h - 18)/2, accent ? RGB(0,0,0) : COLOR_TEXT, g_fontNormal);
+    // Center text both horizontally and vertically
+    DrawTextCenteredBoth(hdc, text, x, y, w, h, accent ? RGB(0,0,0) : COLOR_TEXT, g_fontNormal);
 }
 
 void DrawTitleBarButton(HDC hdc, int x, int y, int size, const wchar_t* symbol, Animation& anim) {
@@ -1170,16 +1904,67 @@ void OnPaint(HWND hwnd) {
     HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
     
-    // Background gradient
+    // Background gradient (DeepBlue theme) with rounded corners
+    int cornerRadius = 16;  // Slightly larger to fully cover DWM corners
     for (int y = 0; y < h; y++) {
-        int gray = (int)(18 + 6 * (double)y / h);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(gray, gray, gray + 6));
-        MoveToEx(memDC, 0, y, nullptr); LineTo(memDC, w, y);
+        double t = (double)y / h;
+        int r = (int)(GetRValue(COLOR_BG_START) + (GetRValue(COLOR_BG_END) - GetRValue(COLOR_BG_START)) * t);
+        int g = (int)(GetGValue(COLOR_BG_START) + (GetGValue(COLOR_BG_END) - GetGValue(COLOR_BG_START)) * t);
+        int b = (int)(GetBValue(COLOR_BG_START) + (GetBValue(COLOR_BG_END) - GetBValue(COLOR_BG_START)) * t);
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
+        
+        // Calculate start X for rounded corners at top and bottom
+        int startX = 0, endX = w;
+        if (y < cornerRadius) {
+            // Top corners - use circle equation to determine start position
+            int dy = cornerRadius - y;
+            int offset = cornerRadius - (int)sqrt((double)(cornerRadius * cornerRadius - dy * dy));
+            if (offset < 0) offset = 0;
+            startX = offset;
+            // Right corner
+            int rightStart = w - offset;
+            // Draw left part (skip corner)
+            MoveToEx(memDC, startX, y, nullptr); LineTo(memDC, rightStart, y);
+        } else if (y >= h - cornerRadius) {
+            // Bottom corners
+            int dy = y - (h - cornerRadius);
+            int offset = cornerRadius - (int)sqrt((double)(cornerRadius * cornerRadius - dy * dy));
+            if (offset < 0) offset = 0;
+            startX = offset;
+            int rightStart = w - offset;
+            MoveToEx(memDC, startX, y, nullptr); LineTo(memDC, rightStart, y);
+        } else {
+            // Middle area - full width
+            MoveToEx(memDC, 0, y, nullptr); LineTo(memDC, w, y);
+        }
         DeleteObject(pen);
     }
     
-    // Title Bar
-    DrawRoundRect(memDC, 0, 0, w, TITLEBAR_H + 5, 0, COLOR_TITLEBAR);
+    // Title Bar with gradient (DeepBlue theme) - respecting rounded corners
+    for (int y = 0; y < TITLEBAR_H + 5; y++) {
+        double t = (double)y / (TITLEBAR_H + 5);
+        int r = (int)(GetRValue(COLOR_TITLEBAR) + (GetRValue(COLOR_BG_START) - GetRValue(COLOR_TITLEBAR)) * t);
+        int g = (int)(GetGValue(COLOR_TITLEBAR) + (GetGValue(COLOR_BG_START) - GetGValue(COLOR_TITLEBAR)) * t);
+        int b = (int)(GetBValue(COLOR_TITLEBAR) + (GetBValue(COLOR_BG_START) - GetBValue(COLOR_TITLEBAR)) * t);
+        HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
+        
+        // Respect rounded corners at top
+        if (y < cornerRadius) {
+            int dy = cornerRadius - y;
+            int offset = cornerRadius - (int)sqrt((double)(cornerRadius * cornerRadius - dy * dy));
+            if (offset < 0) offset = 0;
+            MoveToEx(memDC, offset, y, nullptr); LineTo(memDC, w - offset, y);
+        } else {
+            MoveToEx(memDC, 0, y, nullptr); LineTo(memDC, w, y);
+        }
+        DeleteObject(pen);
+    }
+    // Title bar glow line (skip corners)
+    HPEN glowPen = CreatePen(PS_SOLID, 1, COLOR_ACCENT_GLOW);
+    HPEN oldGlowPen = (HPEN)SelectObject(memDC, glowPen);
+    MoveToEx(memDC, cornerRadius, TITLEBAR_H + 4, nullptr); LineTo(memDC, w - cornerRadius, TITLEBAR_H + 4);
+    SelectObject(memDC, oldGlowPen);
+    DeleteObject(glowPen);
     DrawTextLeft(memDC, L"\x266B \x97F3\x4E50\x663E\x793A", 25, 18, COLOR_TEXT, g_fontSubtitle);
     
     // Update button (between version and minimize)
@@ -1231,7 +2016,7 @@ void OnPaint(HWND hwnd) {
     int rowY = contentY + 55;
     
     int checkboxX = CARD_PADDING + 18;
-    int checkboxSize = 22;
+    int checkboxSize = 26;
     
     if (g_currentTab == 0) {
         // === MAIN TAB: Platform Status, Connect, Launch ===
@@ -1283,80 +2068,144 @@ void OnPaint(HWND hwnd) {
         DrawTextLeft(memDC, L"\x7F51\x6613\x4E91", box2X + 8, rowY + 28, g_neteaseConnected ? COLOR_TEXT : COLOR_TEXT_DIM, g_fontSmall);
         
         // === Connect Button ===
-        rowY += 55;
-        DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 38, 
+        rowY += 60;
+        DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 42, 
             g_isConnected ? L"\x91CD\x65B0\x8FDE\x63A5" : L"\x8FDE\x63A5", g_btnConnectAnim, g_isConnected);
         
         // === Launch Netease Button (only when platform is Netease) ===
         if (!g_neteaseConnected) {
-            rowY += 45;
-            DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 32,
+            rowY += 55;
+            DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 36,
                 L"\x542F\x52A8\x7F51\x6613\x4E91\x97F3\x4E50", g_btnLaunchAnim, false);
         }
     } else {
         // === SETTINGS TAB: IP, Port, Checkboxes ===
         DrawTextLeft(memDC, L"OSC IP:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontSmall);
-        DrawRoundRect(memDC, CARD_PADDING + 18, rowY + 22, leftColW - 36, 32, 6, COLOR_EDIT_BG);
-        DrawTextLeft(memDC, g_oscIp.c_str(), CARD_PADDING + 30, rowY + 26, COLOR_TEXT, g_fontNormal);
+        DrawRoundRect(memDC, CARD_PADDING + 18, rowY + 24, leftColW - 36, 36, 6, COLOR_EDIT_BG);
+        DrawTextLeft(memDC, g_oscIp.c_str(), CARD_PADDING + 30, rowY + 30, COLOR_TEXT, g_fontNormal);
         
-        rowY += 70;
+        rowY += 75;
         DrawTextLeft(memDC, L"OSC \x7AEF\x53E3:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontSmall);
-        DrawRoundRect(memDC, CARD_PADDING + 18, rowY + 22, leftColW - 36, 32, 6, COLOR_EDIT_BG);
+        DrawRoundRect(memDC, CARD_PADDING + 18, rowY + 24, leftColW - 36, 36, 6, COLOR_EDIT_BG);
         wchar_t portStr[16];
         swprintf_s(portStr, L"%d", g_oscPort);
-        DrawTextLeft(memDC, portStr, CARD_PADDING + 30, rowY + 26, COLOR_TEXT, g_fontNormal);
+        DrawTextLeft(memDC, portStr, CARD_PADDING + 30, rowY + 30, COLOR_TEXT, g_fontNormal);
         
         // === Checkbox: Show Performance ===
-        rowY += 65;
+        rowY += 70;
         COLORREF cbBg = g_showPerfOnPause ? RGB(88, 166, 255) : RGB(50, 50, 65);
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
         
         if (g_showPerfOnPause) {
             HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
             HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 5, rowY + 11, nullptr);
-            LineTo(memDC, checkboxX + 8, rowY + 16);
-            LineTo(memDC, checkboxX + 17, rowY + 6);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
             SelectObject(memDC, oldTickPen);
             DeleteObject(tickPen);
         }
-        DrawTextLeft(memDC, L"\x6682\x505C\x7EDF\x8BA1", checkboxX + 28, rowY + 2, COLOR_TEXT, g_fontNormal);
+        DrawTextVCentered(memDC, L"\x6682\x505C\x7EDF\x8BA1", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
         
         // === Checkbox: Auto Update ===
-        rowY += 32;
+        rowY += 38;
         COLORREF cbBg2 = g_autoUpdate ? RGB(88, 166, 255) : RGB(50, 50, 65);
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg2);
         
         if (g_autoUpdate) {
             HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
             HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 5, rowY + 11, nullptr);
-            LineTo(memDC, checkboxX + 8, rowY + 16);
-            LineTo(memDC, checkboxX + 17, rowY + 6);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
             SelectObject(memDC, oldTickPen);
             DeleteObject(tickPen);
         }
-        DrawTextLeft(memDC, L"\x81EA\x52A8\x66F4\x65B0", checkboxX + 28, rowY + 2, COLOR_TEXT, g_fontNormal);
+        DrawTextVCentered(memDC, L"\x81EA\x52A8\x66F4\x65B0", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
         
         // === Checkbox: Show Platform ===
-        rowY += 32;
+        rowY += 38;
         COLORREF cbBg3 = g_showPlatform ? RGB(88, 166, 255) : RGB(50, 50, 65);
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg3);
         
         if (g_showPlatform) {
             HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
             HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 5, rowY + 11, nullptr);
-            LineTo(memDC, checkboxX + 8, rowY + 16);
-            LineTo(memDC, checkboxX + 17, rowY + 6);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
             SelectObject(memDC, oldTickPen);
             DeleteObject(tickPen);
         }
-        DrawTextLeft(memDC, L"\x663E\x793A\x5E73\x53F0", checkboxX + 28, rowY + 2, COLOR_TEXT, g_fontNormal);
+        DrawTextVCentered(memDC, L"\x663E\x793A\x5E73\x53F0", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
+        
+        // === Checkbox: Minimize to Tray ===
+        rowY += 38;
+        COLORREF cbBg4 = g_minimizeToTray ? RGB(88, 166, 255) : RGB(50, 50, 65);
+        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg4);
+        
+        if (g_minimizeToTray) {
+            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
+            SelectObject(memDC, oldTickPen);
+            DeleteObject(tickPen);
+        }
+        DrawTextVCentered(memDC, L"\x6700\x5C0F\x5316\x5230\x6258\x76D8", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
+        
+        // === Checkbox: Auto Start ===
+        rowY += 38;
+        COLORREF cbBg5 = g_autoStart ? COLOR_ACCENT : RGB(50, 55, 70);
+        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg5);
+        
+        if (g_autoStart) {
+            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
+            SelectObject(memDC, oldTickPen);
+            DeleteObject(tickPen);
+        }
+        DrawTextVCentered(memDC, L"\x5F00\x673A\x81EA\x542F", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
+        
+        // === Checkbox: Run as Admin ===
+        rowY += 38;
+        COLORREF cbBg6 = g_runAsAdmin ? COLOR_ACCENT : RGB(50, 55, 70);
+        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg6);
+        
+        if (g_runAsAdmin) {
+            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
+            SelectObject(memDC, oldTickPen);
+            DeleteObject(tickPen);
+        }
+        DrawTextVCentered(memDC, L"\x7BA1\x7406\x5458\x542F\x52A8", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
+        
+        // === Admin Status ===
+        rowY += 38;
+        bool isAdmin = IsRunningAsAdmin();
+        if (isAdmin) {
+            DrawTextLeft(memDC, L"\x2705 \x5DF2\x662F\x7BA1\x7406\x5458\x6743\x9650", checkboxX, rowY + 4, RGB(100, 200, 120), g_fontSmall);
+        } else {
+            COLORREF linkColor = g_btnAdminHover ? RGB(130, 200, 255) : COLOR_ACCENT;
+            DrawTextLeft(memDC, L"\x26A0 \x70B9\x51FB\x4EE5\x7BA1\x7406\x5458\x8FD0\x884C", checkboxX, rowY + 4, linkColor, g_fontSmall);
+            HPEN linkPen = CreatePen(PS_SOLID, 1, linkColor);
+            HPEN oldPen = (HPEN)SelectObject(memDC, linkPen);
+            MoveToEx(memDC, checkboxX, rowY + 24, nullptr);
+            LineTo(memDC, checkboxX + 160, rowY + 24);
+            SelectObject(memDC, oldPen);
+            DeleteObject(linkPen);
+        }
         
         // === Export Log Button ===
-        rowY += 45;
-        DrawButtonAnim(memDC, checkboxX, rowY, leftColW - 36 - checkboxX, 32, 
+        rowY += 55;
+        DrawButtonAnim(memDC, checkboxX, rowY, leftColW - 36 - checkboxX, 38, 
             L"\x5BFC\x51FA\x65E5\x5FD7", g_btnExportLogAnim, false);
     }
     
@@ -1414,10 +2263,10 @@ void OnPaint(HWND hwnd) {
     
     // Draw OSC message preview with word wrap
     int msgY = contentY + 55;
-    int msgX = rightColX + 25;
+    int msgX = rightColX + 18;
     int lineHeight = 28;
-    int maxLines = (previewH - 90) / lineHeight;
-    int maxTextWidth = rightColW - 50;
+    int maxLines = (previewH - 100) / lineHeight;  // Leave more space at bottom
+    int maxTextWidth = rightColW - 40;  // Ensure text fits within card
     
     int lineCount = 0;
     
@@ -1479,11 +2328,11 @@ void OnPaint(HWND hwnd) {
     wchar_t byteBuf[64];
     swprintf_s(byteBuf, L"\x5B57\x8282\x6570: %zd/144", utf8Msg.length());
     COLORREF byteColor = utf8Msg.length() > 144 ? RGB(255, 100, 100) : COLOR_TEXT_DIM;
-    DrawTextLeft(memDC, byteBuf, rightColX + 18, contentY + previewH - 35, byteColor, g_fontSmall);
+    DrawTextLeft(memDC, byteBuf, rightColX + 18, contentY + previewH - 40, byteColor, g_fontSmall);
     
-    // Warning if over limit
+    // Warning if over limit - show next to byte count if there's space
     if (utf8Msg.length() > 144) {
-        DrawTextLeft(memDC, L"\x26A0 \x8D85\x8FC7OSC\x9650\x5236", rightColX + 140, contentY + previewH - 35, RGB(255, 180, 50), g_fontSmall);
+        DrawTextLeft(memDC, L"\x26A0\x8D85\x9650", rightColX + 130, contentY + previewH - 40, RGB(255, 180, 50), g_fontSmall);
     }
     
     // Update tray
@@ -1522,6 +2371,7 @@ void Disconnect() {
     g_isConnected = false;
     g_moeKoeConnected = false;
     g_neteaseConnected = false;
+    g_needsRedraw = true;
     g_activePlatform = -1;
     g_pendingTitle.clear();
     g_pendingArtist.clear();
@@ -1541,9 +2391,9 @@ void Connect() {
     g_moeKoeConnected = false;
     g_neteaseConnected = false;
     g_activePlatform = -1;  // No active platform yet
-    g_pendingTitle = L"\x6B63\x5728\x8FDE\x63A5...";
-    g_pendingArtist = L"";
-    g_pendingLyrics.clear();
+                g_pendingTitle = L"\x6B63\x5728\x8FDE\x63A5...";
+                g_pendingArtist = L"";
+                g_needsRedraw = true;    g_pendingLyrics.clear();
     InvalidateRect(g_hwnd, nullptr, FALSE);
     
     // Run connection in background thread to avoid blocking UI
@@ -1558,6 +2408,7 @@ void Connect() {
         });
         if (g_moeKoeClient->connect()) {
             g_moeKoeConnected = true;
+            g_needsRedraw = true;
             MainDebugLog("[Connect] MoeKoe connected!");
         } else {
             MainDebugLog("[Connect] MoeKoe connection failed");
@@ -1573,6 +2424,7 @@ void Connect() {
         });
         if (g_neteaseClient->connect()) {
             g_neteaseConnected = true;
+            g_needsRedraw = true;
             MainDebugLog("[Connect] Netease connected!");
         } else {
             MainDebugLog("[Connect] Netease connection failed");
@@ -1586,6 +2438,7 @@ void Connect() {
         if (!g_isConnected) {
             g_pendingTitle = L"\x8FDE\x63A5\x5931\x8D25";
             g_pendingArtist = L"\x8BF7\x542F\x52A8 MoeKoeMusic \x6216\x7F51\x6613\x4E91\x97F3\x4E50";
+            g_needsRedraw = true;
         } else {
             // Set active platform to the one that's connected
             if (g_moeKoeConnected) g_activePlatform = 0;
@@ -1601,6 +2454,18 @@ void Connect() {
 
 bool IsInRect(int x, int y, int rx, int ry, int rw, int rh) {
     return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+bool IsAnimationActive() {
+    // Check if any animation is still updating
+    if (fabs(g_btnConnectAnim.value - g_btnConnectAnim.target) > 0.001) return true;
+    if (fabs(g_btnApplyAnim.value - g_btnApplyAnim.target) > 0.001) return true;
+    if (fabs(g_btnCloseAnim.value - g_btnCloseAnim.target) > 0.001) return true;
+    if (fabs(g_btnMinAnim.value - g_btnMinAnim.target) > 0.001) return true;
+    if (fabs(g_btnUpdateAnim.value - g_btnUpdateAnim.target) > 0.001) return true;
+    if (fabs(g_btnLaunchAnim.value - g_btnLaunchAnim.target) > 0.001) return true;
+    if (fabs(g_btnExportLogAnim.value - g_btnExportLogAnim.target) > 0.001) return true;
+    return false;
 }
 
 void UpdateAnimations() {
@@ -1625,22 +2490,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CREATE: {
             MainDebugLog("[Main] WM_CREATE - Application starting");
             // Fonts - larger for high DPI
-            g_fontTitle = CreateFontW(42, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
+            g_fontTitle = CreateFontW(48, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-            g_fontSubtitle = CreateFontW(28, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            g_fontSubtitle = CreateFontW(32, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-            g_fontNormal = CreateFontW(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            g_fontNormal = CreateFontW(26, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-            g_fontSmall = CreateFontW(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            g_fontSmall = CreateFontW(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-            g_fontLyric = CreateFontW(24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            g_fontLyric = CreateFontW(28, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-            g_fontLabel = CreateFontW(20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            g_fontLabel = CreateFontW(24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
             
             g_brushBg = CreateSolidBrush(COLOR_BG);
             g_brushCard = CreateSolidBrush(COLOR_CARD);
             g_brushEditBg = CreateSolidBrush(COLOR_EDIT_BG);
+            
+            // Enable glass effect
+            EnableBlurBehind(hwnd);
             
             // Create edit controls - positions must match OnPaint drawing
             // Note: IP and Port editing is done via config file
@@ -1679,7 +2547,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             bool oldConnect = g_btnConnectHover, oldApply = g_btnApplyHover;
             bool oldClose = g_btnCloseHover, oldMin = g_btnMinHover, oldUpdate = g_btnUpdateHover, oldLaunch = g_btnLaunchHover;
-            bool oldExportLog = g_btnExportLogHover;
+            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover;
             bool oldTabHover[2] = {g_tabHover[0], g_tabHover[1]};
             bool oldMkHover = g_moeKoeBoxHover, oldNcHover = g_neteaseBoxHover;
             
@@ -1693,8 +2561,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Button hover detection (Main Tab only)
             if (g_currentTab == 0) {
                 int platformRowY = rowY;
-                int btnY = rowY + 55;
-                int launchBtnY = btnY + 45;
+                int btnY = rowY + 60;
+                int launchBtnY = btnY + 55;
                 
                 // Platform box hover detection
                 int boxW = (leftColW - 36 - 10) / 2;
@@ -1703,19 +2571,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_moeKoeBoxHover = IsInRect(x, y, box1X, platformRowY + 22, boxW, 32);
                 g_neteaseBoxHover = IsInRect(x, y, box2X, platformRowY + 22, boxW, 32);
                 
-                g_btnConnectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 38);
-                g_btnLaunchHover = !g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 32);
+                g_btnConnectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 42);
+                g_btnLaunchHover = !g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36);
                 g_btnExportLogHover = false;
+                g_btnAdminHover = false;
             } else {
                 g_btnConnectHover = false;
                 g_btnLaunchHover = false;
                 g_moeKoeBoxHover = false;
                 g_neteaseBoxHover = false;
-                // Settings tab - export log button
+                // Settings tab - export log button and admin link
                 // rowY starts at contentY + 55
-                // IP: rowY, Port: rowY + 70, Checkbox: rowY + 135, AutoUpdate: rowY + 167, ShowPlatform: rowY + 199
-                // Export button: rowY + 244 (after showPlatform + 45)
-                int exportLogY = rowY + 70 + 65 + 32 + 32 + 45;  // = rowY + 244
+                // IP: rowY, Port: rowY + 70, Perf: rowY + 135, AutoUpdate: rowY + 167, ShowPlatform: rowY + 199, Tray: rowY + 231, AutoStart: rowY + 263, RunAsAdmin: rowY + 295
+                // Admin status: rowY + 330, Export button: rowY + 380
+                int adminY = rowY + 70 + 65 + 32 + 32 + 32 + 32 + 35;  // RunAsAdmin + 35
+                int exportLogY = adminY + 50;
+                g_btnAdminHover = !IsRunningAsAdmin() && IsInRect(x, y, checkboxX, adminY, 150, 22);
                 g_btnExportLogHover = IsInRect(x, y, checkboxX, exportLogY, leftColW - 36 - checkboxX, 32);
             }
             
@@ -1728,7 +2599,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 oldClose != g_btnCloseHover || oldMin != g_btnMinHover || oldUpdate != g_btnUpdateHover || 
                 oldLaunch != g_btnLaunchHover || oldExportLog != g_btnExportLogHover ||
                 oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] ||
-                g_moeKoeBoxHover != oldMkHover || g_neteaseBoxHover != oldNcHover) {
+                g_moeKoeBoxHover != oldMkHover || g_neteaseBoxHover != oldNcHover ||
+                g_btnAdminHover != oldAdmin) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -1756,23 +2628,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }
                         msg += changelog + L"\n\n";
                     }
-                    msg += L"\x662F\x5426\x81EA\x52A8\x4E0B\x8F7D\x5E76\x66F4\x65B0\xFF1F\n\x66F4\x65B0\x540E\x7A0B\x5E8F\x5C06\x81EA\x52A8\x91CD\x542F\xFF0C\x914D\x7F6E\x6587\x4EF6\x5C06\x88AB\x4FDD\x7559\x3002";
+                    msg += L"\x66F4\x65B0\x540E\x7A0B\x5E8F\x5C06\x81EA\x52A8\x91CD\x542F";
                     
-                    if (MessageBoxW(hwnd, msg.c_str(), L"\x66F4\x65B0\x63D0\x793A", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    int result = ShowUpdateDialog(L"\x66F4\x65B0\x63D0\x793A", msg);
+                    if (result == 1) {
+                        // Update button clicked
                         CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
                             if (DownloadAndInstallUpdate()) {
-                                // Success - show message and exit
-                                MessageBoxW(g_hwnd, 
-                                    L"\x4E0B\x8F7D\x5B8C\x6210\xFF01\n\x7A0B\x5E8F\x5373\x5C06\x5173\x95ED\x5E76\x81EA\x52A8\x66F4\x65B0\x3002",
-                                    L"\x66F4\x65B0", MB_OK | MB_ICONINFORMATION);
+                                ShowInfoDialog(L"\x66F4\x65B0", L"\x4E0B\x8F7D\x5B8C\x6210\xFF01\n\x7A0B\x5E8F\x5373\x5C06\x5173\x95ED\x5E76\x81EA\x52A8\x66F4\x65B0\x3002");
                                 PostMessage(g_hwnd, WM_CLOSE, 0, 0);
                             } else {
-                                MessageBoxW(g_hwnd, 
-                                    L"\x4E0B\x8F7D\x5931\x8D25\xFF0C\x8BF7\x624B\x52A8\x4E0B\x8F7D\x66F4\x65B0\x3002",
-                                    L"\x9519\x8BEF", MB_OK | MB_ICONERROR);
+                                ShowErrorDialog(L"\x9519\x8BEF", L"\x4E0B\x8F7D\x5931\x8D25\xFF0C\x8BF7\x624B\x52A8\x4E0B\x8F7D\x66F4\x65B0\x3002");
                             }
                             return 0;
                         }, nullptr, 0, nullptr);
+                    } else if (result == 3) {
+                        // Skip this version
+                        g_skipVersion = g_latestVersion;
+                        g_updateAvailable = false;
+                        SaveConfig(L"config_gui.json");
+                        InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 } else if (!g_checkingUpdate) {
                     // Manual check for updates
@@ -1808,7 +2683,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int tabY = contentY + 10;  // Tabs inside card
             int rowY = contentY + 55;
             int checkboxX = CARD_PADDING + 18;
-            int checkboxSize = 22;
+            int checkboxSize = 26;
             
             // === Tab clicks ===
             int tabW = 80;
@@ -1994,12 +2869,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 if (alreadyRunning) {
                     // Netease is already running - need to restart with debug port
-                    int result = MessageBoxW(hwnd, 
+                    bool result = ShowConfirmDialog(L"\x63D0\x793A", 
                         L"\x7F51\x6613\x4E91\x97F3\x4E50\x5DF2\x5728\x8FD0\x884C\x4E2D\x3002\n\n"
                         L"\x9700\x8981\x91CD\x65B0\x542F\x52A8\x624D\x80FD\x542F\x7528\x8C03\x8BD5\x7AEF\x53E3\x3002\n\n"
                         L"\x662F\x5426\x5173\x95ED\x5E76\x91CD\x65B0\x542F\x52A8\xFF1F",
-                        L"\x63D0\x793A", MB_YESNO | MB_ICONQUESTION);
-                    if (result == IDYES) {
+                        L"\x91CD\x542F", L"\x53D6\x6D88");
+                    if (result) {
                         // Kill all cloudmusic.exe processes
                         HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                         if (hSnap != INVALID_HANDLE_VALUE) {
@@ -2034,9 +2909,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         CloseHandle(pi.hThread);
                         
                         // Wait for Netease to start, then auto-connect
-                        g_pendingTitle = L"\x7B49\x5F85\x7F51\x6613\x4E91\x542F\x52A8...";
-                        g_pendingArtist = L"";
-                        InvalidateRect(hwnd, nullptr, FALSE);
+                                    g_pendingTitle = L"\x7B49\x5F85\x7F51\x6613\x4E91\x542F\x52A8...";
+                                    g_pendingArtist = L"";
+                                    g_needsRedraw = true;                        InvalidateRect(hwnd, nullptr, FALSE);
                         
                         CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
                             Sleep(5000);  // Wait 5 seconds for Netease to initialize
@@ -2047,25 +2922,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }, nullptr, 0, nullptr);
                     }
                 } else {
-                    MessageBoxW(hwnd, L"\x672A\x627E\x5230\x7F51\x6613\x4E91\x97F3\x4E50\xFF0C\x8BF7\x624B\x52A8\x542F\x52A8\x5E76\x6DFB\x52A0\x53C2\x6570\xFF1A\n--remote-debugging-port=9222", 
-                               L"\x9519\x8BEF", MB_OK | MB_ICONWARNING);
+                    ShowErrorDialog(L"\x9519\x8BEF", L"\x672A\x627E\x5230\x7F51\x6613\x4E91\x97F3\x4E50\xFF0C\x8BF7\x624B\x52A8\x542F\x52A8\x5E76\x6DFB\x52A0\x53C2\x6570:\n--remote-debugging-port=9222");
                 }
             }
         } else {
             // === SETTINGS TAB click handling ===
             // IP and Port input fields - show hint to edit config file
             int ipRowY = rowY;
-            int portRowY = rowY + 70;
-            int checkboxRowY = rowY + 70 + 65;
-            int autoUpdateRowY = checkboxRowY + 32;
-            int showPlatformRowY = autoUpdateRowY + 32;
-            int exportLogRowY = showPlatformRowY + 45;
+            int portRowY = rowY + 75;
+            int checkboxRowY = rowY + 75 + 70;
+            int autoUpdateRowY = checkboxRowY + 38;
+            int showPlatformRowY = autoUpdateRowY + 38;
+            int trayRowY = showPlatformRowY + 38;
+            int autoStartRowY = trayRowY + 38;
+            int runAsAdminRowY = autoStartRowY + 38;
+            int adminStatusY = runAsAdminRowY + 38;
+            int exportLogRowY = adminStatusY + 55;
             
             // Click on IP or Port input field - show hint
-            if (IsInRect(x, y, CARD_PADDING + 18, ipRowY + 22, leftColW - 36, 32) ||
-                IsInRect(x, y, CARD_PADDING + 18, portRowY + 22, leftColW - 36, 32)) {
-                MessageBoxW(hwnd, L"\x8BF7\x7F16\x8F91 config_gui.json \x4FEE\x6539 IP \x548C\x7AEF\x53E3\n\x4FEE\x6539\x540E\x91CD\x65B0\x542F\x52A8\x7A0B\x5E8F\x751F\x6548", 
-                           L"\x63D0\x793A", MB_OK | MB_ICONINFORMATION);
+            if (IsInRect(x, y, CARD_PADDING + 18, ipRowY + 24, leftColW - 36, 36) ||
+                IsInRect(x, y, CARD_PADDING + 18, portRowY + 24, leftColW - 36, 36)) {
+                ShowInfoDialog(L"\x63D0\x793A", L"\x8BF7\x7F16\x8F91 config_gui.json \x4FEE\x6539 IP \x548C\x7AEF\x53E3\n\x4FEE\x6539\x540E\x91CD\x65B0\x542F\x52A8\x7A0B\x5E8F\x751F\x6548");
                 return 0;
             }
             // Checkbox for show performance
@@ -2089,6 +2966,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            // Checkbox for minimize to tray
+            if (IsInRect(x, y, checkboxX, trayRowY, checkboxSize, checkboxSize)) {
+                g_minimizeToTray = !g_minimizeToTray;
+                SaveConfig(L"config_gui.json");
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            // Checkbox for auto start
+            if (IsInRect(x, y, checkboxX, autoStartRowY, checkboxSize, checkboxSize)) {
+                g_autoStart = !g_autoStart;
+                SetAutoStart(g_autoStart);
+                SaveConfig(L"config_gui.json");
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            // Checkbox for run as admin
+            if (IsInRect(x, y, checkboxX, runAsAdminRowY, checkboxSize, checkboxSize)) {
+                g_runAsAdmin = !g_runAsAdmin;
+                SaveConfig(L"config_gui.json");
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            // Admin link (only if not already admin)
+            if (!IsRunningAsAdmin() && IsInRect(x, y, checkboxX, adminStatusY, 150, 22)) {
+                if (ShowConfirmDialog(L"\x7BA1\x7406\x5458\x6743\x9650", 
+                    L"\x4EE5\x7BA1\x7406\x5458\x8EAB\x4EFD\x91CD\x542F\x53EF\x4EE5\x4FDD\x8BC1\x6240\x6709\x529F\x80FD\x6B63\x5E38\x8FD0\x884C\x3002\n\n\x662F\x5426\x73B0\x5728\x91CD\x542F\xFF1F",
+                    L"\x91CD\x542F", L"\x53D6\x6D88")) {
+                    RestartAsAdmin(hwnd);
+                }
+                return 0;
+            }
             // Export log button
             if (IsInRect(x, y, checkboxX, exportLogRowY, leftColW - 36 - checkboxX, 32)) {
                 ExportLogs(hwnd);
@@ -2105,29 +3013,62 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else if (IsInRect(x, y, g_winW - 110, 14, 38, 38)) {
             ShowWindow(hwnd, SW_MINIMIZE);
         }
+        return 0;
+    }
+    
+    case WM_LBUTTONUP: if (g_dragging) { g_dragging = false; ReleaseCapture(); } return 0;
+        
+        case WM_TIMER: {
+            UpdateAnimations();
+            UpdatePerfStats();
+            
+            // Smart redraw: only redraw when needed
+            DWORD now = GetTickCount();
+            bool animActive = IsAnimationActive();
+            
+            if (animActive) {
+                // Animation running - need smooth updates
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (g_needsRedraw) {
+                // Content changed - redraw once
+                InvalidateRect(hwnd, nullptr, FALSE);
+                g_needsRedraw = false;
+            } else if (now - g_lastContentChange >= IDLE_REDRAW_INTERVAL) {
+                // Periodic refresh for time display etc.
+                InvalidateRect(hwnd, nullptr, FALSE);
+                g_lastContentChange = now;
+            }
             return 0;
         }
-        
-        case WM_LBUTTONUP: if (g_dragging) { g_dragging = false; ReleaseCapture(); } return 0;
-        
-        case WM_TIMER: 
-            UpdateAnimations(); 
-            // Always update performance stats and refresh preview
-            UpdatePerfStats();
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
         
         case WM_TRAYICON:
             if (lParam == WM_LBUTTONDBLCLK) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
             else if (lParam == WM_RBUTTONUP) {
                 POINT pt; GetCursorPos(&pt);
+                
+                // Create a popup menu with larger font support
                 HMENU menu = CreatePopupMenu();
-                AppendMenuW(menu, MF_STRING, 1, L"\x663E\x793A");
-                AppendMenuW(menu, MF_STRING, 2, L"\x9000\x51FA");
-                int cmd = TrackPopupMenu(menu, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, nullptr);
+                
+                // Set menu to use larger font via MENUINFO
+                MENUINFO mi = {0};
+                mi.cbSize = sizeof(mi);
+                mi.fMask = MIM_STYLE;
+                mi.dwStyle = MNS_NOTIFYBYPOS;  // Use position-based notification
+                SetMenuInfo(menu, &mi);
+                
+                AppendMenuW(menu, MF_STRING, 1, L"\x663E\x793A\x7A97\x53E3");  // 显示窗口
+                AppendMenuW(menu, MF_STRING, 2, L"\x9000\x51FA\x7A0B\x5E8F");  // 退出程序
+                
+                // Use TPM_LEFTBUTTON to ensure proper behavior
+                int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(menu);
+                
                 if (cmd == 1) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
-                else if (cmd == 2) PostMessage(hwnd, WM_CLOSE, 0, 0);
+                else if (cmd == 2) { 
+                    // Directly exit without showing window
+                    g_minimizeToTray = false;  // Temporarily disable minimize to tray
+                    PostMessage(hwnd, WM_CLOSE, 0, 0); 
+                }
             }
             return 0;
         
@@ -2174,7 +3115,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     std::wstring msg = L"\x5F53\x524D\x7248\x672C v" + curVer + L"\n";
                     msg += L"\x6700\x65B0\x7248\x672C v" + g_latestVersion + L"\n\n";
                     msg += L"\x5DF2\x662F\x6700\x65B0\x7248\x672C\xFF01";
-                    MessageBoxW(hwnd, msg.c_str(), L"\x68C0\x67E5\x66F4\x65B0", MB_OK | MB_ICONINFORMATION);
+                    ShowInfoDialog(L"\x68C0\x67E5\x66F4\x65B0", msg);
                 } else {
                     // New version available - show dialog with changelog
                     std::wstring msg = L"\x53D1\x73B0\x65B0\x7248\x672C v" + g_latestVersion + L"\n\n";
@@ -2186,22 +3127,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         }
                         msg += changelog + L"\n\n";
                     }
-                    msg += L"\x662F\x5426\x81EA\x52A8\x4E0B\x8F7D\x5E76\x66F4\x65B0\xFF1F\n\x66F4\x65B0\x540E\x7A0B\x5E8F\x5C06\x81EA\x52A8\x91CD\x542F\xFF0C\x914D\x7F6E\x6587\x4EF6\x5C06\x88AB\x4FDD\x7559\x3002";
+                    msg += L"\x66F4\x65B0\x540E\x7A0B\x5E8F\x5C06\x81EA\x52A8\x91CD\x542F";
                     
-                    if (MessageBoxW(hwnd, msg.c_str(), L"\x53D1\x73B0\x65B0\x7248\x672C", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    int result = ShowUpdateDialog(L"\x53D1\x73B0\x65B0\x7248\x672C", msg);
+                    if (result == 1) {
+                        // Update button clicked
                         CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
                             if (DownloadAndInstallUpdate()) {
-                                MessageBoxW(g_hwnd, 
-                                    L"\x4E0B\x8F7D\x5B8C\x6210\xFF01\n\x7A0B\x5E8F\x5373\x5C06\x5173\x95ED\x5E76\x81EA\x52A8\x66F4\x65B0\x3002",
-                                    L"\x66F4\x65B0", MB_OK | MB_ICONINFORMATION);
+                                ShowInfoDialog(L"\x66F4\x65B0", L"\x4E0B\x8F7D\x5B8C\x6210\xFF01\n\x7A0B\x5E8F\x5373\x5C06\x5173\x95ED\x5E76\x81EA\x52A8\x66F4\x65B0\x3002");
                                 PostMessage(g_hwnd, WM_CLOSE, 0, 0);
                             } else {
-                                MessageBoxW(g_hwnd, 
-                                    L"\x4E0B\x8F7D\x5931\x8D25\xFF0C\x8BF7\x624B\x52A8\x4E0B\x8F7D\x66F4\x65B0\x3002",
-                                    L"\x9519\x8BEF", MB_OK | MB_ICONERROR);
+                                ShowErrorDialog(L"\x9519\x8BEF", L"\x4E0B\x8F7D\x5931\x8D25\xFF0C\x8BF7\x624B\x52A8\x4E0B\x8F7D\x66F4\x65B0\x3002");
                             }
                             return 0;
                         }, nullptr, 0, nullptr);
+                    } else if (result == 3) {
+                        // Skip this version
+                        g_skipVersion = g_latestVersion;
+                        g_updateAvailable = false;
+                        SaveConfig(L"config_gui.json");
+                        InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 }
             }
@@ -2240,17 +3185,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
+    // Enable DPI awareness for high-resolution displays
+    typedef BOOL(WINAPI* SetProcessDPIAware_t)();
+    HMODULE hUser32 = LoadLibraryW(L"user32.dll");
+    if (hUser32) {
+        SetProcessDPIAware_t SetProcessDPIAware = (SetProcessDPIAware_t)GetProcAddress(hUser32, "SetProcessDPIAware");
+        if (SetProcessDPIAware) SetProcessDPIAware();
+        FreeLibrary(hUser32);
+    }
+    
     MainDebugLog("[WinMain] Application starting");
     InitCommonControls();
     
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"VRCLyricsDisplay_SingleInstance");
+    g_mutex = CreateMutexW(nullptr, TRUE, L"VRCLyricsDisplay_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"\x7A0B\x5E8F\x5DF2\x5728\x8FD0\x884C!", L"VRChat Lyrics Display", MB_OK | MB_ICONWARNING);
+        ShowInfoDialog(L"VRChat Lyrics Display", L"\x7A0B\x5E8F\x5DF2\x5728\x8FD0\x884C!");
         return 0;
     }
     
     InitializeCriticalSection(&g_cs);
     g_startTime = GetTickCount();
+    
+    // Check if this is first run (config file doesn't exist)
+    bool isFirstRun = (_waccess(L"config_gui.json", 0) == -1);
+    if (isFirstRun) {
+        g_minimizeToTray = ShowFirstRunDialog();
+    }
+    
     LoadConfig(L"config_gui.json");
     
     g_noLyricMsgs = LoadNoLyricMessages(L"config.json");
@@ -2322,14 +3283,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, L"VRCLyricsDisplay_Class", L"",
         WS_POPUP | WS_CLIPCHILDREN | WS_THICKFRAME, CW_USEDEFAULT, CW_USEDEFAULT, g_winW, g_winH, nullptr, nullptr, hInst, nullptr);
     
-    // Restore window position if saved
+    // Set window position: saved position or center on first run
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    
     if (g_winX >= 0 && g_winY >= 0) {
-        // Make sure window is still on screen
-        int screenW = GetSystemMetrics(SM_CXSCREEN);
-        int screenH = GetSystemMetrics(SM_CYSCREEN);
+        // Restore saved position if still on screen
         if (g_winX < screenW - 100 && g_winY < screenH - 100 && g_winX > -g_winW + 100 && g_winY > -100) {
             SetWindowPos(g_hwnd, nullptr, g_winX, g_winY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         }
+    } else {
+        // First run: center window on screen
+        int centerX = (screenW - g_winW) / 2;
+        int centerY = (screenH - g_winH) / 2;
+        SetWindowPos(g_hwnd, nullptr, centerX, centerY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
     
     HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
@@ -2368,8 +3335,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     if (g_neteaseClient) delete g_neteaseClient;
     if (g_osc) delete g_osc;
     DeleteCriticalSection(&g_cs);
-    ReleaseMutex(mutex);
-    CloseHandle(mutex);
+    if (g_mutex) {
+        ReleaseMutex(g_mutex);
+        CloseHandle(g_mutex);
+    }
     return (int)msg.wParam;
 }
 

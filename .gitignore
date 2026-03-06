@@ -22,9 +22,18 @@ node_modules/
 
 # Logs and temp
 *.log
-*.txt
 osc_logs/
 lyrics_cache/
+
+# Temp files
+compile_out.txt
+stderr.txt
+stdout.txt
+test_write.log
+*_err.txt
+*_out.txt
+*_log.txt
+*_result.txt
 
 # User config
 config.json
@@ -37,3 +46,8 @@ calibration.json
 
 # KuGouMusicApi (submodule)
 KuGouMusicApi/
+
+# Python files (old project, kept locally only)
+*.py
+requirements.txt
+start.bat
