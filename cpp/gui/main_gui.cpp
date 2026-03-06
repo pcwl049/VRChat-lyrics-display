@@ -3046,28 +3046,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else if (lParam == WM_RBUTTONUP) {
                 POINT pt; GetCursorPos(&pt);
                 
-                // Create a popup menu with larger font support
+                // Create a popup menu
                 HMENU menu = CreatePopupMenu();
-                
-                // Set menu to use larger font via MENUINFO
-                MENUINFO mi = {0};
-                mi.cbSize = sizeof(mi);
-                mi.fMask = MIM_STYLE;
-                mi.dwStyle = MNS_NOTIFYBYPOS;  // Use position-based notification
-                SetMenuInfo(menu, &mi);
                 
                 AppendMenuW(menu, MF_STRING, 1, L"\x663E\x793A\x7A97\x53E3");  // 显示窗口
                 AppendMenuW(menu, MF_STRING, 2, L"\x9000\x51FA\x7A0B\x5E8F");  // 退出程序
                 
-                // Use TPM_LEFTBUTTON to ensure proper behavior
+                // Must set foreground window before showing menu
+                SetForegroundWindow(hwnd);
                 int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(menu);
                 
                 if (cmd == 1) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
                 else if (cmd == 2) { 
-                    // Directly exit without showing window
-                    g_minimizeToTray = false;  // Temporarily disable minimize to tray
-                    PostMessage(hwnd, WM_CLOSE, 0, 0); 
+                    // Exit directly
+                    DestroyWindow(hwnd); 
                 }
             }
             return 0;
