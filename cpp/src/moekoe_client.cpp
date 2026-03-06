@@ -126,20 +126,12 @@ const std::vector<LyricLine>& MoeKoeClient::getLyrics() const {
     return lyrics_;
 }
 
-void MoeKoeClient::setSongChangeCallback(SongChangeCallback callback) {
-    song_callback_ = std::move(callback);
-}
-
-void MoeKoeClient::setStateChangeCallback(StateChangeCallback callback) {
-    state_callback_ = std::move(callback);
-}
-
 void MoeKoeClient::receiveLoop() {
     std::vector<char> buffer(4096);
     
     while (running_) {
-        DWORD read = ;
-        DWORD buffer_type = ;
+        DWORD read = 0;
+        DWORD buffer_type = 0;
         
         HRESULT result = WinHttpWebSocketReceive(websocket_, 
                                                   buffer.data(), 

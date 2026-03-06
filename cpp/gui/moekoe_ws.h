@@ -18,6 +18,7 @@ struct LyricLine {
     int startTime = 0;    // ms
     int duration = 0;     // ms
     std::wstring text;
+    std::wstring translation;  // Translated lyric (optional)
 };
 
 struct SongInfo {

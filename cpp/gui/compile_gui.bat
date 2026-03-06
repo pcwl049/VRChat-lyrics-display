@@ -18,8 +18,8 @@ if not exist ..\bin mkdir ..\bin
 
 echo [Compiling...]
 cl /std:c++20 /EHsc /W3 /O2 /MD /utf-8 ^
-    main_gui.cpp glass_window.cpp moekoe_ws.cpp ^
-    runtimeobject.lib windowsapp.lib dwmapi.lib ole32.lib user32.lib gdi32.lib shell32.lib ws2_32.lib msimg32.lib ^
+    main_gui.cpp glass_window.cpp moekoe_ws.cpp netease_ws.cpp ^
+    runtimeobject.lib windowsapp.lib dwmapi.lib ole32.lib user32.lib gdi32.lib shell32.lib ws2_32.lib msimg32.lib winhttp.lib ^
     /Fe:..\bin\MoeKoeGUI.exe
 
 if %errorlevel% equ 0 (

@@ -1,7 +1,6 @@
 #pragma once
 
-#include "types.h"
-#include <functional>
+#include "music_source.h"
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -12,27 +11,26 @@ namespace moekoe {
 /**
  * MoeKoeMusic WebSocket 客户端
  */
-class MoeKoeClient {
+class MoeKoeClient : public MusicSource {
 public:
-    using SongChangeCallback = std::function<void(const SongInfo&)>;
-    using StateChangeCallback = std::function<void(PlaybackState)>;
-    
     MoeKoeClient(const std::string& host = "127.0.0.1", int port = 6520);
-    ~MoeKoeClient();
+    ~MoeKoeClient() override;
     
-    // 连接/断开
-    bool connect();
-    void disconnect();
+    // MusicSource 接口实现
+    MusicPlatform getPlatform() const override { return MusicPlatform::MoeKoeMusic; }
+    std::wstring getPlatformName() const override { return L"MoeKoeMusic"; }
     
-    // 状态
-    bool isConnected() const;
-    const SongInfo& getSongInfo() const;
-    PlaybackState getPlaybackState() const;
-    const std::vector<LyricLine>& getLyrics() const;
+    bool connect() override;
+    void disconnect() override;
+    bool isConnected() const override;
     
-    // 回调
-    void setSongChangeCallback(SongChangeCallback callback);
-    void setStateChangeCallback(StateChangeCallback callback);
+    const SongInfo& getSongInfo() const override;
+    PlaybackState getPlaybackState() const override;
+    const std::vector<LyricLine>& getLyrics() const override;
+    
+    // 保留旧接口兼容性
+    using SongChangeCallback = MusicSource::SongChangeCallback;
+    using StateChangeCallback = MusicSource::StateChangeCallback;
     
 private:
     void receiveLoop();
@@ -52,9 +50,6 @@ private:
     SongInfo song_info_;
     PlaybackState playback_state_ = PlaybackState::Unknown;
     std::vector<LyricLine> lyrics_;
-    
-    SongChangeCallback song_callback_;
-    StateChangeCallback state_callback_;
     
     // Windows WebSocket handle
     void* websocket_ = nullptr;
