@@ -1,6 +1,6 @@
-# MoeKoeOSC
+# VRChat Lyrics Display
 
-在 VRChat 聊天框显示当前播放的音乐信息。
+在 VRChat 聊天框显示当前播放的音乐信息和歌词。
 
 ## 功能
 
@@ -8,10 +8,13 @@
 - 显示歌曲名、歌手、进度条、歌词
 - 自动获取逐字歌词
 - 支持多音乐平台自动切换
+- 毛玻璃效果界面
+- 系统托盘运行
+- 自动更新检查
 
 ## 使用
 
-1. 启动 `MoeKoeGUI.exe`
+1. 启动 `VRCLyricsDisplay.exe`
 2. 开启 MoeKoeMusic 的 API 模式（端口 6520）
 3. 或启动网易云音乐并开启远程调试（端口 9222）
 4. 在 VRChat 中开启 OSC
@@ -23,14 +26,45 @@
 ## 配置
 
 编辑 `config_gui.json`:
-- `osc.ip`: VRChat OSC 地址
-- `osc.port`: VRChat OSC 端口
+- `osc.ip`: VRChat OSC 地址（默认 127.0.0.1）
+- `osc.port`: VRChat OSC 端口（默认 9000）
 - `auto_update`: 自动检查更新
 - `show_platform`: 显示音乐平台名称
+- `minimize_to_tray`: 最小化到托盘
+- `auto_start`: 开机自启动
 
-## 截图
+## 更新日志
 
-![preview](https://via.placeholder.com/400x200?text=OSC+Preview)
+### v0.2
+
+**新功能**
+- 更新日志显示 - 从 GitHub Release 获取并显示更新内容
+- SHA256 校验和验证 - 下载完成后验证文件完整性
+- 跳过此版本功能 - 可跳过当前版本，不再提示更新
+- 三按钮更新对话框 - 更新/取消/跳过
+
+**修复**
+- 修复对话框在字体未初始化时的崩溃问题
+- 修复对话框消息循环导致的潜在问题
+- 修复点击 OSC IP 选项时闪退的问题
+
+**优化**
+- CPU 占用优化 - 从常量 16ms 重绘改为按需渲染，空闲时 CPU 占用 <1%
+- 对话框应用毛玻璃效果，与主界面风格统一
+- 字体大小统一放大（标题 48px、副标题 32px、正文 26px）
+- 窗口最小尺寸调整为 600x620
+
+**清理**
+- 移除旧的 C++ 项目文件结构
+- 移除旧的 WinUI 项目文件
+- 清理 vcpkg 依赖配置
+
+### v0.1
+
+- 初始版本
+- 支持 MoeKoeMusic 和网易云音乐
+- 显示歌词和进度条
+- 毛玻璃效果界面
 
 ## 协议
 
