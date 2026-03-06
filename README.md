@@ -1,4 +1,4 @@
-# MoeKoeOSC
+# VRChat-lyrics-display
 
 在 VRChat 聊天框显示当前播放的音乐信息。
 
