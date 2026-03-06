@@ -5,8 +5,8 @@
 // Version info
 #define APP_VERSION "0.1"
 #define APP_VERSION_NUM 010
-#define GITHUB_REPO "pcwl049/MoeKoeOSC"
-#define GITHUB_API_URL "https://api.github.com/repos/pcwl049/MoeKoeOSC/releases/latest"
+#define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
+#define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
