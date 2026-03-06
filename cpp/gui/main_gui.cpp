@@ -4,7 +4,7 @@
 
 // Version info
 #define APP_VERSION "0.1"
-#define APP_VERSION_NUM 010
+#define APP_VERSION_NUM 100  // 0.1 -> 0*10000 + 1*100 + 0 = 100
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
