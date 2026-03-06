@@ -1,4 +1,4 @@
-﻿// MoeKoeMusic VRChat OSC - Modern Settings GUI (Borderless + Animations)
+﻿// VRChat Lyrics Display - Modern Settings GUI (Borderless + Animations)
 #define _CRT_SECURE_NO_WARNINGS
 #define _WIN32_IE 0x0600
 
@@ -20,7 +20,7 @@
 static void MainDebugLog(const char* msg) {
     char tempPath[MAX_PATH];
     GetTempPathA(MAX_PATH, tempPath);
-    strcat_s(tempPath, "\\moekoe_debug.log");
+    strcat_s(tempPath, "\\vrclayrics_debug.log");
     
     HANDLE hFile = CreateFileA(tempPath, 
         FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -297,10 +297,10 @@ bool DownloadAndInstallUpdate() {
     wchar_t tempPath[MAX_PATH];
     GetTempPathW(MAX_PATH, tempPath);
     wchar_t tempFile[MAX_PATH];
-    swprintf_s(tempFile, L"%sMoeKoeGUI_new.exe", tempPath);
+    swprintf_s(tempFile, L"%sVRCLyricsDisplay_new.exe", tempPath);
     
     // Download file
-    HINTERNET hSession = WinHttpOpen(L"MoeKoeOSC/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    HINTERNET hSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) { g_downloadingUpdate = false; return false; }
     
     // Parse URL
@@ -384,7 +384,7 @@ bool DownloadAndInstallUpdate() {
     
     // Create update batch script
     wchar_t batchPath[MAX_PATH];
-    swprintf_s(batchPath, L"%supdate_moeKoe.bat", tempPath);
+    swprintf_s(batchPath, L"%supdate_vrclayrics.bat", tempPath);
     FILE* batch = nullptr;
     if (_wfopen_s(&batch, batchPath, L"w") != 0 || !batch) {
         DeleteFileW(tempFile);
@@ -393,10 +393,10 @@ bool DownloadAndInstallUpdate() {
     
     // Batch script: wait for program to exit, then replace exe
     fprintf(batch, "@echo off\n");
-    fprintf(batch, "echo Updating MoeKoeGUI...\n");
+    fprintf(batch, "echo Updating VRCLyricsDisplay...\n");
     fprintf(batch, "echo Waiting for program to close...\n");
     fprintf(batch, ":waitloop\n");
-    fprintf(batch, "tasklist /FI \"IMAGENAME eq MoeKoeGUI.exe\" 2>NUL | find /I \"MoeKoeGUI.exe\">NUL\n");
+    fprintf(batch, "tasklist /FI \"IMAGENAME eq VRCLyricsDisplay.exe\" 2>NUL | find /I \"VRCLyricsDisplay.exe\">NUL\n");
     fprintf(batch, "if \"%%ERRORLEVEL%%\"==\"0\" (\n");
     fprintf(batch, "    timeout /t 1 /nobreak >NUL\n");
     fprintf(batch, "    goto waitloop\n");
@@ -701,7 +701,7 @@ void ExportLogs(HWND hwnd) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t defaultName[MAX_PATH];
-    swprintf_s(defaultName, L"MoeKoeOSC_Logs_%04d%02d%02d_%02d%02d%02d.txt", 
+    swprintf_s(defaultName, L"VRCLyricsDisplay_Logs_%04d%02d%02d_%02d%02d%02d.txt", 
                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     
     // Setup OPENFILENAME struct
@@ -726,7 +726,7 @@ void ExportLogs(HWND hwnd) {
     GetTempPathA(MAX_PATH, tempPath);
     
     // Add header
-    allLogs += "=== MoeKoeOSC Debug Logs ===\n";
+    allLogs += "=== VRCLyricsDisplay Debug Logs ===\n";
     char timeStr[64];
     time_t now = time(nullptr);
     struct tm* t = localtime(&now);
@@ -750,11 +750,11 @@ void ExportLogs(HWND hwnd) {
     sprintf_s(osStr, "Windows %d.%d.%d", osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
     allLogs += std::string("OS: ") + osStr + "\n\n";
     
-    // Read moekoe_debug.log
-    allLogs += "=== moekoe_debug.log ===\n";
-    char moekoeLogPath[MAX_PATH];
-    sprintf_s(moekoeLogPath, "%smoekoe_debug.log", tempPath);
-    FILE* mf = fopen(moekoeLogPath, "r");
+    // Read vrclayrics_debug.log
+    allLogs += "=== vrclayrics_debug.log ===\n";
+    char vrclayricsLogPath[MAX_PATH];
+    sprintf_s(vrclayricsLogPath, "%svrclayrics_debug.log", tempPath);
+    FILE* mf = fopen(vrclayricsLogPath, "r");
     if (mf) {
         char buf[4096];
         while (fgets(buf, sizeof(buf), mf)) {
@@ -1049,7 +1049,7 @@ void CreateTrayIcon(HWND hwnd) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_nid.szTip, L"MoeKoe OSC");
+    wcscpy_s(g_nid.szTip, L"VRChat Lyrics Display");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
@@ -2243,9 +2243,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     MainDebugLog("[WinMain] Application starting");
     InitCommonControls();
     
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"MoeKoeOSC_GUI_SingleInstance");
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"VRCLyricsDisplay_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"\x7A0B\x5E8F\x5DF2\x5728\x8FD0\x884C!", L"MoeKoe OSC", MB_OK | MB_ICONWARNING);
+        MessageBoxW(nullptr, L"\x7A0B\x5E8F\x5DF2\x5728\x8FD0\x884C!", L"VRChat Lyrics Display", MB_OK | MB_ICONWARNING);
         return 0;
     }
     
@@ -2316,10 +2316,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"MoeKoeOSC_Class";
+    wc.lpszClassName = L"VRCLyricsDisplay_Class";
     RegisterClassExW(&wc);
     
-    g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, L"MoeKoeOSC_Class", L"",
+    g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, L"VRCLyricsDisplay_Class", L"",
         WS_POPUP | WS_CLIPCHILDREN | WS_THICKFRAME, CW_USEDEFAULT, CW_USEDEFAULT, g_winW, g_winH, nullptr, nullptr, hInst, nullptr);
     
     // Restore window position if saved
