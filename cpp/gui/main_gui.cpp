@@ -5,8 +5,8 @@
 // Version info
 #define APP_VERSION "0.1"
 #define APP_VERSION_NUM 010
-#define GITHUB_REPO "pcwl049/MoeKoeOSC"
-#define GITHUB_API_URL "https://api.github.com/repos/pcwl049/MoeKoeOSC/releases/latest"
+#define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
+#define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -164,13 +164,13 @@ bool CheckForUpdate(bool manualCheck = false) {
     g_manualCheckUpdate = manualCheck;
     g_latestChangelog.clear();
     
-    HINTERNET hSession = WinHttpOpen(L"MoeKoeOSC/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    HINTERNET hSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) { g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
     
     HINTERNET hConnect = WinHttpConnect(hSession, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
     
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/repos/pcwl049/MoeKoeOSC/releases/latest", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/repos/pcwl049/VRChat-lyrics-display/releases/latest", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
     
     BOOL bResult = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
