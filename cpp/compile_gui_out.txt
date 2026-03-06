@@ -1,2 +1,0 @@
-[Compiling GUI...]
-Build Failed!
