@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.2.2"
-#define APP_VERSION_NUM 202  // 0.2.2 -> 0*10000 + 2*100 + 2 = 202
+#define APP_VERSION "0.3.0"
+#define APP_VERSION_NUM 300  // 0.3.0 -> 0*10000 + 3*100 + 0 = 300
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
@@ -46,6 +46,7 @@ static void MainDebugLog(const char* msg) {
 #include <algorithm>
 #include "moekoe_ws.h"
 #include "netease_ws.h"
+#include "smtc_client.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "psapi.lib")
@@ -76,15 +77,15 @@ static void MainDebugLog(const char* msg) {
 #define TRAY_ICON_ID 1
 #define WM_TRAYICON (WM_USER + 200)
 
-// OSC rate limits
-const DWORD OSC_MIN_INTERVAL = 4000;
-const DWORD OSC_PAUSE_INTERVAL = 3000;
+// OSC rate limits - aligned with preview refresh rate
+const DWORD OSC_MIN_INTERVAL = 1500;    // 1.5s when playing
+const DWORD OSC_PAUSE_INTERVAL = 1500;  // 1.5s when paused
 
 // Window size (scaled for high DPI)
 const int WIN_W_DEFAULT = 650;
 const int WIN_H_DEFAULT = 720;
 const int WIN_W_MIN = 600;
-const int WIN_H_MIN = 620;
+const int WIN_H_MIN = 680;  // Increased to prevent settings content overlap
 int g_winW = WIN_W_DEFAULT;
 int g_winH = WIN_H_DEFAULT;
 int g_winX = -1;  // Window position (saved on close)
@@ -110,21 +111,48 @@ NOTIFYICONDATAW g_nid = {};
 moekoe::OSCSender* g_osc = nullptr;
 moekoe::MoeKoeWS* g_moeKoeClient = nullptr;
 moekoe::NeteaseWS* g_neteaseClient = nullptr;
-const wchar_t* g_platformNames[] = { L"MoeKoeMusic", L"\x7F51\x6613\x4E91\x97F3\x4E50" };
-const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91\x97F3\x4E50" };
-const int g_platformCount = 2;
-int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease (user selected)
+smtc::SMTCClient* g_smtcClient = nullptr;  // QQ Music & other SMTC players
+const wchar_t* g_platformNames[] = { L"MoeKoeMusic", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐" };
+// Platform definition - easy to add new platforms
+struct PlatformInfo {
+    std::wstring name;           // Display name
+    std::wstring connectMethod;  // HTTP, SMTC, etc.
+    bool connected = false;
+    bool hover = false;
+    DWORD lastPlayTime = 0;
+};
+
+// Platform list - add new platforms here
+std::vector<PlatformInfo> g_platforms = {
+    { L"MoeKoe", L"HTTP", false, false, 0 },
+    { L"\x7F51\x6613\x4E91", L"HTTP", false, false, 0 },  // 网易云
+    { L"QQ音乐", L"SMTC", false, false, 0 }
+};
+
+// Legacy compatibility macros
+#define g_platformCount ((int)g_platforms.size())
+#define g_moeKoeConnected g_platforms[0].connected
+#define g_neteaseConnected g_platforms[1].connected
+#define g_smtcConnected g_platforms[2].connected
+#define g_moeKoeBoxHover g_platforms[0].hover
+#define g_neteaseBoxHover g_platforms[1].hover
+#define g_qqMusicBoxHover g_platforms[2].hover
+#define g_moeKoeLastPlayTime g_platforms[0].lastPlayTime
+#define g_neteaseLastPlayTime g_platforms[1].lastPlayTime
+#define g_smtcLastPlayTime g_platforms[2].lastPlayTime
+
+const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐" };
+int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
 bool g_autoPlatformSwitch = true; // Auto switch platforms when playing
-bool g_moeKoeConnected = false;
-bool g_neteaseConnected = false;
-DWORD g_moeKoeLastPlayTime = 0;  // Last time MoeKoe was playing
-DWORD g_neteaseLastPlayTime = 0; // Last time Netease was playing
 const DWORD PLATFORM_SWITCH_DELAY = 2000; // Wait 2s before switching platforms
 int g_currentTab = 0;        // 0=Main, 1=Settings
 bool g_tabHover[2] = {false, false};
-bool g_moeKoeBoxHover = false;
-bool g_neteaseBoxHover = false;
+
+// Platform selection dropdown menu
+bool g_platformMenuOpen = false;
+int g_platformMenuHover = -1;  // Which menu item is hovered (-1 = none)
+bool g_platformBoxHover = false;  // Platform status box hover
 
 // Edit controls
 
@@ -245,6 +273,231 @@ std::string CalculateSHA256(const wchar_t* filePath) {
     CryptReleaseContext(hProv, 0);
     CloseHandle(hFile);
     return result;
+}
+
+// Search lyrics from Netease API for QQ Music
+std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title, const std::wstring& artist) {
+    std::vector<moekoe::LyricLine> lyrics;
+    if (title.empty()) return lyrics;
+    
+    std::string dbgMsg = "[QQ Music] Searching lyrics for: " + WstringToUtf8(title) + " - " + WstringToUtf8(artist);
+    MainDebugLog(dbgMsg.c_str());
+    
+    // Build search query
+    std::string query = WstringToUtf8(title);
+    if (!artist.empty()) {
+        query += " ";
+        query += WstringToUtf8(artist);
+    }
+    
+    // URL encode
+    std::string encodedQuery;
+    for (char c : query) {
+        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            encodedQuery += c;
+        } else {
+            char buf[4];
+            sprintf_s(buf, "%%%02X", (unsigned char)c);
+            encodedQuery += buf;
+        }
+    }
+    
+    // === Step 1: Search QQ Music API ===
+    // API: https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=keyword&format=json
+    std::wstring whost = L"c.y.qq.com";
+    std::wstring wpath = L"/soso/fcgi-bin/client_search_cp?w=" + Utf8ToWstring(encodedQuery) + L"&format=json&p=1&n=5";
+    
+    HINTERNET hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return lyrics;
+    
+    HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
+    
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, L"https://y.qq.com", WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
+    
+    std::wstring headers = L"Referer: https://y.qq.com\r\nCookie: guid=1234567890\r\n";
+    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    WinHttpReceiveResponse(hRequest, NULL);
+    
+    std::string searchResp;
+    DWORD dwSize = 0;
+    do {
+        dwSize = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
+        if (dwSize == 0) break;
+        char* buffer = new char[dwSize + 1];
+        ZeroMemory(buffer, dwSize + 1);
+        DWORD dwDownloaded = 0;
+        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
+            searchResp += buffer;
+        }
+        delete[] buffer;
+    } while (dwSize > 0);
+    
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    
+    // Debug: log search response (first 500 chars)
+    std::string respDbg = "[QQ Music] QQ Search response: " + searchResp.substr(0, 500);
+    MainDebugLog(respDbg.c_str());
+    
+    // Extract songmid from search result
+    // Format: "song":{"list":[{"songmid":"xxx",...}]}
+    size_t listPos = searchResp.find("\"list\":[");
+    if (listPos == std::string::npos) {
+        MainDebugLog("[QQ Music] No song list found");
+        return lyrics;
+    }
+    
+    // Find first songmid
+    size_t songmidPos = searchResp.find("\"songmid\":\"", listPos);
+    if (songmidPos == std::string::npos) {
+        MainDebugLog("[QQ Music] No songmid found");
+        return lyrics;
+    }
+    
+    size_t midStart = songmidPos + 11;
+    size_t midEnd = searchResp.find("\"", midStart);
+    if (midEnd == std::string::npos) return lyrics;
+    
+    std::string songmid = searchResp.substr(midStart, midEnd - midStart);
+    MainDebugLog(("[QQ Music] Found songmid: " + songmid).c_str());
+    
+    // === Step 2: Fetch Lyrics ===
+    // API: https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=xxx
+    wpath = L"/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" + Utf8ToWstring(songmid) + L"&format=json";
+    
+    hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return lyrics;
+    
+    hConnect = WinHttpConnect(hSession, L"c.y.qq.com", INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
+    
+    hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, L"https://y.qq.com", WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
+    
+    headers = L"Referer: https://y.qq.com\r\n";
+    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    WinHttpReceiveResponse(hRequest, NULL);
+    
+    std::string lyricsResp;
+    do {
+        dwSize = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
+        if (dwSize == 0) break;
+        char* buffer = new char[dwSize + 1];
+        ZeroMemory(buffer, dwSize + 1);
+        DWORD dwDownloaded = 0;
+        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
+            lyricsResp += buffer;
+        }
+        delete[] buffer;
+    } while (dwSize > 0);
+    
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    
+    // Debug: log lyrics response
+    std::string lrcDbg = "[QQ Music] QQ Lyrics response: " + lyricsResp.substr(0, 300);
+    MainDebugLog(lrcDbg.c_str());
+    
+    // Extract lyric - format: {"lyric":"BASE64_ENCODED_LRC"}
+    size_t lyricPos = lyricsResp.find("\"lyric\":\"");
+    if (lyricPos == std::string::npos) {
+        MainDebugLog("[QQ Music] No lyric field found");
+        return lyrics;
+    }
+    
+    size_t lrcStart = lyricPos + 9;
+    size_t lrcEnd = lyricsResp.find("\"", lrcStart);
+    if (lrcEnd == std::string::npos) return lyrics;
+    
+    std::string lrcBase64 = lyricsResp.substr(lrcStart, lrcEnd - lrcStart);
+    MainDebugLog(("[QQ Music] Base64 length: " + std::to_string(lrcBase64.length())).c_str());
+    
+    // Base64 decode
+    static const std::string base64_chars = 
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string unescaped;
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+    
+    int val = 0, valb = -8;
+    for (unsigned char c : lrcBase64) {
+        if (T[c] == -1) break;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            unescaped.push_back(char((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    
+    // Debug: log decoded content (first 200 chars)
+    std::string decodedDbg = "[QQ Music] Decoded lyric: " + unescaped.substr(0, 200);
+    MainDebugLog(decodedDbg.c_str());
+    
+    // Parse LRC format
+    size_t pos = 0;
+    while ((pos = unescaped.find('[', pos)) != std::string::npos) {
+        size_t endBracket = unescaped.find(']', pos);
+        if (endBracket == std::string::npos) { pos++; continue; }
+        
+        std::string timeStr = unescaped.substr(pos + 1, endBracket - pos - 1);
+        
+        // Skip metadata tags like [ti:], [ar:], etc.
+        if (timeStr.find(':') != std::string::npos && !isdigit((unsigned char)timeStr[0])) {
+            pos = endBracket + 1;
+            continue;
+        }
+        
+        // Parse time: mm:ss.xx or mm:ss:xxx
+        int min = 0, sec = 0, ms = 0;
+        if (sscanf_s(timeStr.c_str(), "%d:%d.%d", &min, &sec, &ms) >= 2 ||
+            sscanf_s(timeStr.c_str(), "%d:%d:%d", &min, &sec, &ms) >= 2) {
+            double time = min * 60.0 + sec + ms / 1000.0;
+            
+            // Find lyric text
+            size_t nextBracket = unescaped.find('[', endBracket);
+            std::string text;
+            if (nextBracket != std::string::npos) {
+                text = unescaped.substr(endBracket + 1, nextBracket - endBracket - 1);
+            } else {
+                text = unescaped.substr(endBracket + 1);
+            }
+            
+            // Trim
+            size_t start = text.find_first_not_of(" \t\r\n");
+            size_t end = text.find_last_not_of(" \t\r\n");
+            if (start != std::string::npos && end != std::string::npos && start <= end) {
+                text = text.substr(start, end - start + 1);
+            } else {
+                text = "";
+            }
+            
+            if (!text.empty()) {
+                moekoe::LyricLine line;
+                line.startTime = (int)(time * 1000);  // Convert to ms
+                line.text = Utf8ToWstring(text);
+                lyrics.push_back(line);
+            }
+        }
+        
+        pos = endBracket + 1;
+    }
+    
+    // Sort by time
+    std::sort(lyrics.begin(), lyrics.end(), [](const moekoe::LyricLine& a, const moekoe::LyricLine& b) {
+        return a.startTime < b.startTime;
+    });
+    
+    std::string parsedDbg = "[QQ Music] Parsed " + std::to_string(lyrics.size()) + " lyric lines";
+    MainDebugLog(parsedDbg.c_str());
+    
+    return lyrics;
 }
 
 // Check for updates from GitHub
@@ -617,6 +870,12 @@ std::wstring g_lastOscMessage;
 bool g_lastIsPlaying = false;
 bool g_playStateChanged = false;
 
+// QQ Music lyrics search state
+std::wstring g_qqMusicLastTitle;
+std::wstring g_qqMusicLastArtist;
+std::thread g_lyricsSearchThread;
+std::atomic<bool> g_lyricsSearchRunning{false};
+
 // Preview cache (to avoid rapid flickering)
 std::wstring g_cachedPreviewMsg;
 DWORD g_lastPreviewUpdate = 0;
@@ -625,7 +884,7 @@ const DWORD PREVIEW_UPDATE_INTERVAL = 500;  // Update preview every 500ms
 // Redraw optimization
 bool g_needsRedraw = true;         // Dirty flag for redraw
 DWORD g_lastContentChange = 0;     // Last time content actually changed
-const DWORD IDLE_REDRAW_INTERVAL = 1000;  // Redraw every 1s when idle
+const DWORD IDLE_REDRAW_INTERVAL = 1500;  // Redraw every 1.5s when idle (matches OSC send rate)
 
 // Stats
 int g_todayPlays = 0;
@@ -926,13 +1185,16 @@ void SetAutoStart(bool enable) {
     RegCloseKey(hKey);
 }
 
+// Forward declaration
+bool IsRunningAsAdmin();
+
 // Export logs to a file for bug reporting
 void ExportLogs(HWND hwnd) {
     // Generate default filename with timestamp
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t defaultName[MAX_PATH];
-    swprintf_s(defaultName, L"VRCLyricsDisplay_Logs_%04d%02d%02d_%02d%02d%02d.txt", 
+    swprintf_s(defaultName, L"VRCLyricsDisplay_Logs_%04d%02d%02d_%02d%02d%02d.zip", 
                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     
     // Setup OPENFILENAME struct
@@ -942,10 +1204,10 @@ void ExportLogs(HWND hwnd) {
     OPENFILENAMEW ofn = {0};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = L"\x65E5\x5FD7\x6587\x4EF6 (*.txt)\0*.txt\0\x6240\x6709\x6587\x4EF6 (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"ZIP \x538B\x7F29\x5305 (*.zip)\0*.zip\0\x6240\x6709\x6587\x4EF6 (*.*)\0*.*\0";
     ofn.lpstrFile = filePath;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"txt";
+    ofn.lpstrDefExt = L"zip";
     ofn.lpstrTitle = L"\x5BFC\x51FA\x65E5\x5FD7";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     
@@ -979,7 +1241,45 @@ void ExportLogs(HWND hwnd) {
     #pragma warning(pop)
     char osStr[64];
     sprintf_s(osStr, "Windows %d.%d.%d", osvi.dwMajorVersion, osvi.dwMinorVersion, osvi.dwBuildNumber);
-    allLogs += std::string("OS: ") + osStr + "\n\n";
+    allLogs += std::string("OS: ") + osStr + "\n";
+    
+    // Memory info
+    MEMORYSTATUSEX memInfo = {0};
+    memInfo.dwLength = sizeof(memInfo);
+    GlobalMemoryStatusEx(&memInfo);
+    char memStr[128];
+    sprintf_s(memStr, "Memory: %llu MB / %llu MB (%d%% used)\n", 
+              memInfo.ullAvailPhys / 1024 / 1024,
+              memInfo.ullTotalPhys / 1024 / 1024,
+              memInfo.dwMemoryLoad);
+    allLogs += memStr;
+    allLogs += "\n";
+    
+    // Add runtime status
+    allLogs += "=== Runtime Status ===\n";
+    allLogs += std::string("OSC Enabled: ") + (g_oscEnabled ? "Yes" : "No") + "\n";
+    allLogs += std::string("OSC IP: ") + WstringToUtf8(g_oscIp) + ":" + std::to_string(g_oscPort) + "\n";
+    allLogs += std::string("MoeKoeMusic Connected: ") + (g_moeKoeConnected ? "Yes" : "No") + "\n";
+    allLogs += std::string("Netease Connected: ") + (g_neteaseConnected ? "Yes" : "No") + "\n";
+    allLogs += std::string("Active Platform: ") + (g_activePlatform >= 0 ? WstringToUtf8(g_platformNames[g_activePlatform]) : "None") + "\n";
+    allLogs += std::string("Running as Admin: ") + (IsRunningAsAdmin() ? "Yes" : "No") + "\n";
+    
+    // Current song info
+    EnterCriticalSection(&g_cs);
+    if (!g_pendingTitle.empty()) {
+        allLogs += std::string("Current Song: ") + WstringToUtf8(g_pendingTitle);
+        if (!g_pendingArtist.empty()) {
+            allLogs += " - " + WstringToUtf8(g_pendingArtist);
+        }
+        allLogs += std::string(" [") + (g_pendingIsPlaying ? "Playing" : "Paused") + "]\n";
+        char durStr[64];
+        sprintf_s(durStr, "Position: %.1f / %.1f seconds\n", g_pendingCurrentTime, g_pendingDuration);
+        allLogs += durStr;
+    } else {
+        allLogs += "Current Song: None\n";
+    }
+    LeaveCriticalSection(&g_cs);
+    allLogs += "\n";
     
     // Read vrclayrics_debug.log
     allLogs += "=== vrclayrics_debug.log ===\n";
@@ -1013,6 +1313,47 @@ void ExportLogs(HWND hwnd) {
     }
     allLogs += "\n";
     
+    // Collect recent errors (last 50 lines containing "ERROR" or "error" or "fail")
+    allLogs += "=== Recent Errors (from all logs) ===\n";
+    std::vector<std::string> errorLines;
+    
+    // Helper to extract error lines
+    auto extractErrors = [&](const char* logPath, const char* logName) {
+        FILE* f = fopen(logPath, "r");
+        if (!f) return;
+        char buf[4096];
+        std::vector<std::string> allLines;
+        while (fgets(buf, sizeof(buf), f)) {
+            allLines.push_back(buf);
+        }
+        fclose(f);
+        
+        // Get last 50 lines that contain error keywords
+        for (int i = (int)allLines.size() - 1; i >= 0 && errorLines.size() < 50; i--) {
+            std::string line = allLines[i];
+            std::string lowerLine = line;
+            for (char& c : lowerLine) c = tolower(c);
+            if (lowerLine.find("error") != std::string::npos ||
+                lowerLine.find("fail") != std::string::npos ||
+                lowerLine.find("exception") != std::string::npos) {
+                errorLines.push_back(std::string("[") + logName + "] " + line);
+            }
+        }
+    };
+    
+    extractErrors(vrclayricsLogPath, "main");
+    extractErrors(neteaseLogPath, "netease");
+    
+    if (errorLines.empty()) {
+        allLogs += "(no recent errors found)\n";
+    } else {
+        // Sort by most recent first (reverse order since we collected backwards)
+        for (auto it = errorLines.begin(); it != errorLines.end(); ++it) {
+            allLogs += *it;
+        }
+    }
+    allLogs += "\n";
+    
     // Read config_gui.json
     allLogs += "=== config_gui.json ===\n";
     wchar_t configPath[MAX_PATH];
@@ -1033,16 +1374,70 @@ void ExportLogs(HWND hwnd) {
     }
     allLogs += "\n";
     
-    // Write to destination file
-    FILE* out = _wfopen(filePath, L"w");
-    if (out) {
-        fwrite(allLogs.c_str(), 1, allLogs.size(), out);
-        fclose(out);
-        
+    // Create a temp file for the log content
+    wchar_t tempLogFile[MAX_PATH];
+    swprintf_s(tempLogFile, L"%sVRCLyricsDisplay_log_temp.txt", 
+               std::wstring(tempPath, tempPath + strlen(tempPath)).c_str());
+    
+    // Convert to wstring properly
+    wchar_t wtempPath[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, tempPath, -1, wtempPath, MAX_PATH);
+    swprintf_s(tempLogFile, L"%sVRCLyricsDisplay_log_temp.txt", wtempPath);
+    
+    FILE* tmpLog = _wfopen(tempLogFile, L"w");
+    if (!tmpLog) {
+        ShowErrorDialog(L"\x9519\x8BEF", L"\x65E0\x6CD5\x521B\x5EFA\x4E34\x65F6\x6587\x4EF6");
+        return;
+    }
+    fwrite(allLogs.c_str(), 1, allLogs.size(), tmpLog);
+    fclose(tmpLog);
+    
+    // Use PowerShell to create ZIP (most reliable method on Windows)
+    wchar_t psCmd[2048];
+    swprintf_s(psCmd, 
+        L"Compress-Archive -Path '%s' -DestinationPath '%s' -Force",
+        tempLogFile, filePath);
+    
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {0};
+    
+    wchar_t cmdLine[4096];
+    swprintf_s(cmdLine, L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"%s\"", psCmd);
+    
+    BOOL success = CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, 
+                                   CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    
+    if (success) {
+        WaitForSingleObject(pi.hProcess, 10000);  // Wait up to 10 seconds
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    
+    // Delete temp file
+    DeleteFileW(tempLogFile);
+    
+    // Check if zip was created
+    if (GetFileAttributesW(filePath) != INVALID_FILE_ATTRIBUTES) {
         std::wstring successMsg = L"\x65E5\x5FD7\x5DF2\x5BFC\x51FA\x5230:\n" + std::wstring(filePath);
         ShowInfoDialog(L"\x5BFC\x51FA\x6210\x529F", successMsg);
     } else {
-        ShowErrorDialog(L"\x9519\x8BEF", L"\x5BFC\x51FA\x5931\x8D25\xFF0C\x8BF7\x68C0\x67E5\x6587\x4EF6\x8DEF\x5F84");
+        // Fallback: save as txt if zip failed
+        wchar_t txtPath[MAX_PATH];
+        wcscpy_s(txtPath, filePath);
+        wchar_t* ext = wcsrchr(txtPath, L'.');
+        if (ext) wcscpy(ext, L".txt");
+        
+        FILE* out = _wfopen(txtPath, L"w");
+        if (out) {
+            fwrite(allLogs.c_str(), 1, allLogs.size(), out);
+            fclose(out);
+            std::wstring successMsg = L"ZIP \x521B\x5EFA\x5931\x8D25\xFF0C\x5DF2\x4FDD\x5B58\x4E3A TXT:\n" + std::wstring(txtPath);
+            ShowInfoDialog(L"\x5BFC\x51FA\x6210\x529F", successMsg);
+        } else {
+            ShowErrorDialog(L"\x9519\x8BEF", L"\x5BFC\x51FA\x5931\x8D25\xFF0C\x8BF7\x68C0\x67E5\x6587\x4EF6\x8DEF\x5F84");
+        }
     }
 }
 
@@ -1396,6 +1791,15 @@ void DrawTextVCentered(HDC hdc, const wchar_t* text, int x, int y, int h, COLORR
     HFONT oldFont = (HFONT)SelectObject(hdc, font);
     SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
     TextOutW(hdc, x, y + (h - sz.cy) / 2, text, (int)wcslen(text));
+    SelectObject(hdc, oldFont);
+}
+
+// Draw text right-aligned and vertically centered
+void DrawTextVCenteredRight(HDC hdc, const wchar_t* text, int rightX, int y, int h, COLORREF color, HFONT font) {
+    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
+    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
+    TextOutW(hdc, rightX - sz.cx, y + (h - sz.cy) / 2, text, (int)wcslen(text));
     SelectObject(hdc, oldFont);
 }
 
@@ -2010,7 +2414,7 @@ void OnPaint(HWND hwnd) {
         COLORREF tabBg = isActive ? COLOR_ACCENT : (isHover ? RGB(60, 60, 80) : RGB(40, 40, 55));
         COLORREF tabText = isActive ? RGB(0, 0, 0) : COLOR_TEXT;
         DrawRoundRect(memDC, tabX, tabY, tabW, tabH, 8, tabBg);
-        DrawTextLeft(memDC, tabNames[t], tabX + tabW/2 - 16, tabY + 7, tabText, g_fontNormal);
+        DrawTextCenteredBoth(memDC, tabNames[t], tabX, tabY, tabW, tabH, tabText, g_fontNormal);
     }
     
     int rowY = contentY + 55;
@@ -2020,63 +2424,129 @@ void OnPaint(HWND hwnd) {
     
     if (g_currentTab == 0) {
         // === MAIN TAB: Platform Status, Connect, Launch ===
-        DrawTextLeft(memDC, L"\x97F3\x4E50\x5E73\x53F0:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontSmall);
         
-        // Platform status boxes (side by side, clickable to switch)
-        int boxW = (leftColW - 36 - 10) / 2;
-        int box1X = CARD_PADDING + 18;
-        int box2X = box1X + boxW + 10;
+        // === Platform Status Box ===
+        int platformBoxX = CARD_PADDING + 18;
+        int platformBoxY = rowY + 22;
+        int platformBoxW = leftColW - 36;
+        int platformBoxH = 44;
         
-        // MoeKoe status box - color indicates status directly
-        bool mkActive = (g_activePlatform == 0);
-        bool mkHover = g_moeKoeBoxHover && g_moeKoeConnected;
-        COLORREF mkBg, mkBorder;
-        if (g_moeKoeConnected) {
-            if (mkActive) {
-                mkBg = RGB(40, 100, 60);      // Active: filled green
-                mkBorder = RGB(80, 200, 120);  // Bright green border
-            } else {
-                mkBg = RGB(35, 45, 35);        // Connected but not active
-                mkBorder = RGB(60, 120, 80);   // Dim green border
-            }
+        // Determine current platform display
+        std::wstring platformText;
+        std::wstring methodText;
+        bool hasActivePlatform = (g_activePlatform >= 0 && g_activePlatform < g_platformCount);
+        
+        if (hasActivePlatform) {
+            platformText = g_platforms[g_activePlatform].name;
+            methodText = g_platforms[g_activePlatform].connectMethod;
         } else {
-            mkBg = RGB(45, 45, 50);            // Not connected
-            mkBorder = RGB(70, 70, 75);        // Gray border
-        }
-        if (mkHover) { mkBg = RGB(50, 70, 55); mkBorder = RGB(100, 180, 140); }
-        DrawRoundRectWithBorder(memDC, box1X, rowY + 22, boxW, 32, 6, mkBg, mkBorder);
-        DrawTextLeft(memDC, L"MoeKoe", box1X + 8, rowY + 28, g_moeKoeConnected ? COLOR_TEXT : COLOR_TEXT_DIM, g_fontSmall);
-        
-        // Netease status box - color indicates status directly
-        bool ncActive = (g_activePlatform == 1);
-        bool ncHover = g_neteaseBoxHover && g_neteaseConnected;
-        COLORREF ncBg, ncBorder;
-        if (g_neteaseConnected) {
-            if (ncActive) {
-                ncBg = RGB(40, 100, 60);      // Active: filled green
-                ncBorder = RGB(80, 200, 120);  // Bright green border
-            } else {
-                ncBg = RGB(35, 45, 35);        // Connected but not active
-                ncBorder = RGB(60, 120, 80);   // Dim green border
+            // Check if any platform is connected but not playing
+            int connectedPlatform = -1;
+            for (int i = 0; i < g_platformCount; i++) {
+                if (g_platforms[i].connected) {
+                    connectedPlatform = i;
+                    break;
+                }
             }
-        } else {
-            ncBg = RGB(45, 45, 50);            // Not connected
-            ncBorder = RGB(70, 70, 75);        // Gray border
+            if (connectedPlatform >= 0) {
+                platformText = g_platforms[connectedPlatform].name;
+                methodText = g_platforms[connectedPlatform].connectMethod;
+            } else {
+                platformText = L"\x672A\x68C0\x6D4B\x5230\x97F3\x4E50";  // 未检测到音乐
+                methodText = L"";
+            }
         }
-        if (ncHover) { ncBg = RGB(50, 70, 55); ncBorder = RGB(100, 180, 140); }
-        DrawRoundRectWithBorder(memDC, box2X, rowY + 22, boxW, 32, 6, ncBg, ncBorder);
-        DrawTextLeft(memDC, L"\x7F51\x6613\x4E91", box2X + 8, rowY + 28, g_neteaseConnected ? COLOR_TEXT : COLOR_TEXT_DIM, g_fontSmall);
+        
+        // Draw platform box
+        bool isHover = g_platformBoxHover;
+        COLORREF boxBg = isHover ? RGB(50, 55, 65) : RGB(40, 45, 55);
+        COLORREF boxBorder = isHover ? RGB(80, 90, 110) : RGB(60, 65, 75);
+        DrawRoundRectWithBorder(memDC, platformBoxX, platformBoxY, platformBoxW, platformBoxH, 8, boxBg, boxBorder);
+        
+        // Draw platform name (left side, vertically centered)
+        DrawTextVCentered(memDC, platformText.c_str(), platformBoxX + 12, platformBoxY, platformBoxH, 
+            hasActivePlatform ? COLOR_TEXT : COLOR_TEXT_DIM, g_fontNormal);
+        
+        // Draw method/status on right side (before arrow, vertically centered)
+        if (!methodText.empty()) {
+            DrawTextVCenteredRight(memDC, methodText.c_str(), platformBoxX + platformBoxW - 30, platformBoxY, platformBoxH, 
+                RGB(110, 190, 140), g_fontSmall);
+        }
+        
+        // Draw dropdown arrow on right side
+        int arrowX = platformBoxX + platformBoxW - 16;
+        int arrowY = platformBoxY + platformBoxH / 2;
+        HPEN arrowPen = CreatePen(PS_SOLID, 2, COLOR_TEXT_DIM);
+        HPEN oldPen = (HPEN)SelectObject(memDC, arrowPen);
+        // Draw "V" arrow
+        MoveToEx(memDC, arrowX - 5, arrowY - 3, nullptr);
+        LineTo(memDC, arrowX, arrowY + 2);
+        LineTo(memDC, arrowX + 5, arrowY - 3);
+        SelectObject(memDC, oldPen);
+        DeleteObject(arrowPen);
+        
+        // === Platform Selection Dropdown Menu (draw AFTER buttons but BEFORE them in z-order concept) ===
+        // We'll draw it at the end for proper z-order
+        int menuExtraSpace = 0;  // Extra space to push buttons down when menu is open
+        if (g_platformMenuOpen) {
+            int menuItemH = 36;
+            menuExtraSpace = g_platformCount * menuItemH + 12;  // Menu height + padding
+        }
         
         // === Connect Button ===
-        rowY += 60;
-        DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 42, 
+        rowY += 80 + menuExtraSpace;  // Push down if menu is open (increased spacing)
+        DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 40, 
             g_isConnected ? L"\x91CD\x65B0\x8FDE\x63A5" : L"\x8FDE\x63A5", g_btnConnectAnim, g_isConnected);
         
-        // === Launch Netease Button (only when platform is Netease) ===
+        // === Launch Netease Button (only when Netease not connected) ===
         if (!g_neteaseConnected) {
-            rowY += 55;
+            rowY += 48;
             DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 36,
                 L"\x542F\x52A8\x7F51\x6613\x4E91\x97F3\x4E50", g_btnLaunchAnim, false);
+        }
+        
+        // === Platform Selection Dropdown Menu (draw LAST so it's on top) ===
+        if (g_platformMenuOpen) {
+            int menuItemH = 36;
+            int menuH = g_platformCount * menuItemH + 8;
+            int menuX = platformBoxX;
+            int menuY = platformBoxY + platformBoxH + 4;  // Dropdown BELOW the platform box
+            int menuW = platformBoxW;
+            
+            // Menu background with shadow effect
+            DrawRoundRectWithBorder(memDC, menuX, menuY, menuW, menuH, 8, RGB(35, 40, 50), RGB(70, 75, 85));
+            
+            // Menu items
+            for (int i = 0; i < g_platformCount; i++) {
+                int itemY = menuY + 4 + i * menuItemH;
+                bool itemHover = (g_platformMenuHover == i);
+                bool isCurrentActive = (g_activePlatform == i);
+                bool isConnected = g_platforms[i].connected;
+                
+                // Item background on hover
+                if (itemHover) {
+                    DrawRoundRect(memDC, menuX + 4, itemY, menuW - 8, menuItemH - 4, 4, RGB(50, 55, 65));
+                }
+                
+                // Platform name (left side, vertically centered in item)
+                COLORREF nameColor = isConnected ? COLOR_TEXT : COLOR_TEXT_DIM;
+                DrawTextVCentered(memDC, g_platforms[i].name.c_str(), menuX + 12, itemY, menuItemH - 4, nameColor, g_fontNormal);
+                
+                // Connection status (right side, vertically centered)
+                std::wstring statusText;
+                COLORREF statusColor;
+                if (isCurrentActive) {
+                    statusText = L"\x5F53\x524D";  // 当前
+                    statusColor = RGB(80, 200, 120);
+                } else if (isConnected) {
+                    statusText = g_platforms[i].connectMethod;
+                    statusColor = RGB(110, 190, 140);
+                } else {
+                    statusText = L"\x672A\x8FDE\x63A5";  // 未连接
+                    statusColor = COLOR_TEXT_DIM;
+                }
+                DrawTextRight(memDC, statusText.c_str(), menuX + menuW - 16, itemY + 10, statusColor, g_fontSmall);
+            }
         }
     } else {
         // === SETTINGS TAB: IP, Port, Checkboxes ===
@@ -2323,15 +2793,14 @@ void OnPaint(HWND hwnd) {
         DrawTextLeft(memDC, L"...", msgX, msgY - lineHeight, COLOR_TEXT_DIM, g_fontNormal);
     }
     
-    // Draw byte count indicator
-    std::string utf8Msg = WstringToUtf8(oscMessage);
+    // Draw character count indicator
     wchar_t byteBuf[64];
-    swprintf_s(byteBuf, L"\x5B57\x8282\x6570: %zd/144", utf8Msg.length());
-    COLORREF byteColor = utf8Msg.length() > 144 ? RGB(255, 100, 100) : COLOR_TEXT_DIM;
+    swprintf_s(byteBuf, L"\x5B57\x7B26\x6570: %zd/144", oscMessage.length());
+    COLORREF byteColor = oscMessage.length() > 144 ? RGB(255, 100, 100) : COLOR_TEXT_DIM;
     DrawTextLeft(memDC, byteBuf, rightColX + 18, contentY + previewH - 40, byteColor, g_fontSmall);
     
-    // Warning if over limit - show next to byte count if there's space
-    if (utf8Msg.length() > 144) {
+    // Warning if over limit - show next to char count if there's space
+    if (oscMessage.length() > 144) {
         DrawTextLeft(memDC, L"\x26A0\x8D85\x9650", rightColX + 130, contentY + previewH - 40, RGB(255, 180, 50), g_fontSmall);
     }
     
@@ -2341,12 +2810,13 @@ void OnPaint(HWND hwnd) {
         UpdateTrayTip(tip.c_str());
     }
     
-    // === Version display at bottom left ===
+    // === Version display inside left card bottom ===
     wchar_t verBuf[32];
     swprintf_s(verBuf, L"v" APP_VERSION);
-    DrawTextLeft(memDC, verBuf, CARD_PADDING + 18, h - 25, COLOR_TEXT_DIM, g_fontSmall);
+    int versionY = contentY + panelH - 25;  // Inside card, 25px from bottom
+    DrawTextLeft(memDC, verBuf, CARD_PADDING + 18, versionY, COLOR_TEXT_DIM, g_fontSmall);
     
-    // === Author display at bottom right ===
+    // === Author display at window bottom right ===
     DrawTextRight(memDC, L"by \x6C90\x98CE", w - CARD_PADDING - 18, h - 25, COLOR_TEXT_DIM, g_fontSmall);
     
     BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
@@ -2433,7 +2903,7 @@ void Connect() {
         }
         
         // Update connection status
-        g_isConnected = g_moeKoeConnected || g_neteaseConnected;
+        g_isConnected = g_moeKoeConnected || g_neteaseConnected || g_smtcConnected;
         MainDebugLog(g_isConnected ? "[Connect] Overall: CONNECTED" : "[Connect] Overall: FAILED");
         if (!g_isConnected) {
             g_pendingTitle = L"\x8FDE\x63A5\x5931\x8D25";
@@ -2515,6 +2985,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Click on IP/Port in settings tab shows a hint
             
             CreateTrayIcon(hwnd);
+            
+            // Initialize SMTC client for QQ Music support
+            MainDebugLog("[Main] Initializing SMTC client for QQ Music");
+            g_smtcClient = new smtc::SMTCClient();
+            if (g_smtcClient) {
+                g_smtcClient->setAppFilter(L"QQMusic");  // Only detect QQ Music
+                if (g_smtcClient->start()) {
+                    g_smtcClient->setCallback([hwnd](const smtc::MediaInfo& info) {
+                        // Post message to main thread for UI update
+                        PostMessageW(hwnd, WM_USER + 101, 0, 0);
+                    });
+                    MainDebugLog("[Main] SMTC client started successfully (QQ Music only)");
+                } else {
+                    MainDebugLog("[Main] SMTC client failed to start");
+                }
+            }
+            
             return 0;
         }
         
@@ -2549,7 +3036,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool oldClose = g_btnCloseHover, oldMin = g_btnMinHover, oldUpdate = g_btnUpdateHover, oldLaunch = g_btnLaunchHover;
             bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover;
             bool oldTabHover[2] = {g_tabHover[0], g_tabHover[1]};
-            bool oldMkHover = g_moeKoeBoxHover, oldNcHover = g_neteaseBoxHover;
             
             // Tab hover detection
             int tabW = 80;
@@ -2561,31 +3047,63 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Button hover detection (Main Tab only)
             if (g_currentTab == 0) {
                 int platformRowY = rowY;
-                int btnY = rowY + 60;
-                int launchBtnY = btnY + 55;
+                int platformBoxX = CARD_PADDING + 18;
+                int platformBoxY = platformRowY + 22;
+                int platformBoxW = leftColW - 36;
+                int platformBoxH = 36;
+                int menuItemH = 36;
+                int menuH = g_platformCount * menuItemH + 8;
+                int menuExtraSpace = g_platformMenuOpen ? (g_platformCount * menuItemH + 12) : 0;
+                int btnY = platformRowY + 80 + menuExtraSpace;  // Match drawing position
+                int launchBtnY = btnY + 48;
                 
-                // Platform box hover detection
-                int boxW = (leftColW - 36 - 10) / 2;
-                int box1X = CARD_PADDING + 18;
-                int box2X = box1X + boxW + 10;
-                g_moeKoeBoxHover = IsInRect(x, y, box1X, platformRowY + 22, boxW, 32);
-                g_neteaseBoxHover = IsInRect(x, y, box2X, platformRowY + 22, boxW, 32);
+                // Platform box hover
+                bool oldPlatformBoxHover = g_platformBoxHover;
+                g_platformBoxHover = IsInRect(x, y, platformBoxX, platformBoxY, platformBoxW, platformBoxH);
                 
-                g_btnConnectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 42);
-                g_btnLaunchHover = !g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36);
+                // Platform menu item hover (if menu is open) - menu is BELOW the box
+                int oldMenuHover = g_platformMenuHover;
+                g_platformMenuHover = -1;
+                if (g_platformMenuOpen) {
+                    int menuY = platformBoxY + platformBoxH + 4;  // Menu below platform box
+                    int menuW = platformBoxW;
+                    
+                    for (int i = 0; i < g_platformCount; i++) {
+                        int itemY = menuY + 4 + i * menuItemH;
+                        if (IsInRect(x, y, platformBoxX + 4, itemY, menuW - 8, menuItemH - 4)) {
+                            g_platformMenuHover = i;
+                            break;
+                        }
+                    }
+                    
+                    // When menu is open, don't detect button hovers
+                    g_btnConnectHover = false;
+                    g_btnLaunchHover = false;
+                } else {
+                    // Only detect button hovers when menu is closed
+                    g_btnConnectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 40);
+                    g_btnLaunchHover = !g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36);
+                }
                 g_btnExportLogHover = false;
                 g_btnAdminHover = false;
+                
+                // Check if we need to redraw
+                if (g_platformBoxHover != oldPlatformBoxHover || g_platformMenuHover != oldMenuHover) {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
             } else {
+                // Close platform menu when switching tabs
+                g_platformMenuOpen = false;
+                g_platformBoxHover = false;
+                g_platformMenuHover = -1;
                 g_btnConnectHover = false;
                 g_btnLaunchHover = false;
-                g_moeKoeBoxHover = false;
-                g_neteaseBoxHover = false;
-                // Settings tab - export log button and admin link
-                // rowY starts at contentY + 55
-                // IP: rowY, Port: rowY + 70, Perf: rowY + 135, AutoUpdate: rowY + 167, ShowPlatform: rowY + 199, Tray: rowY + 231, AutoStart: rowY + 263, RunAsAdmin: rowY + 295
-                // Admin status: rowY + 330, Export button: rowY + 380
-                int adminY = rowY + 70 + 65 + 32 + 32 + 32 + 32 + 35;  // RunAsAdmin + 35
-                int exportLogY = adminY + 50;
+                // Settings tab positions (relative to rowY = contentY + 55):
+                // IP(75) + Port(70) + 6 checkboxes(38*6=228) = 373
+                // Admin Status text at: rowY + 373 + 4 = rowY + 377
+                // Export Log at: rowY + 373 + 55 = rowY + 428
+                int adminY = rowY + 75 + 70 + 38*6 + 4;  // rowY + 377 (text is at +4)
+                int exportLogY = rowY + 75 + 70 + 38*6 + 55;  // rowY + 428
                 g_btnAdminHover = !IsRunningAsAdmin() && IsInRect(x, y, checkboxX, adminY, 150, 22);
                 g_btnExportLogHover = IsInRect(x, y, checkboxX, exportLogY, leftColW - 36 - checkboxX, 32);
             }
@@ -2599,7 +3117,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 oldClose != g_btnCloseHover || oldMin != g_btnMinHover || oldUpdate != g_btnUpdateHover || 
                 oldLaunch != g_btnLaunchHover || oldExportLog != g_btnExportLogHover ||
                 oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] ||
-                g_moeKoeBoxHover != oldMkHover || g_neteaseBoxHover != oldNcHover ||
                 g_btnAdminHover != oldAdmin) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -2698,32 +3215,51 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             if (g_currentTab == 0) {
                 // === MAIN TAB click handling ===
-                int btnY = rowY + 55;
-                int launchBtnY = btnY + 45;
+                int platformBoxX = CARD_PADDING + 18;
+                int platformBoxY = rowY + 22;
+                int platformBoxW = leftColW - 36;
+                int platformBoxH = 36;
+                int menuItemH = 36;
+                int menuH = g_platformCount * menuItemH + 8;
+                int btnY = rowY + 80;  // Match drawing position (increased spacing)
+                int launchBtnY = btnY + 48;
                 
-                // Platform box clicks - manually switch active platform
-                int boxW = (leftColW - 36 - 10) / 2;
-                int box1X = CARD_PADDING + 18;
-                int box2X = box1X + boxW + 10;
-                
-                // Click on MoeKoe box
-                if (g_moeKoeConnected && IsInRect(x, y, box1X, rowY + 22, boxW, 32)) {
-                    g_activePlatform = 0;
-                    g_autoPlatformSwitch = false;  // Manual selection disables auto switch
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
+                // Platform menu item click (if menu is open) - menu is BELOW the box
+                if (g_platformMenuOpen) {
+                    int menuY = platformBoxY + platformBoxH + 4;  // Menu below platform box
+                    
+                    for (int i = 0; i < g_platformCount; i++) {
+                        int itemY = menuY + 4 + i * menuItemH;
+                        if (IsInRect(x, y, platformBoxX + 4, itemY, platformBoxW - 8, menuItemH - 4)) {
+                            if (g_platforms[i].connected) {
+                                g_activePlatform = i;
+                                g_autoPlatformSwitch = false;
+                            }
+                            g_platformMenuOpen = false;
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        }
+                    }
+                    
+                    // Click outside menu - close it (but not on platform box)
+                    if (!IsInRect(x, y, platformBoxX, platformBoxY, platformBoxW, platformBoxH)) {
+                        g_platformMenuOpen = false;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
                 }
-                // Click on Netease box
-                if (g_neteaseConnected && IsInRect(x, y, box2X, rowY + 22, boxW, 32)) {
-                    g_activePlatform = 1;
-                    g_autoPlatformSwitch = false;  // Manual selection disables auto switch
+                
+                // Platform box click - toggle menu
+                if (IsInRect(x, y, platformBoxX, platformBoxY, platformBoxW, platformBoxH)) {
+                    g_platformMenuOpen = !g_platformMenuOpen;
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
                 
                 // Connect button
-                if (IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 38)) {
+                if (IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 40)) {
                     g_autoPlatformSwitch = true;  // Re-enable auto switch when reconnecting
+                    g_platformMenuOpen = false;   // Close menu
                     ApplySettings();
                     Connect();
                 }
@@ -3146,6 +3682,87 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         
+        case WM_USER + 101: {
+            // SMTC (QQ Music) media update
+            if (g_smtcClient) {
+                smtc::MediaInfo smtcInfo = g_smtcClient->getCurrentMedia();
+                g_smtcConnected = smtcInfo.hasData;
+                
+                // Update overall connection status
+                if (smtcInfo.hasData) {
+                    g_isConnected = true;
+                }
+                
+                if (smtcInfo.hasData && smtcInfo.isPlaying) {
+                    g_smtcLastPlayTime = GetTickCount();
+                    
+                    // Auto switch to QQ Music if enabled
+                    if (g_autoPlatformSwitch && g_activePlatform != 2) {
+                        g_activePlatform = 2;
+                        MainDebugLog("[Main] Auto-switched to QQ Music platform");
+                    }
+                    
+                    // Update pending song info for OSC
+                    if (g_activePlatform == 2) {
+                        g_pendingTitle = smtcInfo.title;
+                        g_pendingArtist = smtcInfo.artist;
+                        g_pendingDuration = smtcInfo.duration;
+                        g_pendingCurrentTime = smtcInfo.position;
+                        g_pendingIsPlaying = smtcInfo.isPlaying;
+                        g_pendingTime = FormatTime(smtcInfo.position) + L" / " + FormatTime(smtcInfo.duration);
+                        g_pendingProgress = smtcInfo.duration > 0 ? smtcInfo.position / smtcInfo.duration : 0;
+                        
+                        // Check if song changed - search lyrics
+                        if (smtcInfo.title != g_qqMusicLastTitle || smtcInfo.artist != g_qqMusicLastArtist) {
+                            g_qqMusicLastTitle = smtcInfo.title;
+                            g_qqMusicLastArtist = smtcInfo.artist;
+                            g_pendingLyrics.clear();  // Clear old lyrics
+                            
+                            // Search lyrics in background thread
+                            if (g_lyricsSearchThread.joinable()) {
+                                g_lyricsSearchRunning = false;
+                                g_lyricsSearchThread.join();
+                            }
+                            g_lyricsSearchRunning = true;
+                            g_lyricsSearchThread = std::thread([title = smtcInfo.title, artist = smtcInfo.artist, hwnd]() {
+                                auto lyrics = SearchLyricsForQQMusic(title, artist);
+                                if (g_lyricsSearchRunning && !lyrics.empty()) {
+                                    g_pendingLyrics = lyrics;
+                                    InvalidateRect(hwnd, nullptr, FALSE);
+                                }
+                            });
+                        }
+                        
+                        // Send OSC message for QQ Music
+                        if (g_osc && g_oscEnabled) {
+                            // Build SongInfo from pending data
+                            moekoe::SongInfo info;
+                            info.title = g_pendingTitle;
+                            info.artist = g_pendingArtist;
+                            info.duration = g_pendingDuration;
+                            info.currentTime = g_pendingCurrentTime;
+                            info.isPlaying = g_pendingIsPlaying;
+                            info.hasData = true;
+                            info.lyrics = g_pendingLyrics;
+                            
+                            DWORD now = GetTickCount();
+                            if (now - g_lastOscSendTime >= 1500) {  // 1.5s interval
+                                std::wstring oscMsg = FormatOSCMessage(info);
+                                if (oscMsg != g_lastOscMessage) {
+                                    g_osc->sendChatbox(oscMsg);
+                                    g_lastOscMessage = oscMsg;
+                                    g_lastOscSendTime = now;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        
         case WM_CLOSE:
             // Save window position and size before closing
             {
@@ -3162,6 +3779,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         
         case WM_DESTROY:
+            // Cleanup lyrics search thread
+            g_lyricsSearchRunning = false;
+            if (g_lyricsSearchThread.joinable()) {
+                g_lyricsSearchThread.join();
+            }
             if (g_fontTitle) DeleteObject(g_fontTitle);
             if (g_fontSubtitle) DeleteObject(g_fontSubtitle);
             if (g_fontNormal) DeleteObject(g_fontNormal);
@@ -3171,6 +3793,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_brushBg) DeleteObject(g_brushBg);
             if (g_brushCard) DeleteObject(g_brushCard);
             if (g_brushEditBg) DeleteObject(g_brushEditBg);
+            // Cleanup SMTC client
+            if (g_smtcClient) {
+                g_smtcClient->stop();
+                delete g_smtcClient;
+                g_smtcClient = nullptr;
+            }
             PostQuitMessage(0);
             return 0;
     }
