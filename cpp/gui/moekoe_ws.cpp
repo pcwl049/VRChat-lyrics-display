@@ -381,7 +381,7 @@ static std::vector<LyricLine> parseKRC(const std::string& krcData) {
                         }
                         
                         if (!text.empty() && startTime >= 0) {
-                            // Skip metadata lines like "²Ì½¡ÑÅ - ×¹Âä" at the start
+                            // Skip metadata lines like "ï¿½Ì½ï¿½ï¿½ï¿½ - ×¹ï¿½ï¿½" at the start
                             if (lyrics.empty() && startTime == 0) {
                                 // Check if it's artist-title line
                                 if (text.find(" - ") != std::string::npos) {
@@ -554,7 +554,7 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                 if (ldEnd != std::string::npos) {
                     std::string lyricsData = msg.substr(ldStart, ldEnd - ldStart);
                     
-                    // Unescape JSON strings
+                    // Unescape JSON strings (including \uXXXX Unicode escapes)
                     std::string unescaped;
                     for (size_t i = 0; i < lyricsData.size(); i++) {
                         if (lyricsData[i] == '\\' && i + 1 < lyricsData.size()) {
@@ -564,6 +564,32 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                                 case 't': unescaped += '\t'; i++; break;
                                 case '\\': unescaped += '\\'; i++; break;
                                 case '"': unescaped += '"'; i++; break;
+                                case 'u': {
+                                    // Handle \uXXXX Unicode escape
+                                    if (i + 5 < lyricsData.size()) {
+                                        std::string hex = lyricsData.substr(i + 2, 4);
+                                        try {
+                                            unsigned int codepoint = std::stoul(hex, nullptr, 16);
+                                            // Convert Unicode codepoint to UTF-8
+                                            if (codepoint < 0x80) {
+                                                unescaped += (char)codepoint;
+                                            } else if (codepoint < 0x800) {
+                                                unescaped += (char)(0xC0 | (codepoint >> 6));
+                                                unescaped += (char)(0x80 | (codepoint & 0x3F));
+                                            } else {
+                                                unescaped += (char)(0xE0 | (codepoint >> 12));
+                                                unescaped += (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                                                unescaped += (char)(0x80 | (codepoint & 0x3F));
+                                            }
+                                            i += 5;  // Skip \uXXXX
+                                        } catch (...) {
+                                            unescaped += lyricsData[i];
+                                        }
+                                    } else {
+                                        unescaped += lyricsData[i];
+                                    }
+                                    break;
+                                }
                                 default: unescaped += lyricsData[i]; break;
                             }
                         } else {

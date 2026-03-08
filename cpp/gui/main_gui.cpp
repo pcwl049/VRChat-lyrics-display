@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.3.0"
-#define APP_VERSION_NUM 300  // 0.3.0 -> 0*10000 + 3*100 + 0 = 300
+#define APP_VERSION "0.3.5"
+#define APP_VERSION_NUM 305  // 0.3.5 -> 0*10000 + 3*100 + 5 = 305
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
@@ -16,6 +16,11 @@
 #include <dwmapi.h>
 #include <psapi.h>
 #include <cstdio>
+
+// GDI+ for anti-aliased rendering
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+using namespace Gdiplus;
 
 // Debug log using Windows API - write to user temp directory
 static void MainDebugLog(const char* msg) {
@@ -57,29 +62,93 @@ static void MainDebugLog(const char* msg) {
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
 
-// Colors - DeepBlue Theme (毛玻璃深空蓝主题)
-#define COLOR_BG_START RGB(15, 20, 35)
-#define COLOR_BG_END RGB(25, 35, 55)
-#define COLOR_BG RGB(18, 18, 24)
-#define COLOR_CARD RGB(30, 40, 60)
-#define COLOR_CARD_BORDER RGB(50, 70, 100)
-#define COLOR_ACCENT RGB(80, 180, 255)
-#define COLOR_ACCENT_GLOW RGB(60, 140, 220)
-#define COLOR_TEXT RGB(240, 245, 255)
-#define COLOR_TEXT_DIM RGB(140, 150, 170)
-#define COLOR_BORDER RGB(50, 70, 100)
-#define COLOR_TITLEBAR RGB(20, 28, 45)
-#define COLOR_EDIT_BG RGB(35, 45, 65)
-#define COLOR_GLASS_TINT RGB(20, 30, 50)
-#define GLASS_ALPHA 220
+// Theme colors (支持深浅色模式)
+bool g_darkMode = true;  // 默认深色模式
+
+// Dark theme colors
+struct ThemeColors {
+    COLORREF bgStart, bgEnd, bg, card, cardBorder, accent, accentGlow;
+    COLORREF text, textDim, border, titlebar, editBg, glassTint;
+    int glassAlpha;
+};
+
+ThemeColors g_colors;
+
+void UpdateThemeColors() {
+    if (g_darkMode) {
+        // Dark theme (毛玻璃深空蓝主题)
+        g_colors.bgStart = RGB(18, 18, 24);
+        g_colors.bgEnd = RGB(18, 18, 24);
+        g_colors.bg = RGB(18, 18, 24);
+        g_colors.card = RGB(30, 40, 60);
+        g_colors.cardBorder = RGB(50, 70, 100);
+        g_colors.accent = RGB(80, 180, 255);
+        g_colors.accentGlow = RGB(60, 140, 220);
+        g_colors.text = RGB(240, 245, 255);
+        g_colors.textDim = RGB(140, 150, 170);
+        g_colors.border = RGB(50, 70, 100);
+        g_colors.titlebar = RGB(20, 28, 45);
+        g_colors.editBg = RGB(35, 45, 65);
+        g_colors.glassTint = RGB(20, 30, 50);
+        g_colors.glassAlpha = 100;  // 大幅降低不透明度，让毛玻璃非常明显
+    } else {
+        // Light theme (柔和深灰蓝主题 - 彻底避免过曝)
+        g_colors.bgStart = RGB(140, 145, 155);
+        g_colors.bgEnd = RGB(140, 145, 155);
+        g_colors.bg = RGB(140, 145, 155);  // 中灰色背景
+        g_colors.card = RGB(165, 170, 180);  // 卡片稍亮
+        g_colors.cardBorder = RGB(100, 110, 125);
+        g_colors.accent = RGB(35, 115, 200);
+        g_colors.accentGlow = RGB(25, 95, 170);
+        g_colors.text = RGB(30, 35, 45);
+        g_colors.textDim = RGB(70, 80, 95);
+        g_colors.border = RGB(100, 110, 125);
+        g_colors.titlebar = RGB(125, 130, 140);
+        g_colors.editBg = RGB(150, 155, 165);
+        g_colors.glassTint = RGB(110, 120, 135);
+        g_colors.glassAlpha = 80;  // 大幅提高透明度，让毛玻璃非常明显
+    }
+}
+
+// Color access macros (保持兼容性)
+#define COLOR_BG_START g_colors.bgStart
+#define COLOR_BG_END g_colors.bgEnd
+#define COLOR_BG g_colors.bg
+#define COLOR_CARD g_colors.card
+#define COLOR_CARD_BORDER g_colors.cardBorder
+#define COLOR_ACCENT g_colors.accent
+#define COLOR_ACCENT_GLOW g_colors.accentGlow
+#define COLOR_TEXT g_colors.text
+#define COLOR_TEXT_DIM g_colors.textDim
+#define COLOR_BORDER g_colors.border
+#define COLOR_TITLEBAR g_colors.titlebar
+#define COLOR_EDIT_BG g_colors.editBg
+#define COLOR_GLASS_TINT g_colors.glassTint
+#define GLASS_ALPHA g_colors.glassAlpha
+
+// Theme-dependent colors (根据主题自动选择)
+#define COLOR_BTN_BG (g_darkMode ? RGB(40, 40, 55) : RGB(225, 230, 240))
+#define COLOR_BTN_HOVER (g_darkMode ? RGB(55, 55, 75) : RGB(210, 215, 225))
+#define COLOR_MENU_BG (g_darkMode ? RGB(35, 40, 50) : RGB(240, 242, 248))
+#define COLOR_MENU_BORDER (g_darkMode ? RGB(70, 75, 85) : RGB(180, 185, 195))
+#define COLOR_MENU_HOVER (g_darkMode ? RGB(50, 55, 65) : RGB(225, 230, 240))
+#define COLOR_BOX_BG (g_darkMode ? RGB(40, 45, 55) : RGB(248, 250, 255))
+#define COLOR_BOX_HOVER (g_darkMode ? RGB(50, 55, 65) : RGB(235, 240, 250))
+#define COLOR_BOX_BORDER (g_darkMode ? RGB(60, 65, 75) : RGB(190, 195, 205))
+#define COLOR_BOX_BORDER_HOVER (g_darkMode ? RGB(80, 90, 110) : RGB(150, 160, 175))
+#define COLOR_CHECK_BG (g_darkMode ? RGB(50, 50, 65) : RGB(220, 225, 235))
+#define COLOR_CHECK_ACCENT COLOR_ACCENT
+#define COLOR_SUCCESS RGB(80, 200, 120)
+#define COLOR_WARNING RGB(255, 180, 50)
+#define COLOR_ERROR RGB(255, 100, 100)
 
 // Tray icon
 #define TRAY_ICON_ID 1
 #define WM_TRAYICON (WM_USER + 200)
 
 // OSC rate limits - aligned with preview refresh rate
-const DWORD OSC_MIN_INTERVAL = 1500;    // 1.5s when playing
-const DWORD OSC_PAUSE_INTERVAL = 1500;  // 1.5s when paused
+const DWORD OSC_MIN_INTERVAL = 2000;    // 2s when playing (avoid VRChat rate limit)
+const DWORD OSC_PAUSE_INTERVAL = 2000;  // 2s when paused
 
 // Window size (scaled for high DPI)
 const int WIN_W_DEFAULT = 650;
@@ -97,12 +166,50 @@ const int CARD_PADDING = 25;
 std::string WstringToUtf8(const std::wstring& wstr);
 std::wstring Utf8ToWstring(const std::string& str);
 
-// Animation helper
+// Animation helpers
 struct Animation {
-    double value = 0.0, target = 0.0, speed = 0.15;
+    double value = 0.0, target = 0.0, speed = 0.25;  // 提高默认速度
     void update() { value += (target - value) * speed; if (fabs(target - value) < 0.001) value = target; }
     void setTarget(double t) { target = t; }
+    bool isActive() const { return fabs(target - value) > 0.001; }
 };
+
+// Smooth value for color transitions
+struct SmoothValue {
+    double value = 0.0, target = 0.0, speed = 0.15;  // 提高默认速度
+    void update() { value += (target - value) * speed; }
+    void setTarget(double t) { target = t; }
+    void setImmediate(double v) { value = target = v; }
+    bool isActive() const { return fabs(target - value) > 0.001; }
+};
+
+// Global animation state
+Animation g_windowFadeAnim;       // 窗口启动淡入
+Animation g_windowScaleAnim;      // 窗口启动缩放
+Animation g_tabSlideAnim;         // 标签页滑动
+Animation g_menuExpandAnim;       // 下拉菜单展开
+Animation g_connectPulseAnim;     // 连接状态脉冲
+Animation g_lyricScrollAnim;      // 歌词滚动
+SmoothValue g_themeTransition;    // 主题切换过渡
+
+// 下拉菜单逐条淡入动画
+Animation g_menuItemAnims[10];    // 最多支持10个菜单项
+Animation g_arrowRotationAnim;    // 下拉箭头旋转动画
+double g_updateRotation = 0.0;   // 更新按钮旋转角度
+DWORD g_lastRotationTime = 0;    // 上次旋转更新时间
+
+// 字符数进度条动画
+SmoothValue g_charProgressAnim(0.0);  // 进度条平滑过渡
+bool g_charProgressHover = false;     // 鼠标悬停检测
+SmoothValue g_charTooltipAnim(0.0);   // tooltip淡入淡出动画
+
+bool g_startupAnimComplete = false;
+DWORD g_startupAnimStart = 0;
+const DWORD STARTUP_ANIM_DURATION = 500;  // 启动动画时长(ms)
+
+// Tab slide animation state
+int g_prevTab = 0;
+int g_tabSlideDirection = 0;  // -1 = left, 1 = right
 
 // Global state
 CRITICAL_SECTION g_cs;
@@ -144,7 +251,7 @@ std::vector<PlatformInfo> g_platforms = {
 const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐" };
 int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
-bool g_autoPlatformSwitch = true; // Auto switch platforms when playing
+bool g_autoPlatformSwitch = false; // Auto switch platforms when playing (disabled by default)
 const DWORD PLATFORM_SWITCH_DELAY = 2000; // Wait 2s before switching platforms
 int g_currentTab = 0;        // 0=Main, 1=Settings
 bool g_tabHover[2] = {false, false};
@@ -176,6 +283,16 @@ int g_dialogBtnHover = -1;
 DialogConfig g_dialogConfig;
 int g_dialogWidth = 400;
 int g_dialogHeight = 200;
+
+// Tray menu window
+HWND g_trayMenuHwnd = nullptr;
+int g_trayMenuHover = -1;
+bool g_trayMenuVisible = false;
+
+// Dialog animation state
+Animation g_dialogFadeAnim;
+Animation g_dialogScaleAnim;
+bool g_dialogAnimComplete = false;
 
 // Fonts
 HFONT g_fontTitle = nullptr;
@@ -854,7 +971,8 @@ bool DownloadAndInstallUpdate() {
 }
 
 // Button animations
-Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim;
+Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim;
+bool g_btnThemeHover = false;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
 bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false;
 
@@ -866,6 +984,7 @@ double g_pendingDuration = 0;
 bool g_pendingIsPlaying = true;
 std::vector<moekoe::LyricLine> g_pendingLyrics;
 DWORD g_lastOscSendTime = 0;
+DWORD g_lastTimerTick = 0;  // For lag detection
 std::wstring g_lastOscMessage;
 bool g_lastIsPlaying = false;
 bool g_playStateChanged = false;
@@ -922,12 +1041,14 @@ int g_oscPort = 9000;
 int g_moekoePort = 6520;
 bool g_oscEnabled = true;
 bool g_minimizeToTray = true;
+bool g_startMinimized = false;  // Start minimized to tray
 bool g_showPerfOnPause = true;  // Show performance stats when paused
 bool g_autoUpdate = true;       // Auto check for updates on startup
 bool g_showPlatform = true;     // Show platform name in OSC message
 bool g_autoStart = false;       // Auto start with Windows
 bool g_runAsAdmin = false;      // Run as administrator on startup
 bool g_isConnected = false;
+bool g_isConnecting = false;    // 防止重复连接
 HANDLE g_mutex = nullptr;       // Single instance mutex
 std::vector<std::wstring> g_noLyricMsgs;
 int g_lastNoLyricIdx = -1;
@@ -1118,10 +1239,15 @@ void LoadConfig(const wchar_t* path) {
     g_moekoePort = getInt("moekoe_port", 6520);
     g_oscEnabled = getBool("osc_enabled", true);
     g_minimizeToTray = getBool("minimize_to_tray", true);
+    g_startMinimized = getBool("start_minimized", false);
     g_showPerfOnPause = getBool("show_perf_on_pause", true);
     g_autoUpdate = getBool("auto_update", true);
     g_showPlatform = getBool("show_platform", true);
-    
+    g_darkMode = getBool("dark_mode", true);
+
+    // Apply theme
+    UpdateThemeColors();
+
     // Auto-start: sync with registry (registry is source of truth)
     g_autoStart = CheckAutoStart();
     // Run as admin: load from config
@@ -1143,10 +1269,11 @@ void SaveConfig(const wchar_t* path) {
     FILE* f = _wfopen(path, L"wb");
     if (!f) return;
     fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%ls\",\n    \"port\": %d\n  },\n", g_oscIp.c_str(), g_oscPort);
-    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"auto_start\": %s,\n", 
-            g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false", 
-            g_showPerfOnPause ? "true" : "false", g_autoUpdate ? "true" : "false", 
-            g_showPlatform ? "true" : "false", g_autoStart ? "true" : "false");
+    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n",
+            g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false",
+            g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
+            g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
+            g_darkMode ? "true" : "false", g_autoStart ? "true" : "false");
     fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
     fprintf(f, "  \"skip_version\": \"%ls\"\n}\n", g_skipVersion.c_str());
@@ -1683,16 +1810,62 @@ void EnableBlurBehind(HWND hwnd) {
     auto fn = (SetWindowCompositionAttribute_t)GetProcAddress(hUser, "SetWindowCompositionAttribute");
     
     if (fn) {
-        ACCENT_POLICY policy = { 4, 2, (COLOR_GLASS_TINT & 0xFFFFFF) | (GLASS_ALPHA << 24), 0 };
-        struct _WINDOWCOMPOSITIONATTRIBDATA {
-            int Attrib;
-            void* pvData;
-            int cbData;
-        } data = { 19, &policy, sizeof(policy) };
-        fn(hwnd, &data);
+        if (g_darkMode) {
+            // Dark mode: 深色毛玻璃
+            ACCENT_POLICY policy = { 4, 2, (COLOR_GLASS_TINT & 0xFFFFFF) | (GLASS_ALPHA << 24), 0 };
+            struct _WINDOWCOMPOSITIONATTRIBDATA {
+                int Attrib;
+                void* pvData;
+                int cbData;
+            } data = { 19, &policy, sizeof(policy) };
+            fn(hwnd, &data);
+        } else {
+            // Light mode: 浅色毛玻璃，使用更柔和的颜色
+            COLORREF lightTint = RGB(200, 205, 215);
+            ACCENT_POLICY policy = { 4, 2, (lightTint & 0xFFFFFF) | (200 << 24), 0 };
+            struct _WINDOWCOMPOSITIONATTRIBDATA {
+                int Attrib;
+                void* pvData;
+                int cbData;
+            } data = { 19, &policy, sizeof(policy) };
+            fn(hwnd, &data);
+        }
     }
     
     FreeLibrary(hUser);
+}
+
+// Create a rounded window region for the main window
+HRGN CreateRoundedWindowRegion(HWND hwnd, int cornerRadius = 12) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    
+    // 创建圆角矩形区域
+    HRGN hrgn = CreateRoundRectRgn(
+        rc.left, rc.top, rc.right, rc.bottom,
+        cornerRadius, cornerRadius
+    );
+    
+    return hrgn;
+}
+
+// Update window system theme (title bar color, rounded corners)
+void UpdateWindowSystemTheme(HWND hwnd) {
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (hDwm) {
+        typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
+        auto fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        if (fn) {
+            // DWMWA_WINDOW_CORNER_PREFERENCE = 33
+            // 0=DEFAULT, 1=DONOTROUND, 2=ROUND, 3=ROUNDSMALL
+            int corner = 2;  // ROUND - 使用系统圆角
+            fn(hwnd, 33, &corner, sizeof(corner));
+            // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            BOOL dark = g_darkMode ? TRUE : FALSE;
+            fn(hwnd, 20, &dark, sizeof(dark));
+        }
+        FreeLibrary(hDwm);
+    }
 }
 
 // Check if running as administrator
@@ -1746,28 +1919,77 @@ void CreateTrayIcon(HWND hwnd) {
 void RemoveTrayIcon() { Shell_NotifyIconW(NIM_DELETE, &g_nid); }
 void UpdateTrayTip(const wchar_t* text) { wcscpy_s(g_nid.szTip, text); Shell_NotifyIconW(NIM_MODIFY, &g_nid); }
 
+// 创建圆角矩形路径的辅助函数
+void CreateRoundRectPath(Gdiplus::GraphicsPath* path, const Gdiplus::RectF& rect, int radius) {
+    Gdiplus::REAL d = (Gdiplus::REAL)(radius * 2);
+    path->AddArc(rect.X, rect.Y, d, d, 180.0f, 90.0f);
+    path->AddArc(rect.X + rect.Width - d, rect.Y, d, d, 270.0f, 90.0f);
+    path->AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0.0f, 90.0f);
+    path->AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90.0f, 90.0f);
+    path->CloseFigure();
+}
+
+// 使用 GDI+ 绘制抗锯齿圆角矩形
 void DrawRoundRect(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color) {
-    HPEN pen = CreatePen(PS_SOLID, 1, color);
-    HBRUSH brush = CreateSolidBrush(color);
-    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
-    RoundRect(hdc, x, y, x + w, y + h, radius * 2, radius * 2);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+    Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    
+    // 创建圆角矩形路径
+    GraphicsPath path;
+    int d = radius * 2;
+    path.AddArc(x, y, d, d, 180, 90);
+    path.AddArc(x + w - d, y, d, d, 270, 90);
+    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc(x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+    
+    // 填充
+    SolidBrush brush(Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
+    graphics.FillPath(&brush, &path);
 }
 
 void DrawRoundRectWithBorder(HDC hdc, int x, int y, int w, int h, int radius, COLORREF fillColor, COLORREF borderColor) {
-    HPEN pen = CreatePen(PS_SOLID, 2, borderColor);
-    HBRUSH brush = CreateSolidBrush(fillColor);
-    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
-    RoundRect(hdc, x, y, x + w, y + h, radius * 2, radius * 2);
-    SelectObject(hdc, oldPen);
-    SelectObject(hdc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+    Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    
+    // 创建圆角矩形路径
+    GraphicsPath path;
+    int d = radius * 2;
+    path.AddArc(x, y, d, d, 180, 90);
+    path.AddArc(x + w - d, y, d, d, 270, 90);
+    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc(x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+    
+    // 填充
+    SolidBrush brush(Color(255, GetRValue(fillColor), GetGValue(fillColor), GetBValue(fillColor)));
+    graphics.FillPath(&brush, &path);
+    
+    // 边框
+    Pen pen(Color(255, GetRValue(borderColor), GetGValue(borderColor), GetBValue(borderColor)), 2);
+    graphics.DrawPath(&pen, &path);
+}
+
+// 绘制半透明圆角矩形（毛玻璃效果）
+void DrawRoundRectAlpha(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color, int alpha) {
+    Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    
+    // 创建圆角矩形路径
+    GraphicsPath path;
+    int d = radius * 2;
+    path.AddArc(x, y, d, d, 180, 90);
+    path.AddArc(x + w - d, y, d, d, 270, 90);
+    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+    path.AddArc(x, y + h - d, d, d, 90, 90);
+    path.CloseFigure();
+    
+    // 填充（带透明度）
+    SolidBrush brush(Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color)));
+    graphics.FillPath(&brush, &path);
 }
 
 void DrawTextCentered(HDC hdc, const wchar_t* text, int cx, int y, COLORREF color, HFONT font) {
@@ -1819,9 +2041,33 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Enable blur behind effect for dialog
             EnableBlurBehind(hwnd);
             SetTimer(hwnd, 1, 16, nullptr);
+            
+            // 初始化弹窗动画
+            g_dialogAnimComplete = false;
+            g_dialogFadeAnim.value = 0.0;
+            g_dialogFadeAnim.target = 1.0;
+            g_dialogFadeAnim.speed = 0.15;
+            g_dialogScaleAnim.value = 0.92;
+            g_dialogScaleAnim.target = 1.0;
+            g_dialogScaleAnim.speed = 0.2;
+            
+            // 初始透明度
+            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
             return 0;
         }
         case WM_TIMER: {
+            // 更新弹窗动画
+            if (!g_dialogAnimComplete) {
+                g_dialogFadeAnim.update();
+                g_dialogScaleAnim.update();
+                
+                BYTE alpha = (BYTE)(g_dialogFadeAnim.value * 255);
+                SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                
+                if (!g_dialogFadeAnim.isActive() && !g_dialogScaleAnim.isActive()) {
+                    g_dialogAnimComplete = true;
+                }
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1838,113 +2084,130 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
             HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
             
-            // Background
+            // 应用缩放动画（从中心向外扩展）
+            double scale = g_dialogScaleAnim.value;
+            int drawW = (int)(w * scale);
+            int drawH = (int)(h * scale);
+            int offsetX = (w - drawW) / 2;
+            int offsetY = (h - drawH) / 2;
+            
+            // 先填充背景
             HBRUSH bgBrush = CreateSolidBrush(COLOR_BG);
             FillRect(memDC, &rc, bgBrush);
             DeleteObject(bgBrush);
             
+            // 创建临时DC绘制原始内容
+            HDC tempDC = CreateCompatibleDC(hdc);
+            HBITMAP tempBmp = CreateCompatibleBitmap(hdc, w, h);
+            HBITMAP oldTempBmp = (HBITMAP)SelectObject(tempDC, tempBmp);
+            
+            // 在临时DC上绘制原始尺寸内容
             // Card with rounded corners
-            DrawRoundRect(memDC, 0, 0, w, h, 16, COLOR_CARD);
+            DrawRoundRect(tempDC, 0, 0, w, h, 16, COLOR_CARD);
             
             // Accent bar - color based on type
             COLORREF accentColor = COLOR_ACCENT;
-            if (g_dialogConfig.type == DIALOG_ERROR) accentColor = RGB(255, 100, 100);
-            else if (g_dialogConfig.type == DIALOG_CONFIRM) accentColor = RGB(255, 180, 50);
-            DrawRoundRect(memDC, 0, 0, 5, h, 2, accentColor);
+            if (g_dialogConfig.type == DIALOG_ERROR) accentColor = COLOR_ERROR;
+            else if (g_dialogConfig.type == DIALOG_CONFIRM) accentColor = COLOR_WARNING;
+            DrawRoundRect(tempDC, 0, 0, 5, h, 2, accentColor);
             
-            // Title (use main window's subtitle font, or default if not initialized)
-            SetTextColor(memDC, COLOR_TEXT);
-            SetBkMode(memDC, TRANSPARENT);
+            // Title
+            SetTextColor(tempDC, COLOR_TEXT);
+            SetBkMode(tempDC, TRANSPARENT);
             HFONT titleFont = g_fontSubtitle ? g_fontSubtitle : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HFONT oldFont = (HFONT)SelectObject(memDC, titleFont);
+            HFONT oldFont = (HFONT)SelectObject(tempDC, titleFont);
             if (!g_dialogConfig.title.empty()) {
-                TextOutW(memDC, 30, 25, g_dialogConfig.title.c_str(), (int)g_dialogConfig.title.length());
+                TextOutW(tempDC, 30, 25, g_dialogConfig.title.c_str(), (int)g_dialogConfig.title.length());
             }
-            SelectObject(memDC, oldFont);
+            SelectObject(tempDC, oldFont);
             
-            // Content (multi-line support, use main window's normal font)
+            // Content
             HFONT contentFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            oldFont = (HFONT)SelectObject(memDC, contentFont);
+            oldFont = (HFONT)SelectObject(tempDC, contentFont);
             int lineY = 70;
             int lineH = 32;
-            
-            // Split content by \n
             std::wstring content = g_dialogConfig.content;
             size_t pos = 0;
             while (pos < content.length()) {
                 size_t nextPos = content.find(L'\n', pos);
                 if (nextPos == std::wstring::npos) nextPos = content.length();
                 std::wstring line = content.substr(pos, nextPos - pos);
-                TextOutW(memDC, 25, lineY, line.c_str(), (int)line.length());
+                TextOutW(tempDC, 25, lineY, line.c_str(), (int)line.length());
                 lineY += lineH;
                 pos = nextPos + 1;
             }
-            SelectObject(memDC, oldFont);
+            SelectObject(tempDC, oldFont);
             
-            // Buttons layout
+            // Buttons
             int btnW = 110, btnH = 42;
             int btnY = h - 65;
             int btn1X, btn2X, btn3X;
             
             if (g_dialogConfig.hasBtn3) {
-                // Three buttons: Primary | Secondary | Skip
                 btnW = 100;
                 int totalW = btnW * 3 + 30;
                 btn1X = (w - totalW) / 2;
                 btn2X = btn1X + btnW + 10;
                 btn3X = btn2X + btnW + 10;
             } else if (g_dialogConfig.hasBtn2) {
-                // Two buttons
                 btn1X = w/2 - btnW - 15;
                 btn2X = w/2 + 15;
             } else {
-                // Single button (centered)
                 btn1X = w/2 - btnW/2;
                 btn2X = btn1X;
                 btn3X = btn1X;
             }
             
-            // Button 1 (Primary - accent)
+            // Button 1
             COLORREF btn1Bg = (g_dialogBtnHover == 0) ? RGB(110, 190, 255) : COLOR_ACCENT;
-            if (g_dialogConfig.type == DIALOG_ERROR) btn1Bg = (g_dialogBtnHover == 0) ? RGB(255, 120, 120) : RGB(220, 80, 80);
-            DrawRoundRect(memDC, btn1X, btnY, btnW, btnH, 8, btn1Bg);
+            if (g_dialogConfig.type == DIALOG_ERROR) btn1Bg = (g_dialogBtnHover == 0) ? RGB(255, 120, 120) : COLOR_ERROR;
+            DrawRoundRect(tempDC, btn1X, btnY, btnW, btnH, 8, btn1Bg);
             HFONT btnFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            oldFont = (HFONT)SelectObject(memDC, btnFont);
-            SetTextColor(memDC, RGB(0, 0, 0));
+            oldFont = (HFONT)SelectObject(tempDC, btnFont);
+            SetTextColor(tempDC, RGB(0, 0, 0));
             RECT btn1Rc = {btn1X, btnY, btn1X + btnW, btnY + btnH};
             if (!g_dialogConfig.btn1Text.empty()) {
-                DrawTextW(memDC, g_dialogConfig.btn1Text.c_str(), (int)g_dialogConfig.btn1Text.length(), &btn1Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(tempDC, g_dialogConfig.btn1Text.c_str(), (int)g_dialogConfig.btn1Text.length(), &btn1Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             
-            // Button 2 (Secondary - border style)
+            // Button 2
             if (g_dialogConfig.hasBtn2) {
-                COLORREF btn2Bg = (g_dialogBtnHover == 1) ? RGB(70, 70, 90) : RGB(50, 50, 65);
-                DrawRoundRect(memDC, btn2X, btnY, btnW, btnH, 8, btn2Bg);
+                COLORREF btn2Bg = (g_dialogBtnHover == 1) ? COLOR_BTN_HOVER : COLOR_BTN_BG;
+                DrawRoundRect(tempDC, btn2X, btnY, btnW, btnH, 8, btn2Bg);
                 HPEN borderPen = CreatePen(PS_SOLID, 1, COLOR_BORDER);
-                HPEN oldPen = (HPEN)SelectObject(memDC, borderPen);
-                SelectObject(memDC, GetStockObject(NULL_BRUSH));
-                RoundRect(memDC, btn2X, btnY, btn2X + btnW, btnY + btnH, 16, 16);
-                SelectObject(memDC, oldPen);
+                HPEN oldPen = (HPEN)SelectObject(tempDC, borderPen);
+                SelectObject(tempDC, GetStockObject(NULL_BRUSH));
+                RoundRect(tempDC, btn2X, btnY, btn2X + btnW, btnY + btnH, 16, 16);
+                SelectObject(tempDC, oldPen);
                 DeleteObject(borderPen);
-                SetTextColor(memDC, COLOR_TEXT);
+                SetTextColor(tempDC, COLOR_TEXT);
                 RECT btn2Rc = {btn2X, btnY, btn2X + btnW, btnY + btnH};
                 if (!g_dialogConfig.btn2Text.empty()) {
-                    DrawTextW(memDC, g_dialogConfig.btn2Text.c_str(), (int)g_dialogConfig.btn2Text.length(), &btn2Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    DrawTextW(tempDC, g_dialogConfig.btn2Text.c_str(), (int)g_dialogConfig.btn2Text.length(), &btn2Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
             }
             
-            // Button 3 (Tertiary - for Skip Version)
+            // Button 3
             if (g_dialogConfig.hasBtn3) {
-                COLORREF btn3Bg = (g_dialogBtnHover == 2) ? RGB(50, 50, 60) : RGB(35, 35, 45);
-                DrawRoundRect(memDC, btn3X, btnY, btnW, btnH, 8, btn3Bg);
-                SetTextColor(memDC, COLOR_TEXT_DIM);
+                COLORREF btn3Bg = (g_dialogBtnHover == 2) ? COLOR_BTN_HOVER : COLOR_BTN_BG;
+                DrawRoundRect(tempDC, btn3X, btnY, btnW, btnH, 8, btn3Bg);
+                SetTextColor(tempDC, COLOR_TEXT_DIM);
                 RECT btn3Rc = {btn3X, btnY, btn3X + btnW, btnY + btnH};
                 if (!g_dialogConfig.btn3Text.empty()) {
-                    DrawTextW(memDC, g_dialogConfig.btn3Text.c_str(), (int)g_dialogConfig.btn3Text.length(), &btn3Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    DrawTextW(tempDC, g_dialogConfig.btn3Text.c_str(), (int)g_dialogConfig.btn3Text.length(), &btn3Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 }
             }
             
-            SelectObject(memDC, oldFont);
+            SelectObject(tempDC, oldFont);
+            
+            // 缩放并复制到目标DC（从中心扩展）
+            SetStretchBltMode(memDC, HALFTONE);
+            StretchBlt(memDC, offsetX, offsetY, drawW, drawH, tempDC, 0, 0, w, h, SRCCOPY);
+            
+            // 清理临时DC
+            SelectObject(tempDC, oldTempBmp);
+            DeleteObject(tempBmp);
+            DeleteDC(tempDC);
             
             BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
             SelectObject(memDC, oldBmp);
@@ -2065,7 +2328,7 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-bool ShowCustomDialog(const DialogConfig& config) {
+int ShowCustomDialog(const DialogConfig& config) {
     g_dialogConfig = config;
     g_dialogBtnHover = -1;
     
@@ -2134,7 +2397,16 @@ bool ShowCustomDialog(const DialogConfig& config) {
         FreeLibrary(hDwm);
     }
     
-    SetLayeredWindowAttributes(g_dialogHwnd, 0, 255, LWA_ALPHA);
+    // 初始化弹窗动画
+    g_dialogFadeAnim.value = 0.0;
+    g_dialogFadeAnim.target = 1.0;
+    g_dialogFadeAnim.speed = 0.2;
+    g_dialogScaleAnim.value = 0.85;
+    g_dialogScaleAnim.target = 1.0;
+    g_dialogScaleAnim.speed = 0.25;
+    g_dialogAnimComplete = false;
+    
+    SetLayeredWindowAttributes(g_dialogHwnd, 0, 0, LWA_ALPHA);  // 初始透明度为0
     ShowWindow(g_dialogHwnd, SW_SHOW);
     SetForegroundWindow(g_dialogHwnd);
     UpdateWindow(g_dialogHwnd);
@@ -2170,7 +2442,7 @@ bool ShowInfoDialog(const std::wstring& title, const std::wstring& content) {
     config.content = content;
     config.btn1Text = L"\x786E\x5B9A";  // 确定
     config.hasBtn2 = false;
-    return ShowCustomDialog(config);
+    return ShowCustomDialog(config) > 0;
 }
 
 bool ShowErrorDialog(const std::wstring& title, const std::wstring& content) {
@@ -2180,7 +2452,7 @@ bool ShowErrorDialog(const std::wstring& title, const std::wstring& content) {
     config.content = content;
     config.btn1Text = L"\x786E\x5B9A";  // 确定
     config.hasBtn2 = false;
-    return ShowCustomDialog(config);
+    return ShowCustomDialog(config) > 0;
 }
 
 bool ShowConfirmDialog(const std::wstring& title, const std::wstring& content, const std::wstring& btnYes, const std::wstring& btnNo) {
@@ -2228,9 +2500,187 @@ bool ShowFirstRunDialog() {
     config.btn1Text = L"\x6258\x76D8";  // 托盘
     config.btn2Text = L"\x9000\x51FA";    // 退出
     config.hasBtn2 = true;
-    return ShowCustomDialog(config);
+    int result = ShowCustomDialog(config);
+    // 按钮1(托盘)返回1 -> true，按钮2(退出)返回2 -> false
+    return result == 1;
 }
 // === End Custom Dialog ===
+
+// === Tray Menu Window ===
+const int TRAY_MENU_W = 150;
+const int TRAY_MENU_H = 72;  // 刚好容纳两个选项 (32*2 + 4*2)
+const int TRAY_MENU_ITEM_H = 32;
+
+LRESULT CALLBACK TrayMenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            // Enable blur behind effect (毛玻璃)
+            EnableBlurBehind(hwnd);
+            return 0;
+        }
+        case WM_ERASEBKGND: {
+            return 1;  // 防止闪烁，背景由WM_PAINT处理
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+            
+            // 绘制背景（直角矩形，带毛玻璃效果）
+            {
+                Graphics graphics(memDC);
+                graphics.SetSmoothingMode(SmoothingModeHighQuality);
+                
+                // 半透明背景（配合毛玻璃效果）
+                SolidBrush bgBrush(Color(200, GetRValue(COLOR_CARD), GetGValue(COLOR_CARD), GetBValue(COLOR_CARD)));
+                graphics.FillRectangle(&bgBrush, 0, 0, w, h);
+                
+                // 边框
+                Pen borderPen(Color(255, GetRValue(COLOR_BORDER), GetGValue(COLOR_BORDER), GetBValue(COLOR_BORDER)));
+                graphics.DrawRectangle(&borderPen, 0, 0, w - 1, h - 1);
+            }
+            
+            // 菜单项
+            const wchar_t* items[] = { L"\x663E\x793A\x7A97\x53E3", L"\x9000\x51FA\x7A0B\x5E8F" };  // 显示窗口, 退出程序
+            {
+                Graphics graphics(memDC);
+                graphics.SetSmoothingMode(SmoothingModeHighQuality);
+                
+                for (int i = 0; i < 2; i++) {
+                    int itemY = 4 + i * TRAY_MENU_ITEM_H;
+                    
+                    // 悬停背景
+                    if (g_trayMenuHover == i) {
+                        SolidBrush hoverBrush(Color(255, GetRValue(COLOR_BTN_HOVER), GetGValue(COLOR_BTN_HOVER), GetBValue(COLOR_BTN_HOVER)));
+                        graphics.FillRectangle(&hoverBrush, 2, itemY, w - 4, TRAY_MENU_ITEM_H - 4);
+                    }
+                    
+                    // 文字
+                    COLORREF textColor = (i == 1) ? COLOR_ERROR : COLOR_TEXT;
+                    DrawTextVCentered(memDC, items[i], 12, itemY, TRAY_MENU_ITEM_H - 4, textColor, g_fontNormal);
+                }
+            }
+            
+            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            int x = LOWORD(lParam), y = HIWORD(lParam);
+            int oldHover = g_trayMenuHover;
+            
+            g_trayMenuHover = -1;
+            for (int i = 0; i < 2; i++) {
+                int itemY = 4 + i * TRAY_MENU_ITEM_H;
+                if (y >= itemY && y < itemY + TRAY_MENU_ITEM_H - 4) {
+                    g_trayMenuHover = i;
+                    break;
+                }
+            }
+            
+            if (oldHover != g_trayMenuHover) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            int x = LOWORD(lParam), y = HIWORD(lParam);
+            
+            for (int i = 0; i < 2; i++) {
+                int itemY = 4 + i * TRAY_MENU_ITEM_H;
+                if (y >= itemY && y < itemY + TRAY_MENU_ITEM_H - 4) {
+                    if (i == 0) {
+                        // 显示窗口
+                        ShowWindow(g_hwnd, SW_SHOW);
+                        SetForegroundWindow(g_hwnd);
+                    } else if (i == 1) {
+                        // 退出程序
+                        DestroyWindow(g_hwnd);
+                    }
+                    break;
+                }
+            }
+            
+            // 关闭菜单
+            ShowWindow(hwnd, SW_HIDE);
+            g_trayMenuVisible = false;
+            g_trayMenuHover = -1;
+            return 0;
+        }
+        case WM_ACTIVATE: {
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                // 失去焦点时关闭菜单
+                ShowWindow(hwnd, SW_HIDE);
+                g_trayMenuVisible = false;
+                g_trayMenuHover = -1;
+            }
+            return 0;
+        }
+        case WM_DESTROY: {
+            g_trayMenuHwnd = nullptr;
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowTrayMenu(int x, int y) {
+    if (!g_trayMenuHwnd) {
+        // 注册窗口类
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc = {0};
+            wc.cbSize = sizeof(wc);
+            wc.style = CS_HREDRAW | CS_VREDRAW;
+            wc.lpfnWndProc = TrayMenuProc;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            wc.lpszClassName = L"VRCLyricsTrayMenu_Class";
+            RegisterClassExW(&wc);
+            registered = true;
+        }
+        
+        g_trayMenuHwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            L"VRCLyricsTrayMenu_Class",
+            L"",
+            WS_POPUP,
+            x, y, TRAY_MENU_W, TRAY_MENU_H,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        
+        if (g_trayMenuHwnd) {
+            // 直角矩形（无圆角）
+            SetLayeredWindowAttributes(g_trayMenuHwnd, 0, 255, LWA_ALPHA);
+        }
+    }
+    
+    if (g_trayMenuHwnd) {
+        // 确保菜单在屏幕内
+        int screenW = GetSystemMetrics(SM_CXSCREEN);
+        int screenH = GetSystemMetrics(SM_CYSCREEN);
+        if (x + TRAY_MENU_W > screenW) x = screenW - TRAY_MENU_W;
+        if (y + TRAY_MENU_H > screenH) y = screenH - TRAY_MENU_H;
+        
+        SetWindowPos(g_trayMenuHwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        g_trayMenuHover = -1;
+        g_trayMenuVisible = true;
+        ShowWindow(g_trayMenuHwnd, SW_SHOW);
+        SetForegroundWindow(g_trayMenuHwnd);
+    }
+}
+// === End Tray Menu Window ===
 
 void DrawTextRight(HDC hdc, const wchar_t* text, int rightX, int y, COLORREF color, HFONT font) {
     SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
@@ -2243,20 +2693,39 @@ void DrawTextRight(HDC hdc, const wchar_t* text, int rightX, int y, COLORREF col
 
 void DrawButtonAnim(HDC hdc, int x, int y, int w, int h, const wchar_t* text, Animation& anim, bool accent = false) {
     double hover = anim.value;
-    COLORREF baseColor = accent ? COLOR_ACCENT : RGB(40, 40, 55);
-    COLORREF hoverColor = accent ? RGB(110, 190, 255) : RGB(55, 55, 75);
+    COLORREF baseColor = accent ? COLOR_ACCENT : COLOR_BTN_BG;
+    COLORREF hoverColor = accent ? RGB(110, 190, 255) : COLOR_BTN_HOVER;
     
-    int r = (int)(GetRValue(baseColor) + (GetRValue(hoverColor) - GetRValue(baseColor)) * hover);
-    int g = (int)(GetGValue(baseColor) + (GetGValue(hoverColor) - GetGValue(baseColor)) * hover);
-    int b = (int)(GetBValue(baseColor) + (GetBValue(hoverColor) - GetBValue(baseColor)) * hover);
+    // 脉冲效果（当accent=true且已连接时）
+    double pulse = 0.0;
+    if (accent) {
+        pulse = g_connectPulseAnim.value * 0.08;  // 降低到8%的微妙变化
+    }
+    
+    int r = (int)(GetRValue(baseColor) + (GetRValue(hoverColor) - GetRValue(baseColor)) * hover + pulse * 30);
+    int g = (int)(GetGValue(baseColor) + (GetGValue(hoverColor) - GetGValue(baseColor)) * hover + pulse * 30);
+    int b = (int)(GetBValue(baseColor) + (GetBValue(hoverColor) - GetBValue(baseColor)) * hover + pulse * 20);
+    
+    r = min(255, max(0, r));
+    g = min(255, max(0, g));
+    b = min(255, max(0, b));
     
     if (hover > 0.1) {
-        HPEN glowPen = CreatePen(PS_SOLID, 2, RGB(min(255, 88+50), min(255, 166+50), 255));
-        HPEN oldPen = (HPEN)SelectObject(hdc, glowPen);
-        SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, x - 2, y - 2, x + w + 2, y + h + 2, 20, 20);
-        SelectObject(hdc, oldPen);
-        DeleteObject(glowPen);
+        // 使用GDI+绘制抗锯齿发光边框，完全贴合按钮
+        Gdiplus::Graphics graphics(hdc);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        
+        int glowIntensity = (int)((hover + pulse) * 80);
+        Gdiplus::Color glowColor(255, min(255, 88 + glowIntensity), min(255, 166 + glowIntensity), 255);
+        Gdiplus::Pen glowPen(glowColor, 2.5f);
+        
+        // 绘制与按钮相同大小的圆角矩形边框
+        Gdiplus::GraphicsPath path;
+        int cornerRadius = 8;
+        Gdiplus::RectF rectF((Gdiplus::REAL)x, (Gdiplus::REAL)y, (Gdiplus::REAL)w, (Gdiplus::REAL)h);
+        CreateRoundRectPath(&path, rectF, cornerRadius);
+        graphics.DrawPath(&glowPen, &path);
     }
     
     DrawRoundRect(hdc, x, y, w, h, 8, RGB(r, g, b));
@@ -2273,13 +2742,21 @@ void DrawButtonAnim(HDC hdc, int x, int y, int w, int h, const wchar_t* text, An
 
 void DrawTitleBarButton(HDC hdc, int x, int y, int size, const wchar_t* symbol, Animation& anim) {
     double hover = anim.value;
-    int bgColor = (int)(35 + 25 * hover);
-    DrawRoundRect(hdc, x, y, size, size, 6, RGB(bgColor, bgColor, bgColor + 10));
-    DrawTextCentered(hdc, symbol, x + size/2, y + (size - 18)/2, hover > 0.5 ? COLOR_TEXT : COLOR_TEXT_DIM, g_fontNormal);
+    COLORREF bgBase = g_darkMode ? RGB(35, 35, 40) : RGB(220, 225, 235);
+    COLORREF bgHover = g_darkMode ? RGB(60, 60, 70) : RGB(200, 205, 215);
+    int r = (int)(GetRValue(bgBase) + (GetRValue(bgHover) - GetRValue(bgBase)) * hover);
+    int g = (int)(GetGValue(bgBase) + (GetGValue(bgHover) - GetGValue(bgBase)) * hover);
+    int b = (int)(GetBValue(bgBase) + (GetBValue(bgHover) - GetBValue(bgBase)) * hover);
+    DrawRoundRect(hdc, x, y, size, size, 6, RGB(r, g, b));
+    // 正确居中：计算文字高度并垂直居中
+    HFONT oldFont = (HFONT)SelectObject(hdc, g_fontNormal);
+    SIZE sz; GetTextExtentPoint32W(hdc, symbol, (int)wcslen(symbol), &sz);
+    TextOutW(hdc, x + (size - sz.cx) / 2, y + (size - sz.cy) / 2, symbol, (int)wcslen(symbol));
+    SelectObject(hdc, oldFont);
 }
 
 void DrawProgressBar(HDC hdc, int x, int y, int w, int h, double progress) {
-    DrawRoundRect(hdc, x, y, w, h, h/2, RGB(40, 40, 55));
+    DrawRoundRect(hdc, x, y, w, h, h/2, COLOR_BTN_BG);
     if (progress > 0) {
         int fillW = (int)((w - 4) * progress);
         if (fillW > 4) {
@@ -2308,65 +2785,31 @@ void OnPaint(HWND hwnd) {
     HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
     HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
     
-    // Background gradient (DeepBlue theme) with rounded corners
-    int cornerRadius = 16;  // Slightly larger to fully cover DWM corners
-    for (int y = 0; y < h; y++) {
-        double t = (double)y / h;
-        int r = (int)(GetRValue(COLOR_BG_START) + (GetRValue(COLOR_BG_END) - GetRValue(COLOR_BG_START)) * t);
-        int g = (int)(GetGValue(COLOR_BG_START) + (GetGValue(COLOR_BG_END) - GetGValue(COLOR_BG_START)) * t);
-        int b = (int)(GetBValue(COLOR_BG_START) + (GetBValue(COLOR_BG_END) - GetBValue(COLOR_BG_START)) * t);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
-        
-        // Calculate start X for rounded corners at top and bottom
-        int startX = 0, endX = w;
-        if (y < cornerRadius) {
-            // Top corners - use circle equation to determine start position
-            int dy = cornerRadius - y;
-            int offset = cornerRadius - (int)sqrt((double)(cornerRadius * cornerRadius - dy * dy));
-            if (offset < 0) offset = 0;
-            startX = offset;
-            // Right corner
-            int rightStart = w - offset;
-            // Draw left part (skip corner)
-            MoveToEx(memDC, startX, y, nullptr); LineTo(memDC, rightStart, y);
-        } else if (y >= h - cornerRadius) {
-            // Bottom corners
-            int dy = y - (h - cornerRadius);
-            int offset = cornerRadius - (int)sqrt((double)(cornerRadius * cornerRadius - dy * dy));
-            if (offset < 0) offset = 0;
-            startX = offset;
-            int rightStart = w - offset;
-            MoveToEx(memDC, startX, y, nullptr); LineTo(memDC, rightStart, y);
-        } else {
-            // Middle area - full width
-            MoveToEx(memDC, 0, y, nullptr); LineTo(memDC, w, y);
-        }
-        DeleteObject(pen);
-    }
+    // 填充背景色（窗口形状由 SetWindowRgn 控制）
+    rc.left = 0; rc.top = 0; rc.right = w; rc.bottom = h;
+    HBRUSH bgBrush = CreateSolidBrush(COLOR_BG);
+    FillRect(memDC, &rc, bgBrush);
+    DeleteObject(bgBrush);
     
-    // Title Bar with gradient (DeepBlue theme) - respecting rounded corners
-    for (int y = 0; y < TITLEBAR_H + 5; y++) {
-        double t = (double)y / (TITLEBAR_H + 5);
-        int r = (int)(GetRValue(COLOR_TITLEBAR) + (GetRValue(COLOR_BG_START) - GetRValue(COLOR_TITLEBAR)) * t);
-        int g = (int)(GetGValue(COLOR_TITLEBAR) + (GetGValue(COLOR_BG_START) - GetGValue(COLOR_TITLEBAR)) * t);
-        int b = (int)(GetBValue(COLOR_TITLEBAR) + (GetBValue(COLOR_BG_START) - GetBValue(COLOR_TITLEBAR)) * t);
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
-        
-        // Respect rounded corners at top
-        if (y < cornerRadius) {
-            int dy = cornerRadius - y;
-            int offset = cornerRadius - (int)sqrt((double)(cornerRadius * cornerRadius - dy * dy));
-            if (offset < 0) offset = 0;
-            MoveToEx(memDC, offset, y, nullptr); LineTo(memDC, w - offset, y);
-        } else {
-            MoveToEx(memDC, 0, y, nullptr); LineTo(memDC, w, y);
-        }
-        DeleteObject(pen);
-    }
-    // Title bar glow line (skip corners)
+    // 绘制标题栏区域
+    RECT titleRc; titleRc.left = 0; titleRc.top = 0; titleRc.right = w; titleRc.bottom = TITLEBAR_H + 5;
+    HBRUSH titleBrush = CreateSolidBrush(COLOR_TITLEBAR);
+    FillRect(memDC, &titleRc, titleBrush);
+    DeleteObject(titleBrush);
+    
+    // 绘制边框让圆角更明显（已注释以移除淡蓝色边框）
+    // HPEN borderPen = CreatePen(PS_SOLID, 2, COLOR_BORDER);
+    // HPEN oldPen = (HPEN)SelectObject(memDC, borderPen);
+    // HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+    // RoundRect(memDC, 0, 0, w - 1, h - 1, 32, 32);
+    // SelectObject(memDC, oldBrush);
+    // SelectObject(memDC, oldPen);
+    // DeleteObject(borderPen);
+    
+    // 标题栏发光线
     HPEN glowPen = CreatePen(PS_SOLID, 1, COLOR_ACCENT_GLOW);
     HPEN oldGlowPen = (HPEN)SelectObject(memDC, glowPen);
-    MoveToEx(memDC, cornerRadius, TITLEBAR_H + 4, nullptr); LineTo(memDC, w - cornerRadius, TITLEBAR_H + 4);
+    MoveToEx(memDC, 32, TITLEBAR_H + 4, nullptr); LineTo(memDC, w - 32, TITLEBAR_H + 4);
     SelectObject(memDC, oldGlowPen);
     DeleteObject(glowPen);
     DrawTextLeft(memDC, L"\x266B \x97F3\x4E50\x663E\x793A", 25, 18, COLOR_TEXT, g_fontSubtitle);
@@ -2377,19 +2820,91 @@ void OnPaint(HWND hwnd) {
         // Show download progress
         wchar_t progressText[32];
         swprintf_s(progressText, L"\x4E0B\x8F7D %d%%", g_downloadProgress);
-        DrawTextLeft(memDC, progressText, updateBtnX + 5, 22, COLOR_ACCENT, g_fontSmall);
-    } else if (g_updateAvailable && !g_latestVersion.empty()) {
-        // Show update available
-        DrawButtonAnim(memDC, updateBtnX, 14, 80, 32, L"\x66F4\x65B0", g_btnUpdateAnim, false);
-    } else if (g_checkingUpdate) {
-        DrawTextLeft(memDC, L"\x68C0\x67E5\x4E2D...", updateBtnX + 5, 22, COLOR_TEXT_DIM, g_fontSmall);
+        DrawTextLeft(memDC, progressText, w - 200, 22, COLOR_ACCENT, g_fontSmall);
     } else {
-        // Show check update button
-        DrawButtonAnim(memDC, updateBtnX, 14, 80, 32, L"\x68C0\x67E5", g_btnUpdateAnim, false);
+        // Update button (square, in title bar)
+        const wchar_t* updateIcon;
+        if (g_updateAvailable && !g_latestVersion.empty()) {
+            updateIcon = L"\U0001F504";  // 🔄
+        } else if (g_checkingUpdate) {
+            updateIcon = L"\U0001F50D";  // 🔍
+        } else {
+            updateIcon = L"\U0001F50D";  // 🔍
+        }
+        
+        // 绘制更新按钮（带旋转效果）
+        int btnX = w - 160;
+        int btnY = 14;
+        int btnSize = 38;
+        double hover = g_btnUpdateAnim.value;
+        COLORREF bgBase = g_darkMode ? RGB(35, 35, 40) : RGB(220, 225, 235);
+        COLORREF bgHover = g_darkMode ? RGB(60, 60, 70) : RGB(200, 205, 215);
+        int r = (int)(GetRValue(bgBase) + (GetRValue(bgHover) - GetRValue(bgBase)) * hover);
+        int g = (int)(GetGValue(bgBase) + (GetGValue(bgHover) - GetGValue(bgBase)) * hover);
+        int b = (int)(GetBValue(bgBase) + (GetBValue(bgHover) - GetBValue(bgBase)) * hover);
+        DrawRoundRect(memDC, btnX, btnY, btnSize, btnSize, 6, RGB(r, g, b));
+        
+        // 绘制旋转的图标
+        if (g_checkingUpdate) {
+            // 使用GDI+绘制旋转的搜索图标
+            Gdiplus::Graphics graphics(memDC);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+            
+            // 设置旋转中心并旋转
+            Gdiplus::Matrix matrix;
+            int centerX = btnX + btnSize / 2;
+            int centerY = btnY + btnSize / 2;
+            matrix.RotateAt((Gdiplus::REAL)g_updateRotation, Gdiplus::PointF((Gdiplus::REAL)centerX, (Gdiplus::REAL)centerY));
+            graphics.SetTransform(&matrix);
+            
+            // 绘制搜索图标 (🔍)
+            Gdiplus::SolidBrush textBrush(g_darkMode ? Gdiplus::Color(180, 180, 190) : Gdiplus::Color(100, 100, 110));
+            Gdiplus::FontFamily fontFamily(L"Segoe UI Emoji");
+            Gdiplus::Font font(&fontFamily, 16, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::StringFormat format;
+            format.SetAlignment(Gdiplus::StringAlignmentCenter);
+            format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::RectF rectF((Gdiplus::REAL)btnX, (Gdiplus::REAL)btnY, (Gdiplus::REAL)btnSize, (Gdiplus::REAL)btnSize);
+            graphics.DrawString(L"\U0001F50D", -1, &font, rectF, &format, &textBrush);
+        } else {
+            // 正常绘制图标 - 正确居中
+            HFONT oldFont = (HFONT)SelectObject(memDC, g_fontNormal);
+            SIZE sz; GetTextExtentPoint32W(memDC, updateIcon, (int)wcslen(updateIcon), &sz);
+            TextOutW(memDC, btnX + (btnSize - sz.cx) / 2, btnY + (btnSize - sz.cy) / 2, updateIcon, (int)wcslen(updateIcon));
+            SelectObject(memDC, oldFont);
+        }
+        
+        // 新版本小绿点提示
+        if (g_updateAvailable && !g_downloadingUpdate) {
+            int dotSize = 10;
+            int dotX = btnX + btnSize - dotSize / 2;
+            int dotY = btnY - dotSize / 2 + 2;
+            
+            // 使用GDI+绘制发光效果的绿点
+            Gdiplus::Graphics graphics(memDC);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            
+            // 发光效果
+            for (int i = 3; i >= 0; i--) {
+                int glowSize = dotSize + i * 3;
+                int alpha = 80 - i * 20;
+                Gdiplus::SolidBrush glowBrush(Gdiplus::Color(alpha, 80, 200, 120));
+                graphics.FillEllipse(&glowBrush, dotX - glowSize/2 + dotSize/2, dotY - glowSize/2 + dotSize/2, glowSize, glowSize);
+            }
+            
+            // 绿点
+            Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 80, 200, 120));
+            graphics.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
+        }
     }
-    
-    DrawTitleBarButton(memDC, w - 110, 14, 38, L"\x2500", g_btnMinAnim);
-    DrawTitleBarButton(memDC, w - 60, 14, 38, L"\x2715", g_btnCloseAnim);
+
+    // Title bar buttons (order: Theme, Update, Minimize, Close)
+    const wchar_t* themeIcon = g_darkMode ? L"\u263D" : L"\u2600";  // Moon or Sun
+    DrawTitleBarButton(memDC, w - 210, 14, 38, themeIcon, g_btnThemeAnim);
+    // Update button at w - 160 (drawn above)
+    DrawTitleBarButton(memDC, w - 110, 14, 38, L"\u2500", g_btnMinAnim);  // Minimize
+    DrawTitleBarButton(memDC, w - 60, 14, 38, L"\u2715", g_btnCloseAnim);  // Close
     
     // === Two Column Layout ===
     int leftColW = 260;  // Left column width for settings
@@ -2399,7 +2914,8 @@ void OnPaint(HWND hwnd) {
     
     // === LEFT COLUMN (包含标签页) ===
     int panelH = h - contentY - CARD_PADDING;
-    DrawRoundRect(memDC, CARD_PADDING, contentY, leftColW, panelH, 16, COLOR_CARD);
+    // 绘制半透明毛玻璃面板（alpha=70，约73%透明度，比窗口毛玻璃更强）
+    DrawRoundRectAlpha(memDC, CARD_PADDING, contentY, leftColW, panelH, 16, COLOR_CARD, 70);
     DrawRoundRect(memDC, CARD_PADDING, contentY, 5, 35, 2, COLOR_ACCENT);
     
     // === Tabs (在卡片内部) ===
@@ -2407,13 +2923,75 @@ void OnPaint(HWND hwnd) {
     int tabW = 80;
     int tabH = 32;
     int tabY = contentY + 10;
+    
+    // 先绘制所有非活动标签的背景
     for (int t = 0; t < 2; t++) {
         int tabX = CARD_PADDING + 18 + t * (tabW + 8);
         bool isActive = (t == g_currentTab);
         bool isHover = g_tabHover[t];
-        COLORREF tabBg = isActive ? COLOR_ACCENT : (isHover ? RGB(60, 60, 80) : RGB(40, 40, 55));
-        COLORREF tabText = isActive ? RGB(0, 0, 0) : COLOR_TEXT;
-        DrawRoundRect(memDC, tabX, tabY, tabW, tabH, 8, tabBg);
+        
+        // 非活动标签绘制背景（悬停或默认）
+        if (!isActive || g_tabSlideAnim.isActive()) {
+            COLORREF tabBg = isHover ? (g_darkMode ? RGB(60, 60, 80) : RGB(230, 235, 245)) : (g_darkMode ? RGB(40, 40, 55) : RGB(245, 248, 255));
+            DrawRoundRect(memDC, tabX, tabY, tabW, tabH, 8, tabBg);
+        }
+    }
+    
+    // 标签页切换动画 - 滑动的高亮背景（绘制在所有标签之上）
+    if (g_tabSlideAnim.isActive()) {
+        double slideProgress = g_tabSlideAnim.value;
+        int prevTabX = CARD_PADDING + 18 + g_prevTab * (tabW + 8);
+        int currTabX = CARD_PADDING + 18 + g_currentTab * (tabW + 8);
+        
+        // 插值计算当前高亮位置
+        int animTabX = (int)(prevTabX + (currTabX - prevTabX) * slideProgress);
+        
+        // 绘制滑动的高亮背景
+        COLORREF slideBg = COLOR_ACCENT;
+        DrawRoundRect(memDC, animTabX, tabY, tabW, tabH, 8, slideBg);
+    } else {
+        // 动画结束后，绘制当前活动标签的高亮背景
+        int activeTabX = CARD_PADDING + 18 + g_currentTab * (tabW + 8);
+        DrawRoundRect(memDC, activeTabX, tabY, tabW, tabH, 8, COLOR_ACCENT);
+    }
+    
+    // 最后绘制所有标签的文字（带颜色渐变动画）
+    for (int t = 0; t < 2; t++) {
+        int tabX = CARD_PADDING + 18 + t * (tabW + 8);
+        bool isActive = (t == g_currentTab);
+        bool isAnimating = g_tabSlideAnim.isActive();
+        
+        // 计算文字颜色（带渐变动画）
+        COLORREF tabText;
+        if (isAnimating) {
+            double slideProgress = g_tabSlideAnim.value;
+            int prevTabX = CARD_PADDING + 18 + g_prevTab * (tabW + 8);
+            int currTabX = CARD_PADDING + 18 + g_currentTab * (tabW + 8);
+            
+            // 计算当前标签与滑动高亮块的重叠程度
+            double overlap = 0.0;
+            
+            // 判断是否是目标标签（高亮块正在移动到这个标签）
+            bool isTarget = (tabX == currTabX);
+            bool isPrev = (tabX == prevTabX);
+            
+            if (isTarget) {
+                // 目标标签：从白色渐变到黑色
+                overlap = slideProgress;
+            } else if (isPrev) {
+                // 前一个标签：从黑色渐变到白色
+                overlap = 1.0 - slideProgress;
+            }
+            
+            // 颜色插值：黑色(高亮) <-> 浅色(非高亮)
+            int r = (int)(GetRValue(COLOR_TEXT) * (1.0 - overlap) + 0 * overlap);
+            int g = (int)(GetGValue(COLOR_TEXT) * (1.0 - overlap) + 0 * overlap);
+            int b = (int)(GetBValue(COLOR_TEXT) * (1.0 - overlap) + 0 * overlap);
+            tabText = RGB(r, g, b);
+        } else {
+            tabText = isActive ? RGB(0, 0, 0) : COLOR_TEXT;
+        }
+        
         DrawTextCenteredBoth(memDC, tabNames[t], tabX, tabY, tabW, tabH, tabText, g_fontNormal);
     }
     
@@ -2421,6 +2999,25 @@ void OnPaint(HWND hwnd) {
     
     int checkboxX = CARD_PADDING + 18;
     int checkboxSize = 26;
+    
+    // 内容区域滑动动画 - 来回滑动效果
+    int contentOffsetX = 0;
+    HRGN contentClip = nullptr;
+    
+    if (g_tabSlideAnim.isActive()) {
+        double slideProgress = g_tabSlideAnim.value;
+        int slideDistance = leftColW;
+        // 反转方向：向右切换时内容从左边滑入，向左切换时内容从右边滑入
+        contentOffsetX = (int)(slideDistance * (1.0 - slideProgress) * -g_tabSlideDirection);
+        
+        // 设置剪辑区域，限制在左侧面板内
+        contentClip = CreateRectRgn(CARD_PADDING, contentY + 50, leftColW + CARD_PADDING, h - CARD_PADDING);
+        SelectClipRgn(memDC, contentClip);
+    }
+    
+    if (contentOffsetX != 0) {
+        OffsetViewportOrgEx(memDC, contentOffsetX, 0, nullptr);
+    }
     
     if (g_currentTab == 0) {
         // === MAIN TAB: Platform Status, Connect, Launch ===
@@ -2459,8 +3056,8 @@ void OnPaint(HWND hwnd) {
         
         // Draw platform box
         bool isHover = g_platformBoxHover;
-        COLORREF boxBg = isHover ? RGB(50, 55, 65) : RGB(40, 45, 55);
-        COLORREF boxBorder = isHover ? RGB(80, 90, 110) : RGB(60, 65, 75);
+        COLORREF boxBg = isHover ? COLOR_BOX_HOVER : COLOR_BOX_BG;
+        COLORREF boxBorder = isHover ? COLOR_BOX_BORDER_HOVER : COLOR_BOX_BORDER;
         DrawRoundRectWithBorder(memDC, platformBoxX, platformBoxY, platformBoxW, platformBoxH, 8, boxBg, boxBorder);
         
         // Draw platform name (left side, vertically centered)
@@ -2473,24 +3070,38 @@ void OnPaint(HWND hwnd) {
                 RGB(110, 190, 140), g_fontSmall);
         }
         
-        // Draw dropdown arrow on right side
+        // Draw dropdown arrow on right side (with rotation animation)
         int arrowX = platformBoxX + platformBoxW - 16;
         int arrowY = platformBoxY + platformBoxH / 2;
-        HPEN arrowPen = CreatePen(PS_SOLID, 2, COLOR_TEXT_DIM);
-        HPEN oldPen = (HPEN)SelectObject(memDC, arrowPen);
-        // Draw "V" arrow
-        MoveToEx(memDC, arrowX - 5, arrowY - 3, nullptr);
-        LineTo(memDC, arrowX, arrowY + 2);
-        LineTo(memDC, arrowX + 5, arrowY - 3);
-        SelectObject(memDC, oldPen);
-        DeleteObject(arrowPen);
+        float rotation = (float)(g_arrowRotationAnim.value * 180.0);  // 0-180度旋转
+        
+        // 使用GDI+绘制旋转箭头
+        {
+            Gdiplus::Graphics graphics(memDC);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            
+            // 设置旋转变换
+            Gdiplus::Matrix matrix;
+            matrix.RotateAt(rotation, Gdiplus::PointF((Gdiplus::REAL)arrowX, (Gdiplus::REAL)arrowY));
+            graphics.SetTransform(&matrix);
+            
+            // 绘制箭头
+            Gdiplus::Pen arrowPen(Gdiplus::Color(GetRValue(COLOR_TEXT_DIM), GetGValue(COLOR_TEXT_DIM), GetBValue(COLOR_TEXT_DIM)), 2.0f);
+            Gdiplus::GraphicsPath arrowPath;
+            arrowPath.AddLine(arrowX - 5, arrowY - 3, arrowX, arrowY + 2);
+            arrowPath.AddLine(arrowX, arrowY + 2, arrowX + 5, arrowY - 3);
+            graphics.DrawPath(&arrowPen, &arrowPath);
+        }
         
         // === Platform Selection Dropdown Menu (draw AFTER buttons but BEFORE them in z-order concept) ===
         // We'll draw it at the end for proper z-order
         int menuExtraSpace = 0;  // Extra space to push buttons down when menu is open
-        if (g_platformMenuOpen) {
+        double menuExpandFactor = g_menuExpandAnim.value;  // 菜单展开动画值
+        // 只有菜单打开或正在收起时才计算额外空间
+        bool isMenuVisible = g_platformMenuOpen || (g_menuExpandAnim.isActive() && menuExpandFactor > 0.01);
+        if (isMenuVisible) {
             int menuItemH = 36;
-            menuExtraSpace = g_platformCount * menuItemH + 12;  // Menu height + padding
+            menuExtraSpace = (int)((g_platformCount * menuItemH + 12) * menuExpandFactor);  // 动画高度
         }
         
         // === Connect Button ===
@@ -2506,46 +3117,129 @@ void OnPaint(HWND hwnd) {
         }
         
         // === Platform Selection Dropdown Menu (draw LAST so it's on top) ===
-        if (g_platformMenuOpen) {
+        if (isMenuVisible) {
             int menuItemH = 36;
-            int menuH = g_platformCount * menuItemH + 8;
+            int fullMenuH = g_platformCount * menuItemH + 8;
+            int menuH = (int)(fullMenuH * menuExpandFactor);  // 动画高度
             int menuX = platformBoxX;
-            int menuY = platformBoxY + platformBoxH + 4;  // Dropdown BELOW the platform box
+            int menuY = platformBoxY + platformBoxH;  // 从平台框底部开始
             int menuW = platformBoxW;
             
-            // Menu background with shadow effect
-            DrawRoundRectWithBorder(memDC, menuX, menuY, menuW, menuH, 8, RGB(35, 40, 50), RGB(70, 75, 85));
+            // Menu background - 使用圆角矩形（只有底部圆角）
+            {
+                Graphics graphics(memDC);
+                graphics.SetSmoothingMode(SmoothingModeHighQuality);
+                
+                int cornerRadius = 8;
+                int d = cornerRadius * 2;
+                
+                // 创建背景路径：顶部直角，底部圆角
+                GraphicsPath bgPath;
+                bgPath.StartFigure();
+                
+                // 从左上角开始，顺时针绘制
+                // 顶边（左到右）
+                bgPath.AddLine(menuX, menuY, menuX + menuW, menuY);
+                // 右边（上到下，到右下角圆角起点）
+                bgPath.AddLine(menuX + menuW, menuY, menuX + menuW, menuY + menuH - cornerRadius);
+                // 右下角圆角：从右边(0°)画到底边(90°)
+                bgPath.AddArc(menuX + menuW - d, menuY + menuH - d, d, d, 0, 90);
+                // 底边（右到左）
+                bgPath.AddLine(menuX + menuW - cornerRadius, menuY + menuH, menuX + cornerRadius, menuY + menuH);
+                // 左下角圆角：从底边(90°)画到左边(180°)
+                bgPath.AddArc(menuX, menuY + menuH - d, d, d, 90, 90);
+                // 左边（下到上，回到起点）
+                bgPath.AddLine(menuX, menuY + menuH - cornerRadius, menuX, menuY);
+                
+                bgPath.CloseFigure();
+                
+                // 填充背景
+                SolidBrush bgBrush(Color(255, GetRValue(COLOR_MENU_BG), GetGValue(COLOR_MENU_BG), GetBValue(COLOR_MENU_BG)));
+                graphics.FillPath(&bgBrush, &bgPath);
+                
+                // 绘制边框（左、底、右，不画顶边）
+                Pen borderPen(Color(255, GetRValue(COLOR_MENU_BORDER), GetGValue(COLOR_MENU_BORDER), GetBValue(COLOR_MENU_BORDER)));
+                
+                // 左边框
+                graphics.DrawLine(&borderPen, menuX, menuY, menuX, menuY + menuH - cornerRadius);
+                // 左下角圆角边框
+                graphics.DrawArc(&borderPen, menuX, menuY + menuH - d, d, d, 90, 90);
+                // 底边框
+                graphics.DrawLine(&borderPen, menuX + cornerRadius, menuY + menuH, menuX + menuW - cornerRadius, menuY + menuH);
+                // 右下角圆角边框
+                graphics.DrawArc(&borderPen, menuX + menuW - d, menuY + menuH - d, d, d, 0, 90);
+                // 右边框
+                graphics.DrawLine(&borderPen, menuX + menuW, menuY + menuH - cornerRadius, menuX + menuW, menuY);
+            }
             
-            // Menu items
-            for (int i = 0; i < g_platformCount; i++) {
-                int itemY = menuY + 4 + i * menuItemH;
-                bool itemHover = (g_platformMenuHover == i);
-                bool isCurrentActive = (g_activePlatform == i);
-                bool isConnected = g_platforms[i].connected;
-                
-                // Item background on hover
-                if (itemHover) {
-                    DrawRoundRect(memDC, menuX + 4, itemY, menuW - 8, menuItemH - 4, 4, RGB(50, 55, 65));
+            // Menu items (only draw when expanded enough)
+            if (menuExpandFactor > 0.3) {
+                for (int i = 0; i < g_platformCount; i++) {
+                    int itemY = menuY + 4 + i * menuItemH;
+                    // 跳过超出当前动画高度的项目
+                    if (itemY + menuItemH > menuY + menuH) break;
+                    
+                    // 逐条淡入效果
+                    double itemAlpha = g_menuItemAnims[i].value;
+                    if (itemAlpha < 0.01) continue;  // 跳过完全透明的项目
+                    
+                    bool itemHover = (g_platformMenuHover == i);
+                    bool isCurrentActive = (g_activePlatform == i);
+                    bool isConnected = g_platforms[i].connected;
+                    
+                    // Item background on hover (with alpha)
+                    if (itemHover) {
+                        COLORREF hoverColor = COLOR_MENU_HOVER;
+                        // 根据alpha调整颜色
+                        int r = GetRValue(hoverColor);
+                        int g = GetGValue(hoverColor);
+                        int b = GetBValue(hoverColor);
+                        DrawRoundRectAlpha(memDC, menuX + 4, itemY, menuW - 8, menuItemH - 4, 4, 
+                            RGB(r, g, b), (int)(itemAlpha * 255));
+                    }
+                    
+                    // Platform name (left side, vertically centered in item) - with alpha
+                    COLORREF nameColor = isConnected ? COLOR_TEXT : COLOR_TEXT_DIM;
+                    SetTextColor(memDC, nameColor);
+                    SetBkMode(memDC, TRANSPARENT);
+                    HFONT oldFont = (HFONT)SelectObject(memDC, g_fontNormal);
+                    // 使用alpha混合绘制文字
+                    if (itemAlpha >= 0.99) {
+                        DrawTextVCentered(memDC, g_platforms[i].name.c_str(), menuX + 12, itemY, menuItemH - 4, nameColor, g_fontNormal);
+                    } else {
+                        // 半透明文字
+                        int alpha = (int)(itemAlpha * 255);
+                        int nr = (GetRValue(COLOR_BG) * (255 - alpha) + GetRValue(nameColor) * alpha) / 255;
+                        int ng = (GetGValue(COLOR_BG) * (255 - alpha) + GetGValue(nameColor) * alpha) / 255;
+                        int nb = (GetBValue(COLOR_BG) * (255 - alpha) + GetBValue(nameColor) * alpha) / 255;
+                        DrawTextVCentered(memDC, g_platforms[i].name.c_str(), menuX + 12, itemY, menuItemH - 4, RGB(nr, ng, nb), g_fontNormal);
+                    }
+                    SelectObject(memDC, oldFont);
+                    
+                    // Connection status (right side, vertically centered)
+                    std::wstring statusText;
+                    COLORREF statusColor;
+                    if (isCurrentActive) {
+                        statusText = L"\x5F53\x524D";  // 当前
+                        statusColor = COLOR_SUCCESS;
+                    } else if (isConnected) {
+                        statusText = g_platforms[i].connectMethod;
+                        statusColor = RGB(110, 190, 140);
+                    } else {
+                        statusText = L"\x672A\x8FDE\x63A5";  // 未连接
+                        statusColor = COLOR_TEXT_DIM;
+                    }
+                    // 状态文字也应用alpha
+                    if (itemAlpha >= 0.99) {
+                        DrawTextRight(memDC, statusText.c_str(), menuX + menuW - 16, itemY + 10, statusColor, g_fontSmall);
+                    } else {
+                        int alpha = (int)(itemAlpha * 255);
+                        int sr = (GetRValue(COLOR_MENU_BG) * (255 - alpha) + GetRValue(statusColor) * alpha) / 255;
+                        int sg = (GetGValue(COLOR_MENU_BG) * (255 - alpha) + GetGValue(statusColor) * alpha) / 255;
+                        int sb = (GetBValue(COLOR_MENU_BG) * (255 - alpha) + GetBValue(statusColor) * alpha) / 255;
+                        DrawTextRight(memDC, statusText.c_str(), menuX + menuW - 16, itemY + 10, RGB(sr, sg, sb), g_fontSmall);
+                    }
                 }
-                
-                // Platform name (left side, vertically centered in item)
-                COLORREF nameColor = isConnected ? COLOR_TEXT : COLOR_TEXT_DIM;
-                DrawTextVCentered(memDC, g_platforms[i].name.c_str(), menuX + 12, itemY, menuItemH - 4, nameColor, g_fontNormal);
-                
-                // Connection status (right side, vertically centered)
-                std::wstring statusText;
-                COLORREF statusColor;
-                if (isCurrentActive) {
-                    statusText = L"\x5F53\x524D";  // 当前
-                    statusColor = RGB(80, 200, 120);
-                } else if (isConnected) {
-                    statusText = g_platforms[i].connectMethod;
-                    statusColor = RGB(110, 190, 140);
-                } else {
-                    statusText = L"\x672A\x8FDE\x63A5";  // 未连接
-                    statusColor = COLOR_TEXT_DIM;
-                }
-                DrawTextRight(memDC, statusText.c_str(), menuX + menuW - 16, itemY + 10, statusColor, g_fontSmall);
             }
         }
     } else {
@@ -2563,7 +3257,7 @@ void OnPaint(HWND hwnd) {
         
         // === Checkbox: Show Performance ===
         rowY += 70;
-        COLORREF cbBg = g_showPerfOnPause ? RGB(88, 166, 255) : RGB(50, 50, 65);
+        COLORREF cbBg = g_showPerfOnPause ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
         
         if (g_showPerfOnPause) {
@@ -2579,7 +3273,7 @@ void OnPaint(HWND hwnd) {
         
         // === Checkbox: Auto Update ===
         rowY += 38;
-        COLORREF cbBg2 = g_autoUpdate ? RGB(88, 166, 255) : RGB(50, 50, 65);
+        COLORREF cbBg2 = g_autoUpdate ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg2);
         
         if (g_autoUpdate) {
@@ -2595,7 +3289,7 @@ void OnPaint(HWND hwnd) {
         
         // === Checkbox: Show Platform ===
         rowY += 38;
-        COLORREF cbBg3 = g_showPlatform ? RGB(88, 166, 255) : RGB(50, 50, 65);
+        COLORREF cbBg3 = g_showPlatform ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg3);
         
         if (g_showPlatform) {
@@ -2611,7 +3305,7 @@ void OnPaint(HWND hwnd) {
         
         // === Checkbox: Minimize to Tray ===
         rowY += 38;
-        COLORREF cbBg4 = g_minimizeToTray ? RGB(88, 166, 255) : RGB(50, 50, 65);
+        COLORREF cbBg4 = g_minimizeToTray ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
         DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg4);
         
         if (g_minimizeToTray) {
@@ -2624,12 +3318,28 @@ void OnPaint(HWND hwnd) {
             DeleteObject(tickPen);
         }
         DrawTextVCentered(memDC, L"\x6700\x5C0F\x5316\x5230\x6258\x76D8", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
-        
+
+        // === Checkbox: Start Minimized ===
+        rowY += 38;
+        COLORREF cbBg5 = g_startMinimized ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
+        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg5);
+
+        if (g_startMinimized) {
+            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+            LineTo(memDC, checkboxX + 10, rowY + 18);
+            LineTo(memDC, checkboxX + 20, rowY + 8);
+            SelectObject(memDC, oldTickPen);
+            DeleteObject(tickPen);
+        }
+        DrawTextVCentered(memDC, L"\x542F\x52A8\x6700\x5C0F\x5316", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
+
         // === Checkbox: Auto Start ===
         rowY += 38;
-        COLORREF cbBg5 = g_autoStart ? COLOR_ACCENT : RGB(50, 55, 70);
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg5);
-        
+        COLORREF cbBg6 = g_autoStart ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
+        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg6);
+
         if (g_autoStart) {
             HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
             HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
@@ -2640,11 +3350,11 @@ void OnPaint(HWND hwnd) {
             DeleteObject(tickPen);
         }
         DrawTextVCentered(memDC, L"\x5F00\x673A\x81EA\x542F", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
-        
+
         // === Checkbox: Run as Admin ===
         rowY += 38;
-        COLORREF cbBg6 = g_runAsAdmin ? COLOR_ACCENT : RGB(50, 55, 70);
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg6);
+        COLORREF cbBg7 = g_runAsAdmin ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
+        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg7);
         
         if (g_runAsAdmin) {
             HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
@@ -2661,7 +3371,7 @@ void OnPaint(HWND hwnd) {
         rowY += 38;
         bool isAdmin = IsRunningAsAdmin();
         if (isAdmin) {
-            DrawTextLeft(memDC, L"\x2705 \x5DF2\x662F\x7BA1\x7406\x5458\x6743\x9650", checkboxX, rowY + 4, RGB(100, 200, 120), g_fontSmall);
+            DrawTextLeft(memDC, L"\x2705 \x5DF2\x662F\x7BA1\x7406\x5458\x6743\x9650", checkboxX, rowY + 4, COLOR_SUCCESS, g_fontSmall);
         } else {
             COLORREF linkColor = g_btnAdminHover ? RGB(130, 200, 255) : COLOR_ACCENT;
             DrawTextLeft(memDC, L"\x26A0 \x70B9\x51FB\x4EE5\x7BA1\x7406\x5458\x8FD0\x884C", checkboxX, rowY + 4, linkColor, g_fontSmall);
@@ -2679,11 +3389,27 @@ void OnPaint(HWND hwnd) {
             L"\x5BFC\x51FA\x65E5\x5FD7", g_btnExportLogAnim, false);
     }
     
+    // 恢复视口偏移和剪辑区域
+    if (contentOffsetX != 0) {
+        OffsetViewportOrgEx(memDC, -contentOffsetX, 0, nullptr);
+    }
+    if (contentClip) {
+        SelectClipRgn(memDC, nullptr);  // 恢复无剪辑状态
+        DeleteObject(contentClip);
+    }
+    
     // === RIGHT COLUMN: OSC Message Preview ===
     int previewH = h - contentY - CARD_PADDING;
-    DrawRoundRect(memDC, rightColX, contentY, rightColW, previewH, 16, COLOR_CARD);
-    DrawRoundRect(memDC, rightColX, contentY, 5, 35, 2, RGB(255, 180, 50));
+    // 绘制半透明毛玻璃面板（alpha=70，约73%透明度，比窗口毛玻璃更强）
+    DrawRoundRectAlpha(memDC, rightColX, contentY, rightColW, previewH, 16, COLOR_CARD, 70);
+    DrawRoundRect(memDC, rightColX, contentY, 5, 35, 2, COLOR_WARNING);
     DrawTextLeft(memDC, L"OSC \x6D88\x606F\x9884\x89C8", rightColX + 18, contentY + 10, COLOR_TEXT, g_fontNormal);
+    
+    // 设置右侧面板的剪辑区域
+    HRGN rightClip = CreateRectRgn(rightColX + 5, contentY + 40, rightColX + rightColW - 5, contentY + previewH - 5);
+    HRGN oldRightClip = CreateRectRgn(0, 0, 0, 0);
+    GetClipRgn(memDC, oldRightClip);
+    SelectClipRgn(memDC, rightClip);
     
     // Get current data and build SongInfo for preview
     moekoe::SongInfo previewInfo;
@@ -2736,7 +3462,8 @@ void OnPaint(HWND hwnd) {
     int msgX = rightColX + 18;
     int lineHeight = 28;
     int maxLines = (previewH - 100) / lineHeight;  // Leave more space at bottom
-    int maxTextWidth = rightColW - 40;  // Ensure text fits within card
+    // 修正宽度计算：面板宽度减去左右边距（18+18=36），再留一些安全边距
+    int maxTextWidth = rightColW - 50;  // 更保守的宽度计算
     
     int lineCount = 0;
     
@@ -2754,10 +3481,25 @@ void OnPaint(HWND hwnd) {
         std::wstring remaining = line;
         while (!remaining.empty() && lineCount < maxLines) {
             // Find how many characters fit in maxTextWidth
-            size_t fitLen = remaining.length();
-            while (fitLen > 0 && getTextWidth(remaining.substr(0, fitLen)) > maxTextWidth) {
-                fitLen--;
+            // 使用二分查找提高效率
+            size_t lo = 1, hi = remaining.length(), fitLen = remaining.length();
+            
+            // 先检查整行是否能放下
+            if (getTextWidth(remaining) <= maxTextWidth) {
+                fitLen = remaining.length();
+            } else {
+                // 二分查找最大能放下的字符数
+                while (lo <= hi) {
+                    size_t mid = (lo + hi) / 2;
+                    if (getTextWidth(remaining.substr(0, mid)) <= maxTextWidth) {
+                        fitLen = mid;
+                        lo = mid + 1;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
             }
+            
             if (fitLen == 0) fitLen = 1;  // At least one character
             
             std::wstring chunk = remaining.substr(0, fitLen);
@@ -2793,16 +3535,144 @@ void OnPaint(HWND hwnd) {
         DrawTextLeft(memDC, L"...", msgX, msgY - lineHeight, COLOR_TEXT_DIM, g_fontNormal);
     }
     
-    // Draw character count indicator
-    wchar_t byteBuf[64];
-    swprintf_s(byteBuf, L"\x5B57\x7B26\x6570: %zd/144", oscMessage.length());
-    COLORREF byteColor = oscMessage.length() > 144 ? RGB(255, 100, 100) : COLOR_TEXT_DIM;
-    DrawTextLeft(memDC, byteBuf, rightColX + 18, contentY + previewH - 40, byteColor, g_fontSmall);
-    
-    // Warning if over limit - show next to char count if there's space
-    if (oscMessage.length() > 144) {
-        DrawTextLeft(memDC, L"\x26A0\x8D85\x9650", rightColX + 130, contentY + previewH - 40, RGB(255, 180, 50), g_fontSmall);
+    // Draw character count progress bar (battery style)
+    {
+        size_t charCount = oscMessage.length();
+        double targetProgress = min(1.0, (double)charCount / 144.0);
+        g_charProgressAnim.setTarget(targetProgress);
+        g_charProgressAnim.speed = 0.15;
+        g_charProgressAnim.update();  // 平滑过渡
+        
+        // Tooltip淡入淡出动画
+        g_charTooltipAnim.setTarget(g_charProgressHover ? 1.0 : 0.0);
+        g_charTooltipAnim.speed = g_charProgressHover ? 0.2 : 0.15;  // 淡入快，淡出慢
+        g_charTooltipAnim.update();
+        
+        int labelX = rightColX + 18;
+        int labelY = contentY + previewH - 30;
+        
+        // 绘制标签
+        DrawTextLeft(memDC, L"\x5B57\x7B26\x6570", labelX, labelY, COLOR_TEXT_DIM, g_fontSmall);
+        
+        // 电池样式进度条 - 与标签垂直居中对齐
+        int barH = 12;  // 电池高度
+        int barX = labelX + 50;  // 标签后面
+        int barY = labelY + 6;  // 垂直位置
+        int barW = 60;  // 电池宽度
+        int tipW = 3;   // 电池尖端宽度
+        
+        // 颜色逻辑：70%以下绿色，70%-95%黄色，95%以上红色
+        COLORREF progressColor;
+        double progress = g_charProgressAnim.value;
+        if (progress > 0.95) {
+            // 红色 (95%以上)
+            progressColor = RGB(255, 80, 80);
+        } else if (progress > 0.70) {
+            // 黄色到橙色 (70%-95%)
+            int t = (int)((progress - 0.70) * 255 / 0.25);
+            progressColor = RGB(255, 200 - t/3, 50);  // 黄->橙
+        } else {
+            // 绿色 (70%以下)
+            progressColor = RGB(80, 200, 100);
+        }
+        
+        // 使用GDI+绘制电池样式进度条
+        {
+            Graphics graphics(memDC);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            
+            // 电池外壳（圆角矩形）
+            int cornerRadius = 2;
+            int d = cornerRadius * 2;
+            
+            // 电池主体（外框）
+            GraphicsPath shellPath;
+            shellPath.AddArc(barX, barY, d, d, 180, 90);  // 左上角
+            shellPath.AddLine(barX + cornerRadius, barY, barX + barW - cornerRadius, barY);  // 顶边
+            shellPath.AddArc(barX + barW - d, barY, d, d, 270, 90);  // 右上角
+            shellPath.AddLine(barX + barW, barY + cornerRadius, barX + barW, barY + barH - cornerRadius);  // 右边
+            shellPath.AddArc(barX + barW - d, barY + barH - d, d, d, 0, 90);  // 右下角
+            shellPath.AddLine(barX + barW - cornerRadius, barY + barH, barX + cornerRadius, barY + barH);  // 底边
+            shellPath.AddArc(barX, barY + barH - d, d, d, 90, 90);  // 左下角
+            shellPath.CloseFigure();
+            
+            // 绘制外框
+            Pen borderPen(Color(255, GetRValue(COLOR_BORDER), GetGValue(COLOR_BORDER), GetBValue(COLOR_BORDER)), 1.5f);
+            graphics.DrawPath(&borderPen, &shellPath);
+            
+            // 电池尖端（右侧小凸起）- 使用三条线
+            int tipX = barX + barW;
+            int tipH = barH / 2;
+            int tipY = barY + (barH - tipH) / 2;
+            graphics.DrawLine(&borderPen, tipX, tipY, tipX + tipW, tipY + tipH/2);
+            graphics.DrawLine(&borderPen, tipX + tipW, tipY + tipH/2, tipX, tipY + tipH);
+            
+            // 内部填充
+            double animProgress = g_charProgressAnim.value;
+            if (animProgress > 0.01) {
+                int innerPad = 2;
+                int innerW = (int)((barW - innerPad * 2) * min(1.0, animProgress));
+                if (innerW > 2) {
+                    GraphicsPath fillPath;
+                    int fx = barX + innerPad;
+                    int fy = barY + innerPad;
+                    int fh = barH - innerPad * 2;
+                    int fr = 1;
+                    int fd = fr * 2;
+                    
+                    fillPath.AddArc(fx, fy, fd, fd, 180, 90);
+                    fillPath.AddLine(fx + fr, fy, fx + innerW - fr, fy);
+                    fillPath.AddArc(fx + innerW - fd, fy, fd, fd, 270, 90);
+                    fillPath.AddLine(fx + innerW, fy + fr, fx + innerW, fy + fh - fr);
+                    fillPath.AddArc(fx + innerW - fd, fy + fh - fd, fd, fd, 0, 90);
+                    fillPath.AddLine(fx + innerW - fr, fy + fh, fx + fr, fy + fh);
+                    fillPath.AddArc(fx, fy + fh - fd, fd, fd, 90, 90);
+                    fillPath.CloseFigure();
+                    
+                    SolidBrush fillBrush(Color(255, GetRValue(progressColor), GetGValue(progressColor), GetBValue(progressColor)));
+                    graphics.FillPath(&fillBrush, &fillPath);
+                }
+            }
+        }
+        
+        // Tooltip淡入淡出显示（无背景）
+        double tooltipAlpha = g_charTooltipAnim.value;
+        if (tooltipAlpha > 0.05) {
+            int tipX = barX + barW + tipW + 8;
+            int tipY = barY - 1;
+            
+            wchar_t tipBuf[64];
+            int remaining = 144 - (int)charCount;
+            if (remaining >= 0) {
+                swprintf_s(tipBuf, L"%zd/144 (\x5269\x4F59%d)", charCount, remaining);
+            } else {
+                swprintf_s(tipBuf, L"%zd/144 (\x8D85\x51FA%d)", charCount, -remaining);
+            }
+            
+            // 计算淡入淡出颜色
+            COLORREF textColor = charCount > 144 ? COLOR_ERROR : COLOR_TEXT;
+            int alpha = (int)(tooltipAlpha * 255);
+            int tr = (GetRValue(COLOR_BG) * (255 - alpha) + GetRValue(textColor) * alpha) / 255;
+            int tg = (GetGValue(COLOR_BG) * (255 - alpha) + GetGValue(textColor) * alpha) / 255;
+            int tb = (GetBValue(COLOR_BG) * (255 - alpha) + GetBValue(textColor) * alpha) / 255;
+            
+            HFONT oldFont = (HFONT)SelectObject(memDC, g_fontSmall);
+            SetTextColor(memDC, RGB(tr, tg, tb));
+            SetBkMode(memDC, TRANSPARENT);
+            TextOutW(memDC, tipX, tipY, tipBuf, (int)wcslen(tipBuf));
+            SelectObject(memDC, oldFont);
+        }
+        
+        // 超出限制时显示警告图标
+        if (charCount > 144) {
+            DrawTextLeft(memDC, L"\x26A0", barX + barW + tipW + 70, barY, COLOR_WARNING, g_fontSmall);
+        }
     }
+    
+    // 恢复剪辑区域（使用nullptr清除剪辑区域）
+    SelectClipRgn(memDC, nullptr);
+    DeleteObject(rightClip);
+    DeleteObject(oldRightClip);
     
     // Update tray
     if (!previewInfo.title.empty()) {
@@ -2810,11 +3680,10 @@ void OnPaint(HWND hwnd) {
         UpdateTrayTip(tip.c_str());
     }
     
-    // === Version display inside left card bottom ===
+    // === Version display at window bottom left (outside card) ===
     wchar_t verBuf[32];
     swprintf_s(verBuf, L"v" APP_VERSION);
-    int versionY = contentY + panelH - 25;  // Inside card, 25px from bottom
-    DrawTextLeft(memDC, verBuf, CARD_PADDING + 18, versionY, COLOR_TEXT_DIM, g_fontSmall);
+    DrawTextLeft(memDC, verBuf, CARD_PADDING + 18, h - 25, COLOR_TEXT_DIM, g_fontSmall);
     
     // === Author display at window bottom right ===
     DrawTextRight(memDC, L"by \x6C90\x98CE", w - CARD_PADDING - 18, h - 25, COLOR_TEXT_DIM, g_fontSmall);
@@ -2853,7 +3722,14 @@ void Disconnect() {
 }
 
 void Connect() {
+    // 防止重复连接
+    if (g_isConnecting) {
+        MainDebugLog("[Main] Connect() already in progress, skipping");
+        return;
+    }
+    
     MainDebugLog("[Main] Connect() called");
+    g_isConnecting = true;
     Disconnect();  // Clean up any existing connections
     
     // Show connecting status immediately
@@ -2861,9 +3737,10 @@ void Connect() {
     g_moeKoeConnected = false;
     g_neteaseConnected = false;
     g_activePlatform = -1;  // No active platform yet
-                g_pendingTitle = L"\x6B63\x5728\x8FDE\x63A5...";
-                g_pendingArtist = L"";
-                g_needsRedraw = true;    g_pendingLyrics.clear();
+    g_pendingTitle = L"\x6B63\x5728\x8FDE\x63A5...";
+    g_pendingArtist = L"";
+    g_needsRedraw = true;
+    g_pendingLyrics.clear();
     InvalidateRect(g_hwnd, nullptr, FALSE);
     
     // Run connection in background thread to avoid blocking UI
@@ -2872,38 +3749,39 @@ void Connect() {
         
         // Try to connect MoeKoe
         MainDebugLog("[Connect] Trying MoeKoe...");
-        g_moeKoeClient = new moekoe::MoeKoeWS("127.0.0.1", g_moekoePort);
-        g_moeKoeClient->setCallback([](const moekoe::SongInfo& info) {
+        moekoe::MoeKoeWS* moeKoeClient = new moekoe::MoeKoeWS("127.0.0.1", g_moekoePort);
+        moeKoeClient->setCallback([](const moekoe::SongInfo& info) {
             QueueUpdate(info, 0);
         });
-        if (g_moeKoeClient->connect()) {
+        if (moeKoeClient->connect()) {
+            g_moeKoeClient = moeKoeClient;
             g_moeKoeConnected = true;
             g_needsRedraw = true;
             MainDebugLog("[Connect] MoeKoe connected!");
         } else {
             MainDebugLog("[Connect] MoeKoe connection failed");
-            delete g_moeKoeClient;
-            g_moeKoeClient = nullptr;
+            delete moeKoeClient;
         }
         
         // Try to connect Netease
         MainDebugLog("[Connect] Trying Netease (port 9222)...");
-        g_neteaseClient = new moekoe::NeteaseWS(9222);
-        g_neteaseClient->setCallback([](const moekoe::SongInfo& info) {
+        moekoe::NeteaseWS* neteaseClient = new moekoe::NeteaseWS(9222);
+        neteaseClient->setCallback([](const moekoe::SongInfo& info) {
             QueueUpdate(info, 1);
         });
-        if (g_neteaseClient->connect()) {
+        if (neteaseClient->connect()) {
+            g_neteaseClient = neteaseClient;
             g_neteaseConnected = true;
             g_needsRedraw = true;
             MainDebugLog("[Connect] Netease connected!");
         } else {
             MainDebugLog("[Connect] Netease connection failed");
-            delete g_neteaseClient;
-            g_neteaseClient = nullptr;
+            delete neteaseClient;
         }
         
         // Update connection status
         g_isConnected = g_moeKoeConnected || g_neteaseConnected || g_smtcConnected;
+        g_isConnecting = false;  // 连接完成
         MainDebugLog(g_isConnected ? "[Connect] Overall: CONNECTED" : "[Connect] Overall: FAILED");
         if (!g_isConnected) {
             g_pendingTitle = L"\x8FDE\x63A5\x5931\x8D25";
@@ -2928,17 +3806,38 @@ bool IsInRect(int x, int y, int rx, int ry, int rw, int rh) {
 
 bool IsAnimationActive() {
     // Check if any animation is still updating
-    if (fabs(g_btnConnectAnim.value - g_btnConnectAnim.target) > 0.001) return true;
-    if (fabs(g_btnApplyAnim.value - g_btnApplyAnim.target) > 0.001) return true;
-    if (fabs(g_btnCloseAnim.value - g_btnCloseAnim.target) > 0.001) return true;
-    if (fabs(g_btnMinAnim.value - g_btnMinAnim.target) > 0.001) return true;
-    if (fabs(g_btnUpdateAnim.value - g_btnUpdateAnim.target) > 0.001) return true;
-    if (fabs(g_btnLaunchAnim.value - g_btnLaunchAnim.target) > 0.001) return true;
-    if (fabs(g_btnExportLogAnim.value - g_btnExportLogAnim.target) > 0.001) return true;
+    // 按钮悬停动画
+    if (g_btnConnectAnim.isActive()) return true;
+    if (g_btnApplyAnim.isActive()) return true;
+    if (g_btnCloseAnim.isActive()) return true;
+    if (g_btnMinAnim.isActive()) return true;
+    if (g_btnUpdateAnim.isActive()) return true;
+    if (g_btnLaunchAnim.isActive()) return true;
+    if (g_btnExportLogAnim.isActive()) return true;
+    if (g_btnThemeAnim.isActive()) return true;
+    
+    // 窗口启动动画
+    if (!g_startupAnimComplete) return true;
+    if (g_windowFadeAnim.isActive()) return true;
+    if (g_windowScaleAnim.isActive()) return true;
+    
+    // 标签页切换动画
+    if (g_tabSlideAnim.isActive()) return true;
+    
+    // 下拉菜单动画（只在菜单可见时才认为活跃）
+    if (g_menuExpandAnim.isActive() && (g_platformMenuOpen || g_menuExpandAnim.value > 0.01)) return true;
+    
+    // 歌词滚动动画
+    if (g_lyricScrollAnim.isActive()) return true;
+    
+    // 主题切换过渡
+    if (g_themeTransition.isActive()) return true;
+    
     return false;
 }
 
 void UpdateAnimations() {
+    // 按钮悬停动画
     g_btnConnectAnim.setTarget(g_btnConnectHover ? 1.0 : 0.0);
     g_btnApplyAnim.setTarget(g_btnApplyHover ? 1.0 : 0.0);
     g_btnCloseAnim.setTarget(g_btnCloseHover ? 1.0 : 0.0);
@@ -2946,6 +3845,7 @@ void UpdateAnimations() {
     g_btnUpdateAnim.setTarget(g_btnUpdateHover ? 1.0 : 0.0);
     g_btnLaunchAnim.setTarget(g_btnLaunchHover ? 1.0 : 0.0);
     g_btnExportLogAnim.setTarget(g_btnExportLogHover ? 1.0 : 0.0);
+    g_btnThemeAnim.setTarget(g_btnThemeHover ? 1.0 : 0.0);
     g_btnConnectAnim.update();
     g_btnApplyAnim.update();
     g_btnCloseAnim.update();
@@ -2953,6 +3853,83 @@ void UpdateAnimations() {
     g_btnUpdateAnim.update();
     g_btnLaunchAnim.update();
     g_btnExportLogAnim.update();
+    g_btnThemeAnim.update();
+    
+    // 窗口启动动画（缩放）- 简化版本，不再使用淡入
+    if (!g_startupAnimComplete) {
+        g_windowScaleAnim.update();
+        
+        // 检查动画是否完成
+        if (!g_windowScaleAnim.isActive()) {
+            g_startupAnimComplete = true;
+        }
+    }
+    
+    // 标签页切换动画
+    g_tabSlideAnim.update();
+    
+    // 下拉菜单展开动画
+    g_menuExpandAnim.update();
+    
+    // 下拉箭头旋转动画
+    g_arrowRotationAnim.update();
+    
+    // 下拉菜单逐条淡入淡出动画（延迟递增效果）
+    double menuExpandFactor = g_menuExpandAnim.value;
+    for (int i = 0; i < g_platformCount && i < 10; i++) {
+        if (g_platformMenuOpen) {
+            // 展开：逐条淡入（从上到下）
+            double delay = i * 0.08;  // 每项延迟0.08
+            double itemProgress = max(0.0, menuExpandFactor - delay) / max(0.01, 1.0 - delay);
+            itemProgress = min(1.0, itemProgress);
+            // 使用缓动函数
+            itemProgress = itemProgress * itemProgress * (3.0 - 2.0 * itemProgress);  // smoothstep
+            g_menuItemAnims[i].value = itemProgress;
+        } else {
+            // 收起：逐条淡出（从下到上）
+            int reverseIdx = g_platformCount - 1 - i;  // 反向索引
+            double delay = reverseIdx * 0.06;  // 从下往上，每项延迟0.06
+            double collapseProgress = 1.0 - menuExpandFactor;  // 收起进度
+            double itemProgress = max(0.0, collapseProgress - delay) / max(0.01, 1.0 - delay);
+            itemProgress = min(1.0, itemProgress);
+            itemProgress = itemProgress * itemProgress * (3.0 - 2.0 * itemProgress);  // smoothstep
+            g_menuItemAnims[i].value = 1.0 - itemProgress;  // 反转：进度越大越透明
+        }
+    }
+    
+    // 更新按钮旋转动画（检查更新时旋转）
+    if (g_checkingUpdate) {
+        DWORD now = GetTickCount();
+        if (g_lastRotationTime == 0) g_lastRotationTime = now;
+        double elapsed = (now - g_lastRotationTime) / 1000.0;
+        g_updateRotation += elapsed * 360.0;  // 每秒转360度
+        if (g_updateRotation >= 360.0) g_updateRotation -= 360.0;
+        g_lastRotationTime = now;
+    } else {
+        g_updateRotation = 0.0;
+        g_lastRotationTime = 0;
+    }
+    
+    // 连接状态脉冲动画（呼吸效果）- 只在已连接时启用
+    static DWORD pulseTimer = 0;
+    DWORD now = GetTickCount();
+    if (g_isConnected && now - pulseTimer > 50) {  // 50ms 更新一次
+        pulseTimer = now;
+        // 脉冲效果：在0到1之间循环
+        double pulseTarget = (sin(GetTickCount() / 500.0) + 1.0) / 2.0;
+        g_connectPulseAnim.setTarget(pulseTarget);
+        g_connectPulseAnim.update();
+    } else if (!g_isConnected) {
+        // 未连接时重置脉冲动画
+        g_connectPulseAnim.value = 0.0;
+        g_connectPulseAnim.target = 0.0;
+    }
+    
+    // 歌词滚动动画
+    g_lyricScrollAnim.update();
+    
+    // 主题切换过渡动画
+    g_themeTransition.update();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2977,7 +3954,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_brushCard = CreateSolidBrush(COLOR_CARD);
             g_brushEditBg = CreateSolidBrush(COLOR_EDIT_BG);
             
-            // Enable glass effect
+            // 设置 DWM 圆角和毛玻璃效果
+            UpdateWindowSystemTheme(hwnd);
+            
+            // 设置窗口圆角区域
+            HRGN hrgn = CreateRoundedWindowRegion(hwnd, 12);
+            if (hrgn) {
+                SetWindowRgn(hwnd, hrgn, TRUE);  // TRUE = 销毁之前的区域
+            }
+            
             EnableBlurBehind(hwnd);
             
             // Create edit controls - positions must match OnPaint drawing
@@ -3014,6 +3999,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         
         case WM_PAINT: OnPaint(hwnd); return 0;
         
+        case WM_ERASEBKGND: return 1;  // 背景由OnPaint完全处理，阻止系统默认擦除
+        
         case WM_MOUSEMOVE: {
             int x = LOWORD(lParam), y = HIWORD(lParam);
             
@@ -3029,12 +4016,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int tabH = 32;
             int tabY = contentY + 10;  // Tabs inside card
             int rowY = contentY + 55;
-            int updateBtnX = g_winW - 200;
             int checkboxX = CARD_PADDING + 18;
             
             bool oldConnect = g_btnConnectHover, oldApply = g_btnApplyHover;
             bool oldClose = g_btnCloseHover, oldMin = g_btnMinHover, oldUpdate = g_btnUpdateHover, oldLaunch = g_btnLaunchHover;
-            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover;
+            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover, oldTheme = g_btnThemeHover;
             bool oldTabHover[2] = {g_tabHover[0], g_tabHover[1]};
             
             // Tab hover detection
@@ -3050,10 +4036,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int platformBoxX = CARD_PADDING + 18;
                 int platformBoxY = platformRowY + 22;
                 int platformBoxW = leftColW - 36;
-                int platformBoxH = 36;
+                int platformBoxH = 44;  // 必须与绘制代码一致
                 int menuItemH = 36;
                 int menuH = g_platformCount * menuItemH + 8;
-                int menuExtraSpace = g_platformMenuOpen ? (g_platformCount * menuItemH + 12) : 0;
+                // 使用动画值计算菜单空间，与绘制代码一致
+                double menuExpandFactor = g_menuExpandAnim.value;
+                bool isMenuVisible = g_platformMenuOpen || (g_menuExpandAnim.isActive() && menuExpandFactor > 0.01);
+                int menuExtraSpace = isMenuVisible ? (int)((g_platformCount * menuItemH + 12) * menuExpandFactor) : 0;
                 int btnY = platformRowY + 80 + menuExtraSpace;  // Match drawing position
                 int launchBtnY = btnY + 48;
                 
@@ -3094,30 +4083,51 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else {
                 // Close platform menu when switching tabs
                 g_platformMenuOpen = false;
+                g_menuExpandAnim.value = 0.0;
+                g_menuExpandAnim.target = 0.0;
                 g_platformBoxHover = false;
                 g_platformMenuHover = -1;
                 g_btnConnectHover = false;
                 g_btnLaunchHover = false;
                 // Settings tab positions (relative to rowY = contentY + 55):
-                // IP(75) + Port(70) + 6 checkboxes(38*6=228) = 373
-                // Admin Status text at: rowY + 373 + 4 = rowY + 377
-                // Export Log at: rowY + 373 + 55 = rowY + 428
-                int adminY = rowY + 75 + 70 + 38*6 + 4;  // rowY + 377 (text is at +4)
-                int exportLogY = rowY + 75 + 70 + 38*6 + 55;  // rowY + 428
+                // rowY starts at contentY + 55
+                // IP section: rowY unchanged
+                // rowY += 75 (Port section)
+                // rowY += 70 (first checkbox)
+                // rowY += 38 * 6 (six more checkboxes) 
+                // rowY += 38 (admin checkbox)
+                // Admin Status text: rowY += 38, drawn at rowY + 4
+                // Export Log: rowY += 55
+                int adminY = rowY + 75 + 70 + 38*7 + 4;  // contentY + 55 + 75 + 70 + 266 + 4 = contentY + 470
+                int exportLogY = rowY + 75 + 70 + 38*7 + 55;  // contentY + 55 + 75 + 70 + 266 + 55 = contentY + 521
                 g_btnAdminHover = !IsRunningAsAdmin() && IsInRect(x, y, checkboxX, adminY, 150, 22);
-                g_btnExportLogHover = IsInRect(x, y, checkboxX, exportLogY, leftColW - 36 - checkboxX, 32);
+                g_btnExportLogHover = IsInRect(x, y, checkboxX, exportLogY, leftColW - 36 - checkboxX, 38);
             }
             
             g_btnApplyHover = false;
-            g_btnCloseHover = IsInRect(x, y, g_winW - 60, 14, 38, 38);
+            g_btnThemeHover = IsInRect(x, y, g_winW - 160, 14, 38, 38);
+            g_btnThemeHover = IsInRect(x, y, g_winW - 210, 14, 38, 38);
+            g_btnUpdateHover = IsInRect(x, y, g_winW - 160, 14, 38, 38);
             g_btnMinHover = IsInRect(x, y, g_winW - 110, 14, 38, 38);
-            g_btnUpdateHover = IsInRect(x, y, updateBtnX, 14, 80, 32);
+            g_btnCloseHover = IsInRect(x, y, g_winW - 60, 14, 38, 38);
             
-            if (oldConnect != g_btnConnectHover || oldApply != g_btnApplyHover || 
-                oldClose != g_btnCloseHover || oldMin != g_btnMinHover || oldUpdate != g_btnUpdateHover || 
+            // 字符数进度条hover检测
+            bool oldCharProgressHover = g_charProgressHover;
+            int rightColX = leftColW + CARD_PADDING * 2;
+            int previewH = g_winH - contentY - CARD_PADDING;
+            int labelY = contentY + previewH - 30;
+            int barX = rightColX + 18 + 50;  // 标签后面
+            int barH = 12;
+            int barY = labelY + 6;  // 与绘制代码一致
+            int barW = 60 + 3;  // 电池宽度+尖端
+            g_charProgressHover = IsInRect(x, y, barX - 5, barY - 3, barW + 10, barH + 6);  // 扩大检测范围
+
+            if (oldConnect != g_btnConnectHover || oldApply != g_btnApplyHover ||
+                oldClose != g_btnCloseHover || oldMin != g_btnMinHover || oldUpdate != g_btnUpdateHover ||
                 oldLaunch != g_btnLaunchHover || oldExportLog != g_btnExportLogHover ||
+                oldTheme != g_btnThemeHover ||
                 oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] ||
-                g_btnAdminHover != oldAdmin) {
+                g_btnAdminHover != oldAdmin || g_charProgressHover != oldCharProgressHover) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -3126,9 +4136,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_LBUTTONDOWN: {
             int x = LOWORD(lParam), y = HIWORD(lParam);
             
+            // Theme toggle button (sun/moon)
+            if (IsInRect(x, y, g_winW - 210, 14, 38, 38)) {
+                // 触发主题切换过渡动画
+                g_themeTransition.value = 0.0;
+                g_themeTransition.target = 1.0;
+                g_themeTransition.speed = 0.06;
+                
+                // 添加轻微的缩放效果
+                g_windowScaleAnim.value = 0.98;
+                g_windowScaleAnim.target = 1.0;
+                g_windowScaleAnim.speed = 0.12;
+                
+                g_darkMode = !g_darkMode;
+                UpdateThemeColors();
+                EnableBlurBehind(hwnd);
+                UpdateWindowSystemTheme(hwnd);
+                if (g_brushBg) DeleteObject(g_brushBg);
+                if (g_brushCard) DeleteObject(g_brushCard);
+                g_brushBg = CreateSolidBrush(COLOR_BG);
+                g_brushCard = CreateSolidBrush(COLOR_CARD);
+                SaveConfig(L"config_gui.json");
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            
             // Update button click
-            int updateBtnX = g_winW - 200;
-            if (IsInRect(x, y, updateBtnX, 14, 80, 32)) {
+            if (IsInRect(x, y, g_winW - 160, 14, 38, 38)) {
                 if (g_downloadingUpdate) {
                     // Download in progress, ignore
                     return 0;
@@ -3207,7 +4241,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             for (int t = 0; t < 2; t++) {
                 int tabX = CARD_PADDING + 18 + t * (tabW + 8);
                 if (IsInRect(x, y, tabX, tabY, tabW, tabH)) {
-                    g_currentTab = t;
+                    if (g_currentTab != t) {
+                        // 触发标签页滑动动画
+                        g_tabSlideDirection = (t > g_currentTab) ? 1 : -1;  // 1=右滑, -1=左滑
+                        g_prevTab = g_currentTab;
+                        g_tabSlideAnim.value = 0.0;
+                        g_tabSlideAnim.target = 1.0;
+                        g_tabSlideAnim.speed = 0.12;
+                        g_currentTab = t;
+                    }
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
@@ -3232,10 +4274,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         int itemY = menuY + 4 + i * menuItemH;
                         if (IsInRect(x, y, platformBoxX + 4, itemY, platformBoxW - 8, menuItemH - 4)) {
                             if (g_platforms[i].connected) {
+                                // Clear lyrics state when switching platform
+                                if (g_activePlatform != i) {
+                                    g_pendingLyrics.clear();
+                                    g_qqMusicLastTitle.clear();
+                                    g_qqMusicLastArtist.clear();
+                                }
                                 g_activePlatform = i;
                                 g_autoPlatformSwitch = false;
                             }
                             g_platformMenuOpen = false;
+                            g_menuExpandAnim.value = 1.0;
+                            g_menuExpandAnim.target = 0.0;  // 触发收起动画
                             InvalidateRect(hwnd, nullptr, FALSE);
                             return 0;
                         }
@@ -3244,6 +4294,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // Click outside menu - close it (but not on platform box)
                     if (!IsInRect(x, y, platformBoxX, platformBoxY, platformBoxW, platformBoxH)) {
                         g_platformMenuOpen = false;
+                        g_menuExpandAnim.value = 1.0;
+                        g_menuExpandAnim.target = 0.0;  // 触发收起动画
                         InvalidateRect(hwnd, nullptr, FALSE);
                         return 0;
                     }
@@ -3252,6 +4304,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Platform box click - toggle menu
                 if (IsInRect(x, y, platformBoxX, platformBoxY, platformBoxW, platformBoxH)) {
                     g_platformMenuOpen = !g_platformMenuOpen;
+                    // 触发菜单展开/收起动画
+                    g_menuExpandAnim.value = g_platformMenuOpen ? 0.0 : 1.0;
+                    g_menuExpandAnim.target = g_platformMenuOpen ? 1.0 : 0.0;
+                    g_menuExpandAnim.speed = 0.15;
+                    // 触发箭头旋转动画
+                    g_arrowRotationAnim.value = g_platformMenuOpen ? 0.0 : 1.0;
+                    g_arrowRotationAnim.target = g_platformMenuOpen ? 1.0 : 0.0;
+                    g_arrowRotationAnim.speed = 0.15;
+                    // 启动每个菜单项的逐条淡入动画（延迟递增）
+                    if (g_platformMenuOpen) {
+                        for (int i = 0; i < g_platformCount && i < 10; i++) {
+                            g_menuItemAnims[i].value = 0.0;
+                            g_menuItemAnims[i].target = 1.0;
+                            g_menuItemAnims[i].speed = 0.15;  // 统一速度，通过延迟实现效果
+                        }
+                    }
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
@@ -3259,7 +4327,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Connect button
                 if (IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 40)) {
                     g_autoPlatformSwitch = true;  // Re-enable auto switch when reconnecting
-                    g_platformMenuOpen = false;   // Close menu
+                    // 只在菜单打开时才触发收起动画
+                    if (g_platformMenuOpen) {
+                        g_platformMenuOpen = false;
+                        g_menuExpandAnim.value = 1.0;
+                        g_menuExpandAnim.target = 0.0;  // 触发收起动画
+                    }
                     ApplySettings();
                     Connect();
                 }
@@ -3470,7 +4543,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int autoUpdateRowY = checkboxRowY + 38;
             int showPlatformRowY = autoUpdateRowY + 38;
             int trayRowY = showPlatformRowY + 38;
-            int autoStartRowY = trayRowY + 38;
+            int startMinimizedRowY = trayRowY + 38;
+            int autoStartRowY = startMinimizedRowY + 38;
             int runAsAdminRowY = autoStartRowY + 38;
             int adminStatusY = runAsAdminRowY + 38;
             int exportLogRowY = adminStatusY + 55;
@@ -3509,6 +4583,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            // Checkbox for start minimized
+            if (IsInRect(x, y, checkboxX, startMinimizedRowY, checkboxSize, checkboxSize)) {
+                g_startMinimized = !g_startMinimized;
+                SaveConfig(L"config_gui.json");
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             // Checkbox for auto start
             if (IsInRect(x, y, checkboxX, autoStartRowY, checkboxSize, checkboxSize)) {
                 g_autoStart = !g_autoStart;
@@ -3539,7 +4620,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
         }
-        
+
         // Close button (works on both tabs)
         if (IsInRect(x, y, g_winW - 60, 14, 38, 38)) {
             if (g_minimizeToTray) ShowWindow(hwnd, SW_HIDE);
@@ -3560,6 +4641,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             // Smart redraw: only redraw when needed
             DWORD now = GetTickCount();
+            
+            // Detect system lag recovery (timer interval > 500ms instead of normal 16ms)
+            if (g_lastTimerTick > 0 && (now - g_lastTimerTick) > 500) {
+                // System just recovered from lag - reset OSC timer to prevent burst sends
+                g_lastOscSendTime = now;
+            }
+            g_lastTimerTick = now;
+            
             bool animActive = IsAnimationActive();
             
             if (animActive) {
@@ -3581,31 +4670,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (lParam == WM_LBUTTONDBLCLK) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
             else if (lParam == WM_RBUTTONUP) {
                 POINT pt; GetCursorPos(&pt);
-                
-                // Create a popup menu
-                HMENU menu = CreatePopupMenu();
-                
-                AppendMenuW(menu, MF_STRING, 1, L"\x663E\x793A\x7A97\x53E3");  // 显示窗口
-                AppendMenuW(menu, MF_STRING, 2, L"\x9000\x51FA\x7A0B\x5E8F");  // 退出程序
-                
-                // Must set foreground window before showing menu
-                SetForegroundWindow(hwnd);
-                int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
-                DestroyMenu(menu);
-                
-                if (cmd == 1) { ShowWindow(hwnd, SW_SHOW); SetForegroundWindow(hwnd); }
-                else if (cmd == 2) { 
-                    // Exit directly
-                    DestroyWindow(hwnd); 
-                }
+                ShowTrayMenu(pt.x, pt.y);
             }
             return 0;
         
-        case WM_SIZE:
+        case WM_SIZE: {
             g_winW = LOWORD(lParam);
             g_winH = HIWORD(lParam);
+            // 更新窗口圆角区域
+            HRGN hrgn = CreateRoundedWindowRegion(hwnd, 12);
+            if (hrgn) {
+                SetWindowRgn(hwnd, hrgn, TRUE);
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
+        }
         
         case WM_NCHITTEST: {
             LRESULT hit = DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -3746,7 +4825,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             info.lyrics = g_pendingLyrics;
                             
                             DWORD now = GetTickCount();
-                            if (now - g_lastOscSendTime >= 1500) {  // 1.5s interval
+                            if (now - g_lastOscSendTime >= OSC_MIN_INTERVAL) {
                                 std::wstring oscMsg = FormatOSCMessage(info);
                                 if (oscMsg != g_lastOscMessage) {
                                     g_osc->sendChatbox(oscMsg);
@@ -3806,6 +4885,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
+    // Initialize GDI+ for anti-aliased rendering
+    GdiplusStartupInput gdiplusStartupInput;
+    ULONG_PTR gdiplusToken;
+    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+    
     // Enable DPI awareness for high-resolution displays
     typedef BOOL(WINAPI* SetProcessDPIAware_t)();
     HMODULE hUser32 = LoadLibraryW(L"user32.dll");
@@ -3827,6 +4911,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     InitializeCriticalSection(&g_cs);
     g_startTime = GetTickCount();
     
+    // 先初始化默认主题颜色，确保弹窗显示正确
+    UpdateThemeColors();
+    
     // Check if this is first run (config file doesn't exist)
     bool isFirstRun = (_waccess(L"config_gui.json", 0) == -1);
     if (isFirstRun) {
@@ -3834,6 +4921,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     
     LoadConfig(L"config_gui.json");
+    UpdateThemeColors();  // 根据配置重新加载主题颜色
     
     g_noLyricMsgs = LoadNoLyricMessages(L"config.json");
     if (g_noLyricMsgs.empty()) {
@@ -3897,12 +4985,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hInstance = hInst;
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
+    wc.hbrBackground = NULL;  // 背景由OnPaint完全处理
     wc.lpszClassName = L"VRCLyricsDisplay_Class";
     RegisterClassExW(&wc);
     
-    g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, L"VRCLyricsDisplay_Class", L"",
-        WS_POPUP | WS_CLIPCHILDREN | WS_THICKFRAME, CW_USEDEFAULT, CW_USEDEFAULT, g_winW, g_winH, nullptr, nullptr, hInst, nullptr);
+    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_COMPOSITED, L"VRCLyricsDisplay_Class", L"",
+        WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, g_winW, g_winH, nullptr, nullptr, hInst, nullptr);
     
     // Set window position: saved position or center on first run
     int screenW = GetSystemMetrics(SM_CXSCREEN);
@@ -3920,20 +5008,29 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         SetWindowPos(g_hwnd, nullptr, centerX, centerY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
     
-    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
-    if (hDwm) {
-        typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
-        DwmSetWindowAttribute_t fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
-        if (fn) {
-            int pref = 2; fn(g_hwnd, 33, &pref, sizeof(pref));
-            BOOL dark = TRUE; fn(g_hwnd, 20, &dark, sizeof(dark));
-        }
-        FreeLibrary(hDwm);
-    }
+    // Set window theme
+    UpdateWindowSystemTheme(g_hwnd);
     
-    SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
-    ShowWindow(g_hwnd, nCmdShow);
+    // 初始化启动动画
+    g_startupAnimStart = GetTickCount();
+    g_windowFadeAnim.value = 0.0;
+    g_windowFadeAnim.target = 1.0;
+    g_windowFadeAnim.speed = 0.2;  // 加快淡入速度
+    g_windowScaleAnim.value = 0.96;
+    g_windowScaleAnim.target = 1.0;
+    g_windowScaleAnim.speed = 0.25;  // 加快缩放速度
+    g_themeTransition.setImmediate(1.0);
+    
+    // Support start minimized option
+    if (g_startMinimized) {
+        ShowWindow(g_hwnd, SW_HIDE);
+    } else {
+        ShowWindow(g_hwnd, nCmdShow);
+    }
     UpdateWindow(g_hwnd);
+    
+    // 确保毛玻璃效果生效
+    EnableBlurBehind(g_hwnd);
     
     g_osc = new moekoe::OSCSender(WstringToUtf8(g_oscIp), g_oscPort);
     Connect();
@@ -3960,6 +5057,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         ReleaseMutex(g_mutex);
         CloseHandle(g_mutex);
     }
+    
+    // Shutdown GDI+
+    GdiplusShutdown(gdiplusToken);
+    
     return (int)msg.wParam;
 }
 
