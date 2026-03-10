@@ -1,0 +1,24 @@
+========================================
+  VRChat Lyrics Display Build
+========================================
+
+[Compiling...]
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.50.35721 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+cl: 命令行 warning D9047 :"await" 选项已否决，并将在将来的版本中移除。
+    默认情况下，Standard C++ 协同例程在 C++20 或更高版本中可用，或在更早的语言模式下使用 "/await:strict"。
+main_gui.cpp
+main_gui.cpp(1408): error C2065: “L”: 未声明的标识符
+main_gui.cpp(1408): error C2143: 语法错误: 缺少“;”(在“]”的前面)
+main_gui.cpp(1408): error C2059: 语法错误:“]”
+main_gui.cpp(1408): error C2001: 常量中有换行符
+main_gui.cpp(2075): warning C4838: 从“COLORREF”转换到“int”需要收缩转换
+main_gui.cpp(2085): warning C4838: 从“COLORREF”转换到“int”需要收缩转换
+glass_window.cpp
+moekoe_ws.cpp
+netease_ws.cpp
+smtc_client.cpp
+正在生成代码...
+
+[ERROR] Build failed

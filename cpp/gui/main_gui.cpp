@@ -318,11 +318,8 @@ int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length);
 std::wstring BuildProgressBar(double progress, int bars);
 std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
 
-// 异步性能检测线程函数
-DWORD WINAPI WorkerThread1(LPVOID param);  // 原生API: CPU/RAM
-DWORD WINAPI WorkerThread2(LPVOID param);  // DXGI: GPU显存
-DWORD WINAPI WorkerThread3(LPVOID param);  // NVML/ADL: GPU占用率
-DWORD WINAPI WorkerThread4(LPVOID param);  // LibreHardwareMonitor: 温度
+// 统一性能监控线程（合并原4个线程）
+DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param);
 
 // 初始化函数
 void InitializePerfMonitoring();
@@ -1260,7 +1257,15 @@ typedef struct nvmlUtilization_st {
     unsigned int memory;    // 内存使用率
 } nvmlUtilization_t;
 
+// NVML Memory结构体
+typedef struct nvmlMemory_st {
+    unsigned long long total;    // 总显存（字节）
+    unsigned long long free;     // 空闲显存（字节）
+    unsigned long long used;     // 已用显存（字节）
+} nvmlMemory_t;
+
 typedef int (*nvmlDeviceGetUtilizationRates_t)(void*, nvmlUtilization_t*);
+typedef int (*nvmlDeviceGetMemoryInfo_t)(void*, nvmlMemory_t*);
 typedef int (*nvmlDeviceGetName_t)(void*, char*, unsigned int);
 
 static HMODULE g_nvmlDll = nullptr;
@@ -1268,6 +1273,7 @@ static nvmlInit_t nvmlInit = nullptr;
 static nvmlShutdown_t nvmlShutdown = nullptr;
 static nvmlDeviceGetHandleByIndex_t nvmlDeviceGetHandleByIndex = nullptr;
 static nvmlDeviceGetUtilizationRates_t nvmlDeviceGetUtilizationRates = nullptr;
+static nvmlDeviceGetMemoryInfo_t nvmlDeviceGetMemoryInfo = nullptr;
 static nvmlDeviceGetName_t nvmlDeviceGetName = nullptr;
 static void* g_nvmlDevice = nullptr;
 
@@ -5811,661 +5817,457 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 // === 异步性能检测线程实现 ===
 
-// 线程1: 原生API - CPU/RAM
-DWORD WINAPI WorkerThread1(LPVOID param) {
-    while (g_threadRunning[0]) {
-        FILETIME idleTime, kernelTime, userTime;
-        if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-            ULONGLONG idle = ((ULONGLONG)idleTime.dwHighDateTime << 32) | idleTime.dwLowDateTime;
-            ULONGLONG kernel = ((ULONGLONG)kernelTime.dwHighDateTime << 32) | kernelTime.dwLowDateTime;
-            ULONGLONG user = ((ULONGLONG)userTime.dwHighDateTime << 32) | userTime.dwLowDateTime;
-
-            ULONGLONG lastIdle = ((ULONGLONG)g_lastIdleTime.dwHighDateTime << 32) | g_lastIdleTime.dwLowDateTime;
-            ULONGLONG lastKernel = ((ULONGLONG)g_lastKernelTime.dwHighDateTime << 32) | g_lastKernelTime.dwLowDateTime;
-            ULONGLONG lastUser = ((ULONGLONG)g_lastUserTime.dwHighDateTime << 32) | g_lastUserTime.dwLowDateTime;
-
-            if (lastIdle > 0 || lastKernel > 0) {
-                ULONGLONG idleDelta = idle - lastIdle;
-                ULONGLONG totalDelta = (kernel - lastKernel) + (user - lastUser);
-                if (totalDelta > 0) {
-                    double cpuUsage = (double)(totalDelta - idleDelta) / totalDelta * 100.0;
-                    if (cpuUsage < 0) cpuUsage = 0;
-                    if (cpuUsage > 100) cpuUsage = 100;
-
-                    std::lock_guard<std::mutex> lock(g_perfDataMutex);
-                    g_latestPerfData.cpuUsage = (int)cpuUsage;
-                }
-            }
-            g_lastIdleTime = idleTime;
-            g_lastKernelTime = kernelTime;
-            g_lastUserTime = userTime;
-        }
-
-        // RAM
-        MEMORYSTATUSEX memStatus = {sizeof(memStatus)};
-        if (GlobalMemoryStatusEx(&memStatus)) {
-            std::lock_guard<std::mutex> lock(g_perfDataMutex);
-            g_latestPerfData.ramUsed = memStatus.ullTotalPhys - memStatus.ullAvailPhys;
-            g_latestPerfData.ramTotal = memStatus.ullTotalPhys;
-            if (memStatus.ullTotalPhys > 0) {
-                g_latestPerfData.ramUsage = (int)((memStatus.ullTotalPhys - memStatus.ullAvailPhys) * 100.0 / memStatus.ullTotalPhys);
-            }
-        }
-
-        Sleep(1000);  // 每秒更新一次
-    }
-    return 0;
-}
-
-// 线程2: DXGI - GPU显存
-DWORD WINAPI WorkerThread2(LPVOID param) {
-    static IDXGIFactory1* pDXGIFactory = nullptr;
-    static bool initialized = false;
+// 统一性能监控线程（合并原4个线程，优化性能和资源使用）
+DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
+    LOG_INFO("[PerfMonitor] Unified performance monitoring thread started");
     
-    // 初始化LibreHardwareMonitor WMI连接（保底方案用于显存占用）
-    static IWbemServices* pLHMServices = nullptr;
-    static bool lhmInitialized = false;
-    static IWbemLocator* pLocator = nullptr;
-
-    if (!initialized) {
-        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pDXGIFactory))) {
-            initialized = true;
-        }
-        
-        // 初始化LibreHardwareMonitor WMI
-        if (!lhmInitialized) {
-            if (SUCCEEDED(CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator))) {
-                if (SUCCEEDED(pLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLHMServices))) {
-                    CoSetProxyBlanket(pLHMServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
-                    lhmInitialized = true;
-                }
-            }
-        }
-    }
-
-    while (g_threadRunning[1] && (pDXGIFactory || lhmInitialized)) {
-        // 优先使用DXGI获取显存总量
-        if (pDXGIFactory) {
-            UINT adapterIndex = 0;
-            IDXGIAdapter1* pAdapter = nullptr;
-            while (pDXGIFactory->EnumAdapters1(adapterIndex, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
-                DXGI_ADAPTER_DESC1 desc;
-                if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
-                    std::lock_guard<std::mutex> lock(g_perfDataMutex);
-                    g_latestPerfData.gpuVramTotal = desc.DedicatedVideoMemory;
-                    // Note: 获取已用显存需要更复杂的DXGI调用，这里暂时设为0
-                    g_latestPerfData.gpuVramUsed = 0;
-
-                    pAdapter->Release();
-                    break;  // 使用第一个适配器
-                }
-                pAdapter->Release();
-                adapterIndex++;
-            }
-        }
-        
-        // 保底方案：使用LibreHardwareMonitor WMI获取显存占用
-        if (lhmInitialized && pLHMServices && g_latestPerfData.gpuVramUsed == 0) {
-            IEnumWbemClassObject* pEnumerator = nullptr;
-            HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
-                BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Data' AND Name='GPU Memory Used'"), 
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
-            
-            if (SUCCEEDED(hr) && pEnumerator) {
-                IWbemClassObject* pclsObj = nullptr;
-                ULONG uReturn = 0;
-                if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                    VARIANT vtProp;
-                    VariantInit(&vtProp);
-                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
-                        std::lock_guard<std::mutex> lock(g_perfDataMutex);
-                        g_latestPerfData.gpuVramUsed = (ULONGLONG)(vtProp.fltVal * 1024 * 1024);  // 转换为字节
-                    }
-                    VariantClear(&vtProp);
-                    pclsObj->Release();
-                }
-                pEnumerator->Release();
-            }
-        }
-        
-        Sleep(2000);  // 每2秒更新一次
-    }
+    // === 初始化所有监控资源（只初始化一次）===
     
-    // 清理
-    if (pLHMServices) pLHMServices->Release();
-    if (pLocator) pLocator->Release();
+    // 1. DXGI for GPU显存（Windows 10+原生API）
+    IDXGIFactory1* pDXGIFactory = nullptr;
+    IDXGIAdapter3* pDXGIAdapter = nullptr;  // 使用Adapter3支持QueryVideoMemoryInfo
+    bool dxgiInitialized = false;
     
-    return 0;
-}
-
-// 线程3: NVML/ADL - GPU占用率
-DWORD WINAPI WorkerThread3(LPVOID param) {
-    static IWbemServices* pLHMServices = nullptr;
-    static bool lhmInitialized = false;
-    
-    // 初始化LibreHardwareMonitor WMI连接（保底方案）
-    if (!lhmInitialized) {
-        IWbemLocator* pLocator = nullptr;
-        if (SUCCEEDED(CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator))) {
-            if (SUCCEEDED(pLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLHMServices))) {
-                CoSetProxyBlanket(pLHMServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
-                lhmInitialized = true;
-            }
-            pLocator->Release();
-        }
-    }
-    
-    while (g_threadRunning[2]) {
-        int gpuUsage = 0;
-
-        if (g_gpuVendor == GPU_NVIDIA && g_nvmlAvailable && nvmlInit && nvmlDeviceGetUtilizationRates) {
-            // NVIDIA NVML
-            LOG_DEBUG("[GPU] Trying NVML detection...");
-            void* device = nullptr;
-            if (nvmlDeviceGetHandleByIndex(0, &device) == 0) {
-                nvmlUtilization_t utilization;
-                if (nvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
-                    gpuUsage = (int)utilization.gpu;
-                    char msg[128];
-                    sprintf_s(msg, "[GPU] NVML detection successful: %d%%", gpuUsage);
-                    LOG_INFO(msg);
-                } else {
-                    LOG_WARNING("[GPU] NVML utilization query failed");
-                }
-            } else {
-                LOG_WARNING("[GPU] NVML device handle failed");
-            }
-        } else if (g_gpuVendor == GPU_AMD && g_adlAvailable && ADL_Main_Control_Create && ADL_Overdrive5_CurrentActivity_Get) {
-            // AMD ADL
-            LOG_DEBUG("[GPU] Trying AMD ADL detection...");
-            int adapterCount = 0;
-            if (ADL_Adapter_NumberOfAdapters_Get(&adapterCount) == 0 && adapterCount > 0) {
-                // ADL_Adapter_AdapterInfo_Get 需要适配器信息结构
-                // 这里简化处理，直接获取活动信息
-                int activity = 0;
-                if (ADL_Overdrive5_CurrentActivity_Get(0, &activity, nullptr, nullptr, nullptr) == 0) {
-                    gpuUsage = activity;
-                    char msg[128];
-                    sprintf_s(msg, "[GPU] AMD ADL detection successful: %d%%", gpuUsage);
-                    LOG_INFO(msg);
-                } else {
-                    LOG_WARNING("[GPU] AMD ADL utilization query failed");
-                }
-            } else {
-                LOG_WARNING("[GPU] AMD ADL adapter enumeration failed");
-            }
-        }
-        
-        // 保底方案1: 使用nvidia-smi命令行工具（NVIDIA）
-        if (gpuUsage == 0 && g_gpuVendor == GPU_NVIDIA) {
-            LOG_DEBUG("[GPU] Trying nvidia-smi detection...");
-            STARTUPINFOW si = { sizeof(si)};
-            PROCESS_INFORMATION pi = {0};
-            SECURITY_ATTRIBUTES sa = { sizeof(sa)};
-            HANDLE hReadPipe, hWritePipe;
-            
-            si.dwFlags = STARTF_USESTDHANDLES;
-            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-            si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-            
-            CreatePipe(&hReadPipe, &hWritePipe, &sa, 0);
-            SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-            si.hStdOutput = hWritePipe;
-            
-            wchar_t cmd[] = L"nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits";
-            
-            if (CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
-                CloseHandle(hWritePipe);
-                
-                char buffer[256];
-                DWORD bytesRead;
-                std::string output;
-                
-                while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
-                    buffer[bytesRead] = '\0';
-                    output += buffer;
-                }
-                
-                CloseHandle(hReadPipe);
-                WaitForSingleObject(pi.hProcess, 5000);  // 等待最多5秒
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-                
-                // 解析输出
-                if (!output.empty()) {
-                    // nvidia-smi输出格式: "45"
-                    gpuUsage = atoi(output.c_str());
-                    if (gpuUsage < 0) gpuUsage = 0;
-                    if (gpuUsage > 100) gpuUsage = 100;
-                    char msg[128];
-                    sprintf_s(msg, "[GPU] nvidia-smi detection successful: %d%%", gpuUsage);
-                    LOG_INFO(msg);
-                } else {
-                    LOG_WARNING("[GPU] nvidia-smi returned empty output");
-                }
-            } else {
-                LOG_WARNING("[GPU] nvidia-smi process creation failed");
-                if (hReadPipe) CloseHandle(hReadPipe);
-                if (hWritePipe) CloseHandle(hWritePipe);
-            }
-        }
-        
-        // 保底方案2: 使用LibreHardwareMonitor WMI
-        if (gpuUsage == 0 && lhmInitialized && pLHMServices) {
-            LOG_DEBUG("[GPU] Trying LibreHardwareMonitor WMI detection...");
-            IEnumWbemClassObject* pEnumerator = nullptr;
-            HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
-                BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Load' AND Name='GPU Core'"), 
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
-            
-            if (SUCCEEDED(hr) && pEnumerator) {
-                IWbemClassObject* pclsObj = nullptr;
-                ULONG uReturn = 0;
-                if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                    VARIANT vtProp;
-                    VariantInit(&vtProp);
-                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
-                        gpuUsage = (int)vtProp.fltVal;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pDXGIFactory))) {
+        // 获取第一个GPU适配器
+        IDXGIAdapter1* pAdapter1 = nullptr;
+        for (UINT i = 0; pDXGIFactory->EnumAdapters1(i, &pAdapter1) != DXGI_ERROR_NOT_FOUND; i++) {
+            DXGI_ADAPTER_DESC1 desc;
+            if (SUCCEEDED(pAdapter1->GetDesc1(&desc))) {
+                // 跳过软件渲染器（Microsoft Basic Render）
+                if (desc.VendorId != 0x1414) {
+                    // 尝试转换为Adapter3（Windows 10+）
+                    if (SUCCEEDED(pAdapter1->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&pDXGIAdapter))) {
+                        dxgiInitialized = true;
                         char msg[128];
-                        sprintf_s(msg, "[GPU] LibreHardwareMonitor WMI detection successful: %d%%", gpuUsage);
+                        sprintf_s(msg, "[PerfMonitor] DXGI Adapter3 initialized (Vendor: 0x%04X)", desc.VendorId);
                         LOG_INFO(msg);
-                    } else {
-                        LOG_WARNING("[GPU] LibreHardwareMonitor WMI query failed");
                     }
-                    VariantClear(&vtProp);
-                    pclsObj->Release();
-                } else {
-                    LOG_WARNING("[GPU] LibreHardwareMonitor WMI no data returned");
-                }
-                pEnumerator->Release();
-            } else {
-                LOG_WARNING("[GPU] LibreHardwareMonitor WMI query failed");
-            }
-        }
-
-        // 更新共享数据
-        {
-            std::lock_guard<std::mutex> lock(g_perfDataMutex);
-            g_latestPerfData.gpuUsage = gpuUsage;
-            g_latestPerfData.gpuUsageValid = (gpuUsage > 0);
-            if (gpuUsage == 0) {
-                LOG_DEBUG("[GPU] All detection methods failed, GPU usage = 0");
-            }
-        }
-
-        Sleep(2000);  // 每2秒更新一次
-    }
-    
-    // 清理LibreHardwareMonitor WMI
-    if (pLHMServices) pLHMServices->Release();
-    
-    return 0;
-}
-
-// 线程4: WMI - 温度检测
-DWORD WINAPI WorkerThread4(LPVOID param) {
-    // 初始化WMI
-    static bool wmiInitialized = false;
-    static IWbemLocator* pLocator = nullptr;
-    static IWbemServices* pServices = nullptr;
-    
-    // 初始化LibreHardwareMonitor WMI连接（保底方案）
-    static IWbemServices* pLHMServices = nullptr;
-    static bool lhmInitialized = false;
-
-    if (!wmiInitialized) {
-        HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator);
-        if (SUCCEEDED(hr)) {
-            hr = pLocator->ConnectServer(BSTR(L"ROOT\\CIMV2"), nullptr, nullptr, 0, 0, 0, 0, &pServices);
-            if (SUCCEEDED(hr)) {
-                hr = CoSetProxyBlanket(pServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
-                if (SUCCEEDED(hr)) {
-                    wmiInitialized = true;
+                    pAdapter1->Release();
+                    break;  // 使用第一个有效GPU
                 }
             }
+            pAdapter1->Release();
         }
     }
     
-    // 初始化LibreHardwareMonitor WMI
-    if (!lhmInitialized && pLocator) {
-        if (SUCCEEDED(pLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLHMServices))) {
-            CoSetProxyBlanket(pLHMServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+    // 2. WMI for 温度（ROOT\CIMV2 和 ROOT\LibreHardwareMonitor）
+    IWbemLocator* pWmiLocator = nullptr;
+    IWbemServices* pWmiServices = nullptr;          // ROOT\CIMV2
+    IWbemServices* pLhmServices = nullptr;          // ROOT\LibreHardwareMonitor
+    bool wmiInitialized = false;
+    bool lhmInitialized = false;
+    
+    if (SUCCEEDED(CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pWmiLocator))) {
+        // ROOT\CIMV2（标准WMI）
+        if (SUCCEEDED(pWmiLocator->ConnectServer(BSTR(L"ROOT\\CIMV2"), nullptr, nullptr, 0, 0, 0, 0, &pWmiServices))) {
+            CoSetProxyBlanket(pWmiServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, 
+                             RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+            wmiInitialized = true;
+            LOG_INFO("[PerfMonitor] WMI ROOT\\CIMV2 initialized");
+        }
+        
+        // ROOT\LibreHardwareMonitor（需要安装LHM）
+        if (SUCCEEDED(pWmiLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLhmServices))) {
+            CoSetProxyBlanket(pLhmServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, 
+                             RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
             lhmInitialized = true;
+            LOG_INFO("[PerfMonitor] LibreHardwareMonitor WMI initialized");
         }
     }
+    
+    {
+        char initMsg[256];
+        sprintf_s(initMsg, "[PerfMonitor] Initialization complete. DXGI: %s, WMI: %s, LHM: %s",
+                 dxgiInitialized ? "OK" : "N/A",
+                 wmiInitialized ? "OK" : "N/A",
+                 lhmInitialized ? "OK" : "N/A");
+        LOG_INFO(initMsg);
+    }
+    
+    // === 主监控循环（统一频率：每1秒）===
+    while (g_threadRunning[0]) {  // 使用g_threadRunning[0]作为统一退出标志
+        // ===== 1. CPU/RAM监控（原生API，最高优先级）=====
+        {
+            // CPU使用率
+            FILETIME idleTime, kernelTime, userTime;
+            if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+                ULONGLONG idle = ((ULONGLONG)idleTime.dwHighDateTime << 32) | idleTime.dwLowDateTime;
+                ULONGLONG kernel = ((ULONGLONG)kernelTime.dwHighDateTime << 32) | kernelTime.dwLowDateTime;
+                ULONGLONG user = ((ULONGLONG)userTime.dwHighDateTime << 32) | userTime.dwLowDateTime;
 
-    while (g_threadRunning[3] && (wmiInitialized || lhmInitialized)) {
-        int cpuTemp = 0;
-        int gpuTemp = 0;
+                ULONGLONG lastIdle = ((ULONGLONG)g_lastIdleTime.dwHighDateTime << 32) | g_lastIdleTime.dwLowDateTime;
+                ULONGLONG lastKernel = ((ULONGLONG)g_lastKernelTime.dwHighDateTime << 32) | g_lastKernelTime.dwLowDateTime;
+                ULONGLONG lastUser = ((ULONGLONG)g_lastUserTime.dwHighDateTime << 32) | g_lastUserTime.dwLowDateTime;
 
-        // 方法1: 尝试使用 MSAcpi_ThermalZoneTemperature 获取温度
-        if (wmiInitialized && pServices) {
-            IEnumWbemClassObject* pTempEnum = nullptr;
-            HRESULT hr = pServices->ExecQuery(BSTR(L"WQL"), BSTR(L"SELECT * FROM MSAcpi_ThermalZoneTemperature WHERE Active=True"), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pTempEnum);
+                if (lastIdle > 0 || lastKernel > 0) {
+                    ULONGLONG idleDelta = idle - lastIdle;
+                    ULONGLONG totalDelta = (kernel - lastKernel) + (user - lastUser);
+                    if (totalDelta > 0) {
+                        double cpuUsage = (double)(totalDelta - idleDelta) / totalDelta * 100.0;
+                        if (cpuUsage < 0) cpuUsage = 0;
+                        if (cpuUsage > 100) cpuUsage = 100;
 
-            if (SUCCEEDED(hr) && pTempEnum) {
-                IWbemClassObject* pclsObj = nullptr;
-                ULONG uReturn = 0;
-                while (pTempEnum->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                    VARIANT vtProp;
-                    VariantInit(&vtProp);
-                    hr = pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0);
-                    if (SUCCEEDED(hr) && vtProp.vt == VT_I4) {
-                        // 温度是以0.1开尔文为单位的
-                        int tempK = vtProp.lVal / 10;
-                        int tempC = tempK - 273;  // 转换为摄氏度
-                        if (tempC > 0 && tempC < 150) {  // 合理的温度范围
-                            cpuTemp = tempC;
-                            break;
-                        }
+                        std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                        g_latestPerfData.cpuUsage = (int)cpuUsage;
                     }
-                    VariantClear(&vtProp);
-                    pclsObj->Release();
                 }
-                pTempEnum->Release();
+                g_lastIdleTime = idleTime;
+                g_lastKernelTime = kernelTime;
+                g_lastUserTime = userTime;
             }
         }
         
-        // 保底方案：使用LibreHardwareMonitor WMI
-        if (cpuTemp == 0 && lhmInitialized && pLHMServices) {
-            IEnumWbemClassObject* pEnumerator = nullptr;
-            HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
-                BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Temperature' AND (Name='CPU Core' OR Name='CPU Package' OR Name='CPU')"), 
-                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
-            
-            if (SUCCEEDED(hr) && pEnumerator) {
-                IWbemClassObject* pclsObj = nullptr;
-                ULONG uReturn = 0;
-                while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                    VARIANT vtProp;
-                    VariantInit(&vtProp);
-                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
-                        cpuTemp = (int)vtProp.fltVal;
-                        if (cpuTemp > 0 && cpuTemp < 150) {
-                            break;
-                        }
-                    }
-                    VariantClear(&vtProp);
-                    pclsObj->Release();
+        // RAM使用率
+        {
+            MEMORYSTATUSEX memStatus = {sizeof(memStatus)};
+            if (GlobalMemoryStatusEx(&memStatus)) {
+                std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                g_latestPerfData.ramUsed = memStatus.ullTotalPhys - memStatus.ullAvailPhys;
+                g_latestPerfData.ramTotal = memStatus.ullTotalPhys;
+                if (memStatus.ullTotalPhys > 0) {
+                    g_latestPerfData.ramUsage = (int)((memStatus.ullTotalPhys - memStatus.ullAvailPhys) * 100.0 / memStatus.ullTotalPhys);
                 }
-                pEnumerator->Release();
             }
         }
-
-        // 更新共享数据
+        
+        // ===== 2. GPU监控（按优先级：NVML > ADL > DXGI > LHM）=====
         {
-            std::lock_guard<std::mutex> lock(g_perfDataMutex);
-            g_latestPerfData.cpuTemp = cpuTemp;
-            g_latestPerfData.cpuTempValid = (cpuTemp > 0);
+            int gpuUsage = 0;
+            DWORD64 gpuVramUsed = 0;
+            DWORD64 gpuVramTotal = 0;
+            
+            // 优先级1: NVIDIA NVML（同时获取占用率和显存）
+            if (g_gpuVendor == GPU_NVIDIA && g_nvmlAvailable && nvmlInit && nvmlDeviceGetUtilizationRates) {
+                void* device = nullptr;
+                if (nvmlDeviceGetHandleByIndex(0, &device) == 0) {
+                    // 获取GPU占用率
+                    nvmlUtilization_t utilization;
+                    if (nvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
+                        gpuUsage = (int)utilization.gpu;
+                    }
+                    
+                    // 获取显存信息（如果函数可用）
+                    if (nvmlDeviceGetMemoryInfo) {
+                        nvmlMemory_t memory;
+                        if (nvmlDeviceGetMemoryInfo(device, &memory) == 0) {
+                            gpuVramTotal = memory.total;
+                            gpuVramUsed = memory.used;
+                            char msg[128];
+                            sprintf_s(msg, "[PerfMonitor] NVML: GPU=%d%%, VRAM=%llu/%llu MB", 
+                                     gpuUsage, memory.used/1024/1024, memory.total/1024/1024);
+                            LOG_DEBUG(msg);
+                        }
+                    }
+                }
+            }
+            
+            // 优先级2: AMD ADL（待实现）
+            // TODO: AMD ADL同时获取占用率和显存
+            
+            // 优先级3: DXGI QueryVideoMemoryInfo（Windows 10+原生API，获取显存）
+            if (gpuVramTotal == 0 && dxgiInitialized && pDXGIAdapter) {
+                DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
+                if (SUCCEEDED(pDXGIAdapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+                    // 获取显存使用情况
+                    if (info.Budget > 0) {
+                        gpuVramTotal = info.Budget;  // 预算值作为总量
+                        gpuVramUsed = info.CurrentUsage;
+                        char dxgiMsg[128];
+                        sprintf_s(dxgiMsg, "[PerfMonitor] DXGI QueryVideoMemoryInfo: VRAM=%llu/%llu MB", 
+                                 gpuVramUsed/1024/1024, gpuVramTotal/1024/1024);
+                        LOG_DEBUG(dxgiMsg);
+                    }
+                }
+                
+                // 如果没有获取到总量，使用GetDesc1
+                if (gpuVramTotal == 0) {
+                    DXGI_ADAPTER_DESC1 desc;
+                    if (SUCCEEDED(pDXGIAdapter->GetDesc1(&desc))) {
+                        gpuVramTotal = desc.DedicatedVideoMemory;
+                    }
+                }
+            }
+            
+            // 优先级4: nvidia-smi命令行（备用方案）
+            if (gpuUsage == 0 && g_gpuVendor == GPU_NVIDIA) {
+                STARTUPINFOW si = { sizeof(si)};
+                PROCESS_INFORMATION pi = {0};
+                SECURITY_ATTRIBUTES sa = { sizeof(sa)};
+                HANDLE hReadPipe, hWritePipe;
+                
+                si.dwFlags = STARTF_USESTDHANDLES;
+                CreatePipe(&hReadPipe, &hWritePipe, &sa, 0);
+                SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+                si.hStdOutput = hWritePipe;
+                
+                wchar_t cmd[] = L"nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits";
+                
+                if (CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+                    CloseHandle(hWritePipe);
+                    
+                    char buffer[512];
+                    DWORD bytesRead;
+                    std::string output;
+                    
+                    while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
+                        buffer[bytesRead] = '\0';
+                        output += buffer;
+                    }
+                    
+                    CloseHandle(hReadPipe);
+                    WaitForSingleObject(pi.hProcess, 2000);
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    
+                    // 解析输出：格式 "45, 2048, 8192"
+                    if (!output.empty()) {
+                        int memUsed = 0, memTotal = 0;
+                        if (sscanf_s(output.c_str(), "%d, %d, %d", &gpuUsage, &memUsed, &memTotal) >= 1) {
+                            if (memTotal > 0) {
+                                gpuVramUsed = (DWORD64)memUsed * 1024 * 1024;
+                                gpuVramTotal = (DWORD64)memTotal * 1024 * 1024;
+                            }
+                            char smiMsg[128];
+                            sprintf_s(smiMsg, "[PerfMonitor] nvidia-smi: GPU=%d%%, VRAM=%d/%d MB", gpuUsage, memUsed, memTotal);
+                            LOG_DEBUG(smiMsg);
+                        }
+                    }
+                }
+            }
+            
+            // 优先级5: LibreHardwareMonitor WMI（最后保底）
+            if ((gpuUsage == 0 || gpuVramUsed == 0) && lhmInitialized && pLhmServices) {
+                // GPU占用率
+                if (gpuUsage == 0) {
+                    IEnumWbemClassObject* pEnum = nullptr;
+                    HRESULT hr = pLhmServices->ExecQuery(BSTR(L"WQL"), 
+                        BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Load' AND Name='GPU Core'"), 
+                        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnum);
+                    
+                    if (SUCCEEDED(hr) && pEnum) {
+                        IWbemClassObject* pObj = nullptr;
+                        ULONG uReturn = 0;
+                        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                            VARIANT vt;
+                            VariantInit(&vt);
+                            if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
+                                gpuUsage = (int)vt.fltVal;
+                            }
+                            VariantClear(&vt);
+                            pObj->Release();
+                        }
+                        pEnum->Release();
+                    }
+                }
+                
+                // 显存使用
+                if (gpuVramUsed == 0) {
+                    IEnumWbemClassObject* pEnum = nullptr;
+                    HRESULT hr = pLhmServices->ExecQuery(BSTR(L"WQL"), 
+                        BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Data' AND Name='GPU Memory Used'"), 
+                        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnum);
+                    
+                    if (SUCCEEDED(hr) && pEnum) {
+                        IWbemClassObject* pObj = nullptr;
+                        ULONG uReturn = 0;
+                        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                            VARIANT vt;
+                            VariantInit(&vt);
+                            if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
+                                gpuVramUsed = (DWORD64)(vt.fltVal * 1024 * 1024);  // MB -> Bytes
+                            }
+                            VariantClear(&vt);
+                            pObj->Release();
+                        }
+                        pEnum->Release();
+                    }
+                }
+            }
+            
+            // 更新共享数据
+            {
+                std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                g_latestPerfData.gpuUsage = gpuUsage;
+                g_latestPerfData.gpuUsageValid = (gpuUsage > 0);
+                if (gpuVramTotal > 0) g_latestPerfData.gpuVramTotal = gpuVramTotal;
+                if (gpuVramUsed > 0) g_latestPerfData.gpuVramUsed = gpuVramUsed;
+            }
         }
-
-        Sleep(2000);  // 每2秒更新一次
+        
+        // ===== 3. 温度监控（WMI + LibreHardwareMonitor）=====
+        {
+            int cpuTemp = 0;
+            
+            // 方法1: MSAcpi_ThermalZoneTemperature（部分主板支持）
+            if (wmiInitialized && pWmiServices && cpuTemp == 0) {
+                IEnumWbemClassObject* pEnum = nullptr;
+                HRESULT hr = pWmiServices->ExecQuery(BSTR(L"WQL"), 
+                    BSTR(L"SELECT * FROM MSAcpi_ThermalZoneTemperature WHERE Active=True"), 
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnum);
+                
+                if (SUCCEEDED(hr) && pEnum) {
+                    IWbemClassObject* pObj = nullptr;
+                    ULONG uReturn = 0;
+                    while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                        VARIANT vt;
+                        VariantInit(&vt);
+                        if (SUCCEEDED(pObj->Get(L"CurrentTemperature", 0, &vt, 0, 0)) && vt.vt == VT_I4) {
+                            int tempK = vt.lVal / 10;
+                            int tempC = tempK - 273;
+                            if (tempC > 0 && tempC < 150) {
+                                cpuTemp = tempC;
+                                break;
+                            }
+                        }
+                        VariantClear(&vt);
+                        pObj->Release();
+                    }
+                    pEnum->Release();
+                }
+            }
+            
+            // 方法2: LibreHardwareMonitor WMI（最可靠）
+            if (cpuTemp == 0 && lhmInitialized && pLhmServices) {
+                IEnumWbemClassObject* pEnum = nullptr;
+                HRESULT hr = pLhmServices->ExecQuery(BSTR(L"WQL"), 
+                    BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Temperature' AND (Name='CPU Core' OR Name='CPU Package' OR Name='CPU')"), 
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnum);
+                
+                if (SUCCEEDED(hr) && pEnum) {
+                    IWbemClassObject* pObj = nullptr;
+                    ULONG uReturn = 0;
+                    while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                        VARIANT vt;
+                        VariantInit(&vt);
+                        if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
+                            cpuTemp = (int)vt.fltVal;
+                            if (cpuTemp > 0 && cpuTemp < 150) break;
+                        }
+                        VariantClear(&vt);
+                        pObj->Release();
+                    }
+                    pEnum->Release();
+                }
+            }
+            
+            // 更新共享数据
+            {
+                std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                g_latestPerfData.cpuTemp = cpuTemp;
+                g_latestPerfData.cpuTempValid = (cpuTemp > 0);
+            }
+        }
+        
+        Sleep(1000);  // 统一频率：每1秒更新
     }
-
-    // 清理WMI
-    if (pServices) pServices->Release();
-    if (pLocator) pLocator->Release();
-    if (pLHMServices) pLHMServices->Release();
-
+    
+    // === 清理资源 ===
+    if (pDXGIAdapter) pDXGIAdapter->Release();
+    if (pDXGIFactory) pDXGIFactory->Release();
+    if (pLhmServices) pLhmServices->Release();
+    if (pWmiServices) pWmiServices->Release();
+    if (pWmiLocator) pWmiLocator->Release();
+    
+    LOG_INFO("[PerfMonitor] Unified performance monitoring thread stopped");
     return 0;
 }
 
 // 初始化性能监控
-
 void InitializePerfMonitoring() {
-
     // 检测GPU供应商
-
     IDXGIFactory1* pFactory = nullptr;
-
     if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory))) {
-
         UINT adapterIndex = 0;
-
         IDXGIAdapter1* pAdapter = nullptr;
-
         while (pFactory->EnumAdapters1(adapterIndex, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
-
             DXGI_ADAPTER_DESC1 desc;
-
             if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
-
                 std::wstring vendorName = desc.Description;
-
                 if (vendorName.find(L"NVIDIA") != std::wstring::npos) {
-
                     g_gpuVendor = GPU_NVIDIA;
-
                 } else if (vendorName.find(L"AMD") != std::wstring::npos || vendorName.find(L"Radeon") != std::wstring::npos) {
-
                     g_gpuVendor = GPU_AMD;
-
                 } else if (vendorName.find(L"Intel") != std::wstring::npos) {
-
                     g_gpuVendor = GPU_INTEL;
-
                 }
-
                 pAdapter->Release();
-
                 break;
-
             }
-
             pAdapter->Release();
-
             adapterIndex++;
-
         }
-
         pFactory->Release();
-
     }
-
-
 
     // 加载NVML库（NVIDIA）
-
-
-
-        if (g_gpuVendor == GPU_NVIDIA) {
-
-
-
-            g_nvmlDll = LoadLibraryW(L"nvml.dll");
-
-
-
-            if (g_nvmlDll) {
-
-
-
-                nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
-
-
-
-                nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
-
-
-
-                nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
-
-
-
-                nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
-
-
-
-                nvmlDeviceGetName = (nvmlDeviceGetName_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetName");
-
-
-
-    
-
-
-
-                if (nvmlInit && nvmlDeviceGetHandleByIndex && nvmlDeviceGetUtilizationRates) {
-
-
-
-                    int initResult = nvmlInit();
-
-
-
-                    if (initResult == 0) {
-
-
-
-                        g_nvmlAvailable = true;
-
-
-
-                        
-
-
-
-                        int handleResult = nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice);
-
-
-
-                        if (handleResult != 0) {
-
-
-
-                            g_nvmlDevice = nullptr;
-
-
-
-                            // 获取设备句柄失败，NVML可能不可用，尝试使用LibreHardwareMonitor
-
-
-
-                            g_nvmlAvailable = false;
-
-
-
-                            nvmlShutdown();
-
-
-
-                        }
-
-
-
-                    } else {
-
-
-
-                        // nvmlInit失败，NVML不可用，尝试使用LibreHardwareMonitor
-
-
-
+    if (g_gpuVendor == GPU_NVIDIA) {
+        g_nvmlDll = LoadLibraryW(L"nvml.dll");
+        if (g_nvmlDll) {
+            nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
+            nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
+            nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
+            nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
+            nvmlDeviceGetMemoryInfo = (nvmlDeviceGetMemoryInfo_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetMemoryInfo");
+            nvmlDeviceGetName = (nvmlDeviceGetName_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetName");
+
+            if (nvmlInit && nvmlDeviceGetHandleByIndex && nvmlDeviceGetUtilizationRates) {
+                int initResult = nvmlInit();
+                if (initResult == 0) {
+                    g_nvmlAvailable = true;
+                    int handleResult = nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice);
+                    if (handleResult != 0) {
+                        g_nvmlDevice = nullptr;
                         g_nvmlAvailable = false;
-
-
-
+                        nvmlShutdown();
                     }
-
-
-
+                } else {
+                    g_nvmlAvailable = false;
                 }
-
-
-
-            } else {
-
-
-
-                // nvml.dll未找到，尝试使用LibreHardwareMonitor
-
-
-
             }
-
-
-
-        }
-
-
-
-    // 加载ADL库（AMD）
-
-    if (g_gpuVendor == GPU_AMD) {
-
-        g_adlDll = LoadLibraryW(L"atiadlxx.dll");
-
-        if (g_adlDll) {
-
-            ADL_Main_Control_Create = (ADL_Main_Control_Create_t)GetProcAddress(g_adlDll, "ADL_Main_Control_Create");
-
-            ADL_Main_Control_Destroy = (ADL_Main_Control_Destroy_t)GetProcAddress(g_adlDll, "ADL_Main_Control_Destroy");
-
-            ADL_Adapter_NumberOfAdapters_Get = (ADL_Adapter_NumberOfAdapters_Get_t)GetProcAddress(g_adlDll, "ADL_Adapter_NumberOfAdapters_Get");
-
-            ADL_Adapter_AdapterInfo_Get = (ADL_Adapter_AdapterInfo_Get_t)GetProcAddress(g_adlDll, "ADL_Adapter_AdapterInfo_Get");
-
-            ADL_Overdrive5_CurrentActivity_Get = (ADL_Overdrive5_CurrentActivity_Get_t)GetProcAddress(g_adlDll, "ADL_Overdrive5_CurrentActivity_Get");
-
-
-
-            if (ADL_Main_Control_Create && ADL_Adapter_NumberOfAdapters_Get) {
-
-                if (ADL_Main_Control_Create(nullptr, 1) == 0) {
-
-                    g_adlAvailable = true;
-
-                }
-
+            if (!g_nvmlAvailable) {
+                FreeLibrary(g_nvmlDll);
+                g_nvmlDll = nullptr;
             }
-
         }
-
     }
 
+    // 加载ADL库（AMD）
+    if (g_gpuVendor == GPU_AMD) {
+        g_adlDll = LoadLibraryW(L"atiadlxx.dll");
+        if (g_adlDll) {
+            ADL_Main_Control_Create = (ADL_Main_Control_Create_t)GetProcAddress(g_adlDll, "ADL_Main_Control_Create");
+            ADL_Main_Control_Destroy = (ADL_Main_Control_Destroy_t)GetProcAddress(g_adlDll, "ADL_Main_Control_Destroy");
+            ADL_Adapter_NumberOfAdapters_Get = (ADL_Adapter_NumberOfAdapters_Get_t)GetProcAddress(g_adlDll, "ADL_Adapter_NumberOfAdapters_Get");
+            ADL_Adapter_AdapterInfo_Get = (ADL_Adapter_AdapterInfo_Get_t)GetProcAddress(g_adlDll, "ADL_Adapter_AdapterInfo_Get");
+            ADL_Overdrive5_CurrentActivity_Get = (ADL_Overdrive5_CurrentActivity_Get_t)GetProcAddress(g_adlDll, "ADL_Overdrive5_CurrentActivity_Get");
 
+            if (ADL_Main_Control_Create && ADL_Adapter_NumberOfAdapters_Get) {
+                if (ADL_Main_Control_Create(nullptr, 1) == 0) {
+                    g_adlAvailable = true;
+                }
+            }
+        }
+    }
 
     // 初始化COM（用于WMI）
-
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
-
-
     // 启动工作线程
-
     g_threadRunning[0] = true;
-
-    g_threadRunning[1] = true;
-
-    g_threadRunning[2] = true;   // 启动GPU占用率线程
-
-    g_threadRunning[3] = true;   // 启动温度检测线程
-
-
-
-    g_workerThreads[0] = CreateThread(nullptr, 0, WorkerThread1, nullptr, 0, nullptr);
-
-    g_workerThreads[1] = CreateThread(nullptr, 0, WorkerThread2, nullptr, 0, nullptr);
-
-    g_workerThreads[2] = CreateThread(nullptr, 0, WorkerThread3, nullptr, 0, nullptr);
-
-    g_workerThreads[3] = CreateThread(nullptr, 0, WorkerThread4, nullptr, 0, nullptr);
-
+    g_workerThreads[0] = CreateThread(nullptr, 0, WorkerThread_PerfMonitor, nullptr, 0, nullptr);
 }
 
 // 关闭性能监控
 void ShutdownPerfMonitoring() {
     // 停止线程
-    for (int i = 0; i < 4; i++) {
-        g_threadRunning[i] = false;
-    }
+    g_threadRunning[0] = false;
 
     // 等待线程结束
-    for (int i = 0; i < 4; i++) {
-        if (g_workerThreads[i]) {
-            WaitForSingleObject(g_workerThreads[i], 1000);
-            CloseHandle(g_workerThreads[i]);
-            g_workerThreads[i] = nullptr;
-        }
+    if (g_workerThreads[0]) {
+        WaitForSingleObject(g_workerThreads[0], 1000);
+        CloseHandle(g_workerThreads[0]);
+        g_workerThreads[0] = nullptr;
     }
 
     // 清理NVML

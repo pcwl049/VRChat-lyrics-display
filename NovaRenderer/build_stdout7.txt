@@ -1,0 +1,19 @@
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.3.0-insiders
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+ninja: Entering directory `build'
+[0/1] Re-running CMake...
+-- VMA_BUILD_SAMPLE = OFF
+-- VMA_BUILD_SAMPLE_SHADERS = OFF
+-- VMA_STATIC_VULKAN_FUNCTIONS = ON
+-- VMA_DYNAMIC_VULKAN_FUNCTIONS = OFF
+-- VMA_DEBUG_ALWAYS_DEDICATED_MEMORY = OFF
+-- VMA_DEBUG_INITIALIZE_ALLOCATIONS = OFF
+-- VMA_DEBUG_GLOBAL_MUTEX = OFF
+-- VMA_DEBUG_DONT_EXCEED_MAX_MEMORY_ALLOCATION_COUNT = OFF
+-- Could NOT find Doxygen (missing: DOXYGEN_EXECUTABLE) 
+-- Configuring incomplete, errors occurred!
+FAILED: build.ninja D:/Projects/MusicDisplay/NovaRenderer/build/cmake_install.cmake D:/Projects/MusicDisplay/NovaRenderer/build/_deps/vma-build/cmake_install.cmake D:/Projects/MusicDisplay/NovaRenderer/build/_deps/vma-build/src/cmake_install.cmake D:/Projects/MusicDisplay/NovaRenderer/build/_deps/spirv-reflect-build/cmake_install.cmake 
+"D:\Program Files\Cmake\bin\cmake.exe" --regenerate-during-build -SD:\Projects\MusicDisplay\NovaRenderer -BD:\Projects\MusicDisplay\NovaRenderer\build

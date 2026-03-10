@@ -1,0 +1,35 @@
+#version 450
+
+// 高斯模糊计算着色器
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba8) uniform readonly image2D uInput;
+layout(binding = 1, rgba8) uniform writeonly image2D uOutput;
+
+layout(push_constant) uniform Params {
+    vec2 uDirection;
+    float uRadius;
+    uint uPass;
+} params;
+
+const float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(uInput);
+    
+    if (texel.x >= size.x || texel.y >= size.y) return;
+    
+    vec4 color = imageLoad(uInput, texel) * weights[0];
+    
+    for (int i = 1; i < 5; i++) {
+        float offset = float(i) * params.uRadius;
+        ivec2 offsetCoord = ivec2(params.uDirection * offset);
+        
+        color += imageLoad(uInput, texel + offsetCoord) * weights[i];
+        color += imageLoad(uInput, texel - offsetCoord) * weights[i];
+    }
+    
+    imageStore(uOutput, texel, color);
+}

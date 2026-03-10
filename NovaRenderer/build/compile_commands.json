@@ -1,0 +1,146 @@
+[
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Window.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Window.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Window.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Window.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Input.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Input.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Input.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Input.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\VulkanBackend.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\VulkanBackend.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/VulkanBackend.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/VulkanBackend.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Renderer.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Renderer.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Renderer.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Renderer.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Shader.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Shader.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Shader.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Shader.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Pipeline.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Pipeline.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Pipeline.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Pipeline.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Descriptor.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Descriptor.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Descriptor.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Descriptor.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Command.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Command.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Command.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Command.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Texture.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Texture.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Texture.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Texture.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Font.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Font.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Font.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Font.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\ThreadPool.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\ThreadPool.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/ThreadPool.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/ThreadPool.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\RenderGraph.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\RenderGraph.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/RenderGraph.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/RenderGraph.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\ParticleSystem.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\ParticleSystem.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/ParticleSystem.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/ParticleSystem.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\PostProcess.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\PostProcess.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/PostProcess.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/PostProcess.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Profiler.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Profiler.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Profiler.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Profiler.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\AsyncCompute.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\AsyncCompute.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/AsyncCompute.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/AsyncCompute.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Instancing.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Instancing.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Instancing.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Instancing.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\TextureStreaming.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\TextureStreaming.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/TextureStreaming.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/TextureStreaming.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\ShaderHotReload.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\ShaderHotReload.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/ShaderHotReload.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/ShaderHotReload.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Material.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Material.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Material.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Material.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\Scene.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\Scene.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/Scene.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/Scene.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -DNOMINMAX -DNOVA_ENABLE_VALIDATION -DNOVA_ENABLE_VSYNC -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /WX- /utf-8 /O2 /GL /FoCMakeFiles\\NovaCore.dir\\src\\LiquidGlass.cpp.obj /FdCMakeFiles\\NovaCore.dir\\NovaCore.pdb /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\src\\LiquidGlass.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/src/LiquidGlass.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir/src/LiquidGlass.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /utf-8 /FoCMakeFiles\\NovaExample.dir\\examples\\main.cpp.obj /FdCMakeFiles\\NovaExample.dir\\ /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\examples\\main.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/examples/main.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaExample.dir/examples/main.cpp.obj"
+},
+{
+  "directory": "D:/Projects/MusicDisplay/NovaRenderer/build",
+  "command": "\"D:\\Program Files\\VScode\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe\"  /nologo /TP -ID:\\Projects\\MusicDisplay\\NovaRenderer\\include -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\stb -ID:\\Projects\\MusicDisplay\\NovaRenderer\\third_party\\vma\\include -IE:\\Vulkan_SDK\\Include -external:IE:\\Vulkan_SDK\\include -external:W0 /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /FoCMakeFiles\\LiquidGlass.dir\\examples\\liquid_glass.cpp.obj /FdCMakeFiles\\LiquidGlass.dir\\ /FS -c D:\\Projects\\MusicDisplay\\NovaRenderer\\examples\\liquid_glass.cpp",
+  "file": "D:/Projects/MusicDisplay/NovaRenderer/examples/liquid_glass.cpp",
+  "output": "D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/LiquidGlass.dir/examples/liquid_glass.cpp.obj"
+}
+]
