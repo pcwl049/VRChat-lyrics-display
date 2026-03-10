@@ -1348,146 +1348,75 @@ int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
 }
 
 std::wstring BuildPerformanceOSCMessage(int type) {
-    std::wstring name;
-    std::wstring icon;
-    double value1 = 0.0;  // 主要参数（占用率）
-    double value2 = 0.0;  // 第二参数（温度/显存占用）
-    bool hasSecondValue = false;
-    std::wstring unit1, unit2;
-    std::wstring desc1, desc2;
-
-    switch (type) {
-        case 0:  // CPU
-            name = g_cpuDisplayName;
-            icon = L"⚡";
-            value1 = g_cpuUsage;
-            value2 = g_latestPerfData.cpuTemp;
-            hasSecondValue = g_latestPerfData.cpuTempValid;
-            unit1 = L"%";
-            unit2 = L"°C";
-            desc1 = L"占用";
-            desc2 = L"温度";
-            break;
-        case 1:  // RAM
-            name = g_ramDisplayName;
-            icon = L"💾";
-            value1 = g_ramUsage;
-            hasSecondValue = false;
-            unit1 = L"%";
-            desc1 = L"占用";
-            break;
-        case 2:  // GPU
-            name = g_gpuDisplayName;
-            icon = L"🎮";
-            value1 = g_latestPerfData.gpuUsage;
-            if (g_latestPerfData.gpuUsageValid) {
-                value1 = g_latestPerfData.gpuUsage;
-            }
-            if (g_gpuMemTotal > 0) {
-                value2 = (double)g_gpuMemUsed * 100.0 / g_gpuMemTotal;
-            }
-            hasSecondValue = true;
-            unit1 = L"%";
-            unit2 = L"%";
-            desc1 = L"占用";
-            desc2 = L"显存";
-            break;
-    }
-
+    // 一次性显示所有硬件信息
     std::wstring msg;
-
-    // 第一行：图标 + 名称 + 主要参数 + 第二参数
-    msg = icon + name + L" ";
     
-    wchar_t param1[16];
-    swprintf_s(param1, L"%.0f%s", value1, unit1.c_str());
-    msg += param1;
-    
-    if (hasSecondValue) {
-        wchar_t param2[32];
-        if (type == 0) {  // CPU - 温度
-            swprintf_s(param2, L" 🌡️%.0f%s", value2, unit2.c_str());
-        } else if (type == 2) {  // GPU - 显存占用
-            swprintf_s(param2, L" 🎞️%.0fG/%.0fG", (double)g_gpuMemUsed / 1024.0, (double)g_gpuMemTotal / 1024.0);
-        }
-        msg += param2;
-    } else if (type == 1) {  // RAM - 显示已用/总量
-        wchar_t param2[32];
-        swprintf_s(param2, L" 📊%.0fG/%.0fG", (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0, (double)g_latestPerfData.ramTotal / 1024.0 / 1024.0 / 1024.0);
-        msg += param2;
+    // CPU信息
+    msg += L"⚡" + g_cpuDisplayName + L" ";
+    wchar_t cpuBuf[32];
+    swprintf_s(cpuBuf, L"%.0f%%", g_cpuUsage);
+    msg += cpuBuf;
+    if (g_latestPerfData.cpuTempValid) {
+        wchar_t tempBuf[16];
+        swprintf_s(tempBuf, L" 🌡️%.0f°C", g_latestPerfData.cpuTemp);
+        msg += tempBuf;
     }
-
     msg += L"\n";
-
-    // 第二行：进度条
-    int bars = 20;
     
-    if (type == 0) {  // CPU - 双标记（占用率 | 温度）
-        int filled1 = (int)(value1 / 100.0 * bars);
-        int filled2 = (int)(value2 / 100.0 * bars);
-        if (filled1 < 0) filled1 = 0;
-        if (filled1 > bars) filled1 = bars;
-        if (filled2 < 0) filled2 = 0;
-        if (filled2 > bars) filled2 = bars;
-
-        msg += L"[";
-        for (int i = 0; i < bars; i++) {
-            if (i < filled1 && i < filled2) {
-                msg += L"█";  // 两者都满
-            } else if (i < filled1) {
-                msg += L"▓";  // 占用率满，温度不满
-            } else if (i < filled2) {
-                msg += L"░";  // 占用率不满，温度满（不太可能）
-            } else {
-                msg += L"░";  // 都不满
-            }
-            
-            // 在两个标记之间添加分隔符
-            if (i == filled1 - 1 && filled1 > 0 && filled1 < bars && i < bars - 1) {
-                msg += L"│";
-            }
-        }
-        msg += L"]";
-
-    } else if (type == 1) {  // RAM - 单标记
-        int filled = (int)(value1 / 100.0 * bars);
-        if (filled < 0) filled = 0;
-        if (filled > bars) filled = bars;
-
-        msg += L"[";
-        for (int i = 0; i < bars; i++) {
-            msg += (i < filled) ? L"█" : L"░";
-        }
-        msg += L"]";
-
-    } else if (type == 2) {  // GPU - 双标记（占用率 | 显存占用）
-        int filled1 = (int)(value1 / 100.0 * bars);
-        int filled2 = (int)(value2 / 100.0 * bars);
-        if (filled1 < 0) filled1 = 0;
-        if (filled1 > bars) filled1 = bars;
-        if (filled2 < 0) filled2 = 0;
-        if (filled2 > bars) filled2 = bars;
-
-        msg += L"[";
-        for (int i = 0; i < bars; i++) {
-            if (i < filled1 && i < filled2) {
-                msg += L"█";
-            } else if (i < filled1) {
-                msg += L"▓";
-            } else if (i < filled2) {
-                msg += L"░";
-            } else {
-                msg += L"░";
-            }
-            
-            // 在两个标记之间添加分隔符
-            if (i == filled1 - 1 && filled1 > 0 && filled1 < bars && i < bars - 1) {
-                msg += L"│";
-            }
-        }
-        msg += L"]";
+    // CPU进度条
+    int cpuFilled = (int)(g_cpuUsage / 100.0 * 15);
+    msg += L"[";
+    for (int i = 0; i < 15; i++) msg += (i < cpuFilled) ? L"█" : L"░";
+    msg += L"]\n";
+    
+    // RAM信息
+    msg += L"💾" + g_ramDisplayName + L" ";
+    wchar_t ramBuf[32];
+    swprintf_s(ramBuf, L"%.0f%%", g_ramUsage);
+    msg += ramBuf;
+    if (g_latestPerfData.ramTotal > 0) {
+        wchar_t ramDetailBuf[32];
+        swprintf_s(ramDetailBuf, L" 📊%.1fG/%.1fG", 
+            (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0,
+            (double)g_latestPerfData.ramTotal / 1024.0 / 1024.0 / 1024.0);
+        msg += ramDetailBuf;
     }
-
+    msg += L"\n";
+    
+    // RAM进度条
+    int ramFilled = (int)(g_ramUsage / 100.0 * 15);
+    msg += L"[";
+    for (int i = 0; i < 15; i++) msg += (i < ramFilled) ? L"█" : L"░";
+    msg += L"]\n";
+    
+    // GPU信息
+    msg += L"🎮" + g_gpuDisplayName + L" ";
+    if (g_latestPerfData.gpuUsageValid) {
+        wchar_t gpuBuf[32];
+        swprintf_s(gpuBuf, L"%.0f%%", g_latestPerfData.gpuUsage);
+        msg += gpuBuf;
+    } else {
+        msg += L"N/A";
+    }
+    if (g_gpuMemTotal > 0) {
+        wchar_t gpuMemBuf[32];
+        swprintf_s(gpuMemBuf, L" 🎞️%.1fG/%.1fG", 
+            (double)g_gpuMemUsed / 1024.0,
+            (double)g_gpuMemTotal / 1024.0);
+        msg += gpuMemBuf;
+    }
+    msg += L"\n";
+    
+    // GPU进度条
+    if (g_latestPerfData.gpuUsageValid) {
+        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 15);
+        msg += L"[";
+        for (int i = 0; i < 15; i++) msg += (i < gpuFilled) ? L"█" : L"░";
+        msg += L"]";
+    } else {
+        msg += L"[░░░░░░░░░░░░░░░]";
+    }
+    
     return msg;
 }
 
@@ -2124,10 +2053,8 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
             
             // 根据显示模式选择消息类型
             if (g_performanceMode == 1) {
-                // 性能模式：循环发送CPU、RAM、GPU
-                static int perfType = 0;  // 0=CPU, 1=RAM, 2=GPU
-                oscMsg = BuildPerformanceOSCMessage(perfType);
-                perfType = (perfType + 1) % 3;  // 循环切换
+                // 性能模式：一次性发送所有硬件信息
+                oscMsg = BuildPerformanceOSCMessage(0);
             } else {
                 // 音乐模式：发送歌曲信息
                 oscMsg = FormatOSCMessage(info);
@@ -3982,7 +3909,12 @@ void OnPaint(HWND hwnd) {
         previewInfo.lyrics = g_pendingLyrics;
         LeaveCriticalSection(&g_cs);
         
-        g_cachedPreviewMsg = FormatOSCMessage(previewInfo);
+        // 根据显示模式选择预览消息
+        if (g_performanceMode == 1) {
+            g_cachedPreviewMsg = BuildPerformanceOSCMessage(0);
+        } else {
+            g_cachedPreviewMsg = FormatOSCMessage(previewInfo);
+        }
         g_lastPreviewUpdate = now;
     }
     oscMessage = g_cachedPreviewMsg;
@@ -5658,10 +5590,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                 
                                 // 根据显示模式选择消息类型
                                 if (g_performanceMode == 1) {
-                                    // 性能模式：循环发送CPU、RAM、GPU
-                                    static int perfType = 0;  // 0=CPU, 1=RAM, 2=GPU
-                                    oscMsg = BuildPerformanceOSCMessage(perfType);
-                                    perfType = (perfType + 1) % 3;  // 循环切换
+                                    // 性能模式：一次性发送所有硬件信息
+                                    oscMsg = BuildPerformanceOSCMessage(0);
                                 } else {
                                     // 音乐模式：发送歌曲信息
                                     oscMsg = FormatOSCMessage(info);
