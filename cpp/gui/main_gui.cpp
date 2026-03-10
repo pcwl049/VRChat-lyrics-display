@@ -1514,6 +1514,7 @@ void LoadConfig(const wchar_t* path) {
     g_showPerfOnPause = getBool("show_perf_on_pause", true);
     g_autoUpdate = getBool("auto_update", true);
     g_showPlatform = getBool("show_platform", true);
+    g_performanceMode = getInt("performance_mode", 0);
     // g_darkMode固定为true，不再从配置加载
 
     // Apply theme
@@ -1540,11 +1541,11 @@ void SaveConfig(const wchar_t* path) {
     FILE* f = _wfopen(path, L"wb");
     if (!f) return;
     fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%ls\",\n    \"port\": %d\n  },\n", g_oscIp.c_str(), g_oscPort);
-    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n",
+    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n  \"performance_mode\": %d,\n",
             g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false",
             g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
             g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
-            "true", g_autoStart ? "true" : "false");  // g_darkMode固定为true
+            "true", g_autoStart ? "true" : "false", g_performanceMode);  // g_darkMode固定为true
     fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
     fprintf(f, "  \"skip_version\": \"%ls\"\n}\n", g_skipVersion.c_str());
@@ -6103,7 +6104,15 @@ void InitializePerfMonitoring() {
 
 
 
-                            // 获取设备句柄失败，可能需要管理员权限
+                            // 获取设备句柄失败，NVML可能不可用，尝试使用LibreHardwareMonitor
+
+
+
+                            g_nvmlAvailable = false;
+
+
+
+                            nvmlShutdown();
 
 
 
@@ -6115,7 +6124,11 @@ void InitializePerfMonitoring() {
 
 
 
-                        // nvmlInit失败，可能需要管理员权限或NVIDIA驱动未正确安装
+                        // nvmlInit失败，NVML不可用，尝试使用LibreHardwareMonitor
+
+
+
+                        g_nvmlAvailable = false;
 
 
 
@@ -6131,7 +6144,7 @@ void InitializePerfMonitoring() {
 
 
 
-                // nvml.dll未找到，可能需要安装NVIDIA驱动或NVIDIA System Tools
+                // nvml.dll未找到，尝试使用LibreHardwareMonitor
 
 
 
