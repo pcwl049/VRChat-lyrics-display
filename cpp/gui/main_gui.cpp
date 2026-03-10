@@ -2154,8 +2154,8 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
             
             // Line 3: System info compact
             wchar_t buf3[40];
-            if (g_batteryPercent >= 0) {
-                swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG B:%d%%", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0, g_batteryPercent);
+            if (g_latestPerfData.gpuUsageValid) {
+                swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG G:%.0f%%", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0, g_latestPerfData.gpuUsage);
             } else {
                 swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0);
             }
