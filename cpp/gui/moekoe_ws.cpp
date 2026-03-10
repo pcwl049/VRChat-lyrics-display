@@ -908,4 +908,177 @@ bool OSCSender::sendChatbox(const std::wstring& message) {
     return sendChatbox(utf8);
 }
 
+// === OSCReceiver Implementation ===
+
+OSCReceiver::OSCReceiver(int port) : port_(port) {
+}
+
+OSCReceiver::~OSCReceiver() {
+    stop();
+}
+
+bool OSCReceiver::start() {
+    if (running_) return true;
+    
+    // Initialize Winsock
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return false;
+    }
+    
+    sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock_ == INVALID_SOCKET) {
+        return false;
+    }
+    
+    // Allow address reuse
+    int reuse = 1;
+    setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
+    
+    // Bind to port
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port_);
+    
+    if (bind(sock_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
+        return false;
+    }
+    
+    // Set non-blocking
+    u_long mode = 1;
+    ioctlsocket(sock_, FIONBIO, &mode);
+    
+    running_ = true;
+    thread_ = std::thread(&OSCReceiver::run, this);
+    
+    std::string oscLogPath = GetDebugLogPath("moekoe_osc.log");
+    FILE* f = fopen(oscLogPath.c_str(), "a");
+    if (f) {
+        fprintf(f, "[OSCReceiver] Listening on port %d for VRChat pause commands\n", port_);
+        fclose(f);
+    }
+    
+    return true;
+}
+
+void OSCReceiver::stop() {
+    running_ = false;
+    if (sock_ != INVALID_SOCKET) {
+        closesocket(sock_);
+        sock_ = INVALID_SOCKET;
+    }
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+}
+
+void OSCReceiver::run() {
+    uint8_t buffer[4096];
+    sockaddr_in fromAddr = {};
+    int fromLen = sizeof(fromAddr);
+    
+    while (running_) {
+        int received = recvfrom(sock_, (char*)buffer, sizeof(buffer), 0,
+                                (sockaddr*)&fromAddr, &fromLen);
+        
+        if (received > 0) {
+            parseOSCMessage(buffer, received);
+        } else {
+            // No data, sleep a bit
+            Sleep(10);
+        }
+    }
+}
+
+std::string OSCReceiver::readString(const uint8_t* data, size_t len, size_t& pos) {
+    std::string result;
+    while (pos < len && data[pos] != 0) {
+        result += (char)data[pos];
+        pos++;
+    }
+    // Skip null terminator and padding
+    pos++;  // Skip null
+    while (pos < len && (pos % 4) != 0) {
+        pos++;  // Skip padding
+    }
+    return result;
+}
+
+bool OSCReceiver::parseOSCMessage(const uint8_t* data, size_t len) {
+    if (len < 4) return false;
+    
+    size_t pos = 0;
+    
+    // Read address pattern
+    std::string address = readString(data, len, pos);
+    if (address.empty()) return false;
+    
+    // Read type tag string
+    if (pos >= len) return false;
+    std::string typeTag = readString(data, len, pos);
+    
+    std::string oscLogPath = GetDebugLogPath("moekoe_osc.log");
+    
+    // Check for pause commands
+    // VRChat sends avatar parameters to /avatar/parameters/ParameterName
+    // Also support /lyrics/pause for convenience
+    bool isPauseCommand = (address == "/avatar/parameters/LyricsPause" ||
+                           address == "/avatar/parameters/lyricspause" ||
+                           address == "/lyrics/pause" ||
+                           address == "/vrc/osc/lyrics/pause");
+    
+    // For float parameters, check if value > 0.5 (triggered)
+    if (isPauseCommand && !typeTag.empty() && typeTag[0] == ',') {
+        bool shouldTrigger = false;
+        
+        if (typeTag.find('f') != std::string::npos && pos + 4 <= len) {
+            // Float value (big-endian)
+            uint32_t intValue = (data[pos] << 24) | (data[pos+1] << 16) | 
+                               (data[pos+2] << 8) | data[pos+3];
+            float value = *(float*)&intValue;
+            shouldTrigger = (value > 0.5f);
+            
+            FILE* f = fopen(oscLogPath.c_str(), "a");
+            if (f) {
+                fprintf(f, "[OSCReceiver] Received %s with float value %.2f\n", address.c_str(), value);
+                fclose(f);
+            }
+        } else if (typeTag.find('i') != std::string::npos && pos + 4 <= len) {
+            // Integer value (big-endian)
+            int value = (data[pos] << 24) | (data[pos+1] << 16) | 
+                       (data[pos+2] << 8) | data[pos+3];
+            shouldTrigger = (value != 0);
+            
+            FILE* f = fopen(oscLogPath.c_str(), "a");
+            if (f) {
+                fprintf(f, "[OSCReceiver] Received %s with int value %d\n", address.c_str(), value);
+                fclose(f);
+            }
+        } else if (typeTag.find('T') != std::string::npos) {
+            // True value
+            shouldTrigger = true;
+            
+            FILE* f = fopen(oscLogPath.c_str(), "a");
+            if (f) {
+                fprintf(f, "[OSCReceiver] Received %s with True value\n", address.c_str());
+                fclose(f);
+            }
+        }
+        
+        if (shouldTrigger && pauseCallback_) {
+            FILE* f = fopen(oscLogPath.c_str(), "a");
+            if (f) {
+                fprintf(f, "[OSCReceiver] Triggering pause callback!\n");
+                fclose(f);
+            }
+            pauseCallback_();
+        }
+    }
+    
+    return true;
+}
+
 } // namespace moekoe

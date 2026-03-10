@@ -317,6 +317,8 @@ std::wstring Utf8ToWstring(const std::string& str);
 int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length);
 std::wstring BuildProgressBar(double progress, int bars);
 std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
+void CreateOverlayWindow();    // OSC暂停覆盖层
+void DestroyOverlayWindow();   // 销毁OSC暂停覆盖层
 
 // 统一性能监控线程（合并原4个线程）
 DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param);
@@ -378,6 +380,7 @@ CRITICAL_SECTION g_cs;
 HWND g_hwnd = nullptr;
 NOTIFYICONDATAW g_nid = {};
 moekoe::OSCSender* g_osc = nullptr;
+moekoe::OSCReceiver* g_oscReceiver = nullptr;  // OSC receiver for VRChat pause commands
 moekoe::MoeKoeWS* g_moeKoeClient = nullptr;
 moekoe::NeteaseWS* g_neteaseClient = nullptr;
 smtc::SMTCClient* g_smtcClient = nullptr;  // QQ Music & other SMTC players
@@ -1163,7 +1166,7 @@ bool DownloadAndInstallUpdate() {
 Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim, g_btnAutoDetectAnim, g_btnShowOrderAnim;
 bool g_btnThemeHover = false;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
-bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false;
+bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false, g_hotkeyBoxHover = false;
 
 // Song data
 std::wstring g_pendingTitle, g_pendingArtist, g_pendingTime;
@@ -1330,6 +1333,10 @@ SIZE_T g_ramTotal = 0;       // Total RAM in bytes
 size_t g_gpuMemUsed = 0;     // GPU memory used (MB)
 size_t g_gpuMemTotal = 0;    // GPU memory total (MB)
 
+// Config file path (absolute path to exe directory)
+wchar_t g_configPath[MAX_PATH] = {0};
+wchar_t g_noLyricConfigPath[MAX_PATH] = {0};
+
 // Music quotes - max 6 Chinese chars (18 bytes) to fit 144 limit
 const wchar_t* g_musicQuotes[] = {
     L"\x97F3\x4E50\x662F\x7075\x9B42\x7684\x8BED\x8A00",
@@ -1359,6 +1366,41 @@ bool g_isConnecting = false;    // 防止重复连接
 HANDLE g_mutex = nullptr;       // Single instance mutex
 std::vector<std::wstring> g_noLyricMsgs;
 int g_lastNoLyricIdx = -1;
+
+// OSC暂停功能（快捷键触发，30秒内不发送消息）
+bool g_oscPaused = false;
+DWORD g_oscPauseEndTime = 0;    // 暂停结束时间（GetTickCount）
+const int OSC_PAUSE_DURATION = 30;  // 暂停时长（秒）
+const int HOTKEY_OSC_PAUSE = 1;     // 热键ID
+UINT g_oscPauseHotkey = VK_F10;     // 默认F10
+UINT g_oscPauseHotkeyMods = 0;      // 修饰符（MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4, MOD_WIN=8）
+bool g_editingHotkey = false;       // 是否正在编辑热键
+HHOOK g_keyboardHook = nullptr;     // 低级键盘钩子（用于VRChat全屏模式）
+
+// 暂停覆盖层窗口
+HWND g_overlayHwnd = nullptr;
+bool g_overlayActive = false;
+
+// 粒子系统
+struct Particle {
+    float x, y;           // 位置
+    float vx, vy;         // 速度
+    float life;           // 生命值 (0-1)
+    float maxLife;        // 最大生命
+    int size;             // 大小
+    COLORREF color;       // 颜色
+};
+std::vector<Particle> g_particles;
+bool g_particleBurst = false;  // 触发粒子爆发
+
+// 沙漏粒子
+struct SandParticle {
+    float x, y;
+    float vy;
+    int size;
+    COLORREF color;
+};
+std::vector<SandParticle> g_sandParticles;
 
 // Last displayed values (for reducing redraws)
 std::wstring g_lastDisplayTitle, g_lastDisplayArtist, g_lastDisplayLyric;
@@ -1677,6 +1719,10 @@ void LoadConfig(const wchar_t* path) {
     // Load skipped version
     g_skipVersion = getStr("skip_version");
     
+    // Load hotkey config
+    g_oscPauseHotkey = getInt("osc_pause_hotkey", VK_F10);
+    g_oscPauseHotkeyMods = getInt("osc_pause_hotkey_mods", 0);
+    
     // Initialize system info expand animation based on performance mode
     if (g_performanceMode == 1) {
         // Performance mode: fully expanded
@@ -1700,6 +1746,8 @@ void SaveConfig(const wchar_t* path) {
             "true", g_autoStart ? "true" : "false", g_performanceMode);  // g_darkMode固定为true
     fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
+    fprintf(f, "  \"osc_pause_hotkey\": %d,\n  \"osc_pause_hotkey_mods\": %d,\n",
+            g_oscPauseHotkey, g_oscPauseHotkeyMods);
     fprintf(f, "  \"skip_version\": \"%ls\"\n}\n", g_skipVersion.c_str());
     fclose(f);
 }
@@ -2076,28 +2124,26 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     }
     
     if (info.isPlaying) {
-        // Line 1: Song title - artist
-        msg = L"\x266B ";
-        std::wstring songInfo = info.title;
-        if (!info.artist.empty()) {
-            songInfo += L" - " + info.artist;
-        }
-        // Truncate to fit (Chinese ~3 bytes each, leave room for other lines)
-        msg += TruncateStr(songInfo, 35);
+        // Line 1: Song title
+        msg = L"\x266B " + info.title;
         
-        // Add platform indicator if enabled
+        // Line 2: Artist + Platform
+        msg += L"\n";
+        if (!info.artist.empty()) {
+            msg += info.artist;
+        }
         if (g_showPlatform) {
             msg += L" [" + (std::wstring)g_oscPlatformNames[g_activePlatform >= 0 ? g_activePlatform : g_currentPlatform] + L"]";
         }
         
-        // Line 2: Progress bar
+        // Line 3: Progress bar
         if (info.duration > 0) {
             msg += L"\n";
             msg += BuildProgressBar(info.currentTime / info.duration, 8);
             msg += L" " + FormatTime(info.currentTime) + L"/" + FormatTime(info.duration);
         }
         
-        // Line 3: Lyrics
+        // Line 4: Lyrics
         if (currentLyricIdx >= 0 && currentLyricIdx < (int)info.lyrics.size()) {
             std::wstring lyric = info.lyrics[currentLyricIdx].text;
             size_t remaining = MAX_MSG_LEN - msg.length() - 3;
@@ -2270,7 +2316,19 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         }
     }
     
-    if (g_osc && info.hasData && g_oscEnabled) {
+    // 检查OSC暂停状态是否过期（在发送逻辑中的备份检查）
+    DWORD currentTime = GetTickCount();
+    if (g_oscPaused && g_oscPauseEndTime > 0 && currentTime >= g_oscPauseEndTime) {
+        g_oscPaused = false;
+        g_oscPauseEndTime = 0;
+        // 销毁覆盖层窗口
+        if (g_overlayHwnd) {
+            DestroyOverlayWindow();
+        }
+        MainDebugLog("[OSC] Pause ended naturally in send logic, resuming");
+    }
+    
+    if (g_osc && info.hasData && g_oscEnabled && !g_oscPaused) {
         DWORD now = GetTickCount();
         DWORD minInterval = g_playStateChanged ? 500 : (!info.isPlaying ? OSC_PAUSE_INTERVAL : OSC_MIN_INTERVAL);
         if (now - g_lastOscSendTime >= minInterval) {
@@ -4065,10 +4123,81 @@ void OnPaint(HWND hwnd) {
             DeleteObject(linkPen);
         }
         
+        // === Hotkey Setting ===
+        rowY += 50;
+        DrawTextLeft(memDC, L"\x6682\x505C\x5FEB\x6377\x952E", checkboxX, rowY + 4, COLOR_TEXT_DIM, g_fontSmall);
+        
+        // Hotkey display box
+        int hotkeyBoxX = checkboxX + 90;
+        int hotkeyBoxW = 120;
+        int hotkeyBoxH = 32;
+        
+        // Draw hotkey box background
+        COLORREF hotkeyBg = g_editingHotkey ? COLOR_ACCENT : (g_hotkeyBoxHover ? RGB(60, 60, 70) : RGB(45, 45, 55));
+        DrawRoundRect(memDC, hotkeyBoxX, rowY, hotkeyBoxW, hotkeyBoxH, 6, hotkeyBg);
+        
+        // Draw hotkey text
+        wchar_t hotkeyText[32] = {0};
+        if (g_editingHotkey) {
+            wcscpy_s(hotkeyText, L"\x8BF7\x6309\x4E0B\x65B0\x952E...");
+        } else {
+            // Build hotkey display string
+            std::wstring hk;
+            if (g_oscPauseHotkeyMods & MOD_CONTROL) hk += L"Ctrl+";
+            if (g_oscPauseHotkeyMods & MOD_ALT) hk += L"Alt+";
+            if (g_oscPauseHotkeyMods & MOD_SHIFT) hk += L"Shift+";
+            if (g_oscPauseHotkeyMods & MOD_WIN) hk += L"Win+";
+            
+            // Key name
+            if (g_oscPauseHotkey >= VK_F1 && g_oscPauseHotkey <= VK_F24) {
+                hk += L"F" + std::to_wstring(g_oscPauseHotkey - VK_F1 + 1);
+            } else if (g_oscPauseHotkey == VK_SPACE) {
+                hk += L"Space";
+            } else if (g_oscPauseHotkey == VK_RETURN) {
+                hk += L"Enter";
+            } else if (g_oscPauseHotkey == VK_ESCAPE) {
+                hk += L"Esc";
+            } else if (g_oscPauseHotkey == VK_TAB) {
+                hk += L"Tab";
+            } else if (g_oscPauseHotkey == VK_INSERT) {
+                hk += L"Ins";
+            } else if (g_oscPauseHotkey == VK_DELETE) {
+                hk += L"Del";
+            } else if (g_oscPauseHotkey == VK_HOME) {
+                hk += L"Home";
+            } else if (g_oscPauseHotkey == VK_END) {
+                hk += L"End";
+            } else if (g_oscPauseHotkey == VK_PRIOR) {
+                hk += L"PgUp";
+            } else if (g_oscPauseHotkey == VK_NEXT) {
+                hk += L"PgDn";
+            } else if (g_oscPauseHotkey >= '0' && g_oscPauseHotkey <= '9') {
+                hk += (wchar_t)g_oscPauseHotkey;
+            } else if (g_oscPauseHotkey >= 'A' && g_oscPauseHotkey <= 'Z') {
+                hk += (wchar_t)g_oscPauseHotkey;
+            } else {
+                hk += L"?";
+            }
+            wcscpy_s(hotkeyText, hk.c_str());
+        }
+        
+        // Center text in hotkey box
+        SIZE textSize;
+        GetTextExtentPoint32W(memDC, hotkeyText, (int)wcslen(hotkeyText), &textSize);
+        int textX = hotkeyBoxX + (hotkeyBoxW - textSize.cx) / 2;
+        int textY = rowY + (hotkeyBoxH - textSize.cy) / 2;
+        SetTextColor(memDC, g_editingHotkey ? RGB(0, 0, 0) : COLOR_TEXT);
+        SetBkMode(memDC, TRANSPARENT);
+        SelectObject(memDC, g_fontNormal);
+        TextOutW(memDC, textX, textY, hotkeyText, (int)wcslen(hotkeyText));
+        
         // === Export Log Button ===
-        rowY += 55;
-        DrawButtonAnim(memDC, checkboxX, rowY, leftColW - 36 - checkboxX, 38, 
-            L"\x5BFC\x51FA\x65E5\x5FD7", g_btnExportLogAnim, false);
+        rowY += 40;
+        // 只有当按钮在可见区域内时才绘制
+        if (rowY + 38 < h - CARD_PADDING) {
+            DrawButtonAnim(memDC, checkboxX, rowY, leftColW - 36 - checkboxX, 38, 
+                L"\x5BFC\x51FA\x65E5\x5FD7", g_btnExportLogAnim, false);
+        }
     }
     
     // 恢复视口偏移和剪辑区域
@@ -4388,7 +4517,7 @@ void ApplySettings() {
     // Just recreate OSC sender with current values
     if (g_osc) delete g_osc;
     g_osc = new moekoe::OSCSender(WstringToUtf8(g_oscIp), g_oscPort);
-    SaveConfig(L"config_gui.json");
+    SaveConfig(g_configPath);
 }
 
 void Disconnect() {
@@ -4637,6 +4766,404 @@ void UpdateAnimations() {
     g_themeTransition.update();
 }
 
+// 前向声明
+void TriggerParticleBurst(int centerX, int centerY);
+void CreateOverlayWindow();
+void DestroyOverlayWindow();
+
+// Low-level keyboard hook for global hotkey (works in VRChat fullscreen)
+LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        KBDLLHOOKSTRUCT* kb = (KBDLLHOOKSTRUCT*)lParam;
+        
+        // Only process key down events
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            // 检查是否是我们关注的热键
+            if (kb->vkCode == g_oscPauseHotkey && !g_editingHotkey) {
+                // 使用 GetAsyncKeyState 代替 GetKeyState（在低级钩子中更可靠）
+                bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+                bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+                bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                bool win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+                
+                UINT mods = 0;
+                if (ctrl) mods |= MOD_CONTROL;
+                if (alt) mods |= MOD_ALT;
+                if (shift) mods |= MOD_SHIFT;
+                if (win) mods |= MOD_WIN;
+                
+                // Check if modifiers match
+                if (mods == g_oscPauseHotkeyMods) {
+                    // Toggle pause state
+                    DWORD now = GetTickCount();
+                    
+                    if (g_oscPaused) {
+                        // Already paused - cancel pause with particle burst
+                        MainDebugLog("[Hotkey] Canceling OSC pause (low-level hook)");
+                        
+                        if (g_overlayHwnd) {
+                            RECT rc;
+                            GetClientRect(g_overlayHwnd, &rc);
+                            TriggerParticleBurst(rc.right / 2, rc.bottom / 2);
+                        }
+                        
+                        g_oscPaused = false;
+                        g_oscPauseEndTime = 0;
+                        
+                        // Keep overlay for particle effect, delayed destroy
+                        SetTimer(g_hwnd, 1001, 1500, nullptr);
+                    } else {
+                        // Start pause
+                        g_oscPaused = true;
+                        g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
+                        MainDebugLog("[Hotkey] OSC paused for 30 seconds (low-level hook)");
+                        
+                        // Create overlay window
+                        CreateOverlayWindow();
+                    }
+                    
+                    // Redraw main window
+                    if (g_hwnd) {
+                        InvalidateRect(g_hwnd, nullptr, FALSE);
+                    }
+                    return 1; // Consume the key
+                }
+            }
+        }
+    }
+    return CallNextHookEx(g_keyboardHook, nCode, wParam, lParam);
+}
+
+// 更新粒子系统
+void UpdateParticles() {
+    // 更新现有粒子
+    for (auto it = g_particles.begin(); it != g_particles.end();) {
+        it->x += it->vx;
+        it->y += it->vy;
+        it->vy += 0.3f; // 重力
+        it->life -= 0.02f;
+        
+        if (it->life <= 0) {
+            it = g_particles.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    // 更新沙漏粒子
+    for (auto it = g_sandParticles.begin(); it != g_sandParticles.end();) {
+        it->y += it->vy;
+        it->vy += 0.15f; // 重力
+        
+        if (it->y > 60) { // 超出进度条范围（窗口高度80，进度条在底部）
+            it = g_sandParticles.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// 触发粒子爆发效果
+void TriggerParticleBurst(int centerX, int centerY) {
+    g_particleBurst = true;
+    
+    // 创建爆发粒子
+    for (int i = 0; i < 60; i++) {
+        Particle p;
+        p.x = (float)centerX;
+        p.y = (float)centerY;
+        p.vx = ((rand() % 300) - 150) / 10.0f; // -15 to 15
+        p.vy = ((rand() % 300) - 200) / 10.0f; // -20 to 10 (主要向上和四周)
+        p.life = 1.5f;  // 增加生命值
+        p.maxLife = 1.5f;
+        p.size = rand() % 8 + 3;
+        
+        // 随机颜色：绿/黄/橙/红
+        int colorType = rand() % 4;
+        switch (colorType) {
+            case 0: p.color = RGB(0, 255, 100); break;    // 绿
+            case 1: p.color = RGB(255, 255, 0); break;    // 黄
+            case 2: p.color = RGB(255, 165, 0); break;    // 橙
+            case 3: p.color = RGB(255, 80, 80); break;    // 红
+        }
+        g_particles.push_back(p);
+    }
+}
+
+// 获取进度条颜色（绿色→黄色→红色渐变）
+COLORREF GetProgressColor(float progress) {
+    // progress: 1.0 = 开始(绿色), 0.0 = 结束(红色)
+    if (progress > 0.5f) {
+        // 绿色到黄色
+        float t = (progress - 0.5f) * 2.0f; // 0-1
+        int r = (int)(255 * (1.0f - t));
+        int g = 255;
+        int b = (int)(100 * t);
+        return RGB(r, g, b);
+    } else {
+        // 黄色到红色
+        float t = progress * 2.0f; // 0-1
+        int r = 255;
+        int g = (int)(255 * t);
+        int b = 0;
+        return RGB(r, g, b);
+    }
+}
+
+// 覆盖层窗口过程
+LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            int w, h;
+            {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                w = rc.right - rc.left;
+                h = rc.bottom - rc.top;
+            }
+            
+            // 创建双缓冲
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+            
+            // 填充半透明背景
+            RECT bgRect = {0, 0, w, h};
+            HBRUSH bgBrush = CreateSolidBrush(RGB(30, 30, 35));
+            FillRect(memDC, &bgRect, bgBrush);
+            DeleteObject(bgBrush);
+            
+            // 设置透明背景
+            SetBkMode(memDC, TRANSPARENT);
+            
+            // 进度条尺寸（居中显示）
+            int barW = w - 30;
+            int barH = 16;
+            int barX = 15;
+            int barY = h - barH - 15;
+            
+            // 计算进度
+            DWORD now = GetTickCount();
+            float progress = 0;
+            if (g_oscPaused && g_oscPauseEndTime > now) {
+                progress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+            }
+            
+            // 更新粒子
+            UpdateParticles();
+            
+            // 绘制进度条背景
+            RECT barBgRect = {barX, barY, barX + barW, barY + barH};
+            HBRUSH barBgBrush = CreateSolidBrush(RGB(60, 60, 65));
+            FillRect(memDC, &barBgRect, barBgBrush);
+            DeleteObject(barBgBrush);
+            
+            if (progress > 0) {
+                // 绘制进度条（从左到右减少）
+                int progressW = (int)(barW * progress);
+                if (progressW > 0) {
+                    // 创建渐变画刷
+                    COLORREF progressColor = GetProgressColor(progress);
+                    HBRUSH progressBrush = CreateSolidBrush(progressColor);
+                    RECT progressRect = {barX, barY, barX + progressW, barY + barH};
+                    FillRect(memDC, &progressRect, progressBrush);
+                    DeleteObject(progressBrush);
+                    
+                    // 添加沙漏粒子效果 - 从进度条末端向下掉落
+                    if ((rand() % 3) == 0) {  // 提高生成概率
+                        SandParticle sp;
+                        sp.x = (float)(barX + progressW);  // 进度条末端的屏幕X坐标
+                        sp.y = 0.0f;  // 从进度条底部边缘开始（相对于进度条底部）
+                        sp.vy = 0.3f + (rand() % 15) / 10.0f;  // 随机下落速度
+                        sp.size = 2 + rand() % 3;
+                        sp.color = progressColor;
+                        g_sandParticles.push_back(sp);
+                    }
+                }
+                
+                // 绘制沙漏粒子 - 从进度条末端向下掉落
+                for (const auto& sp : g_sandParticles) {
+                    HBRUSH sandBrush = CreateSolidBrush(sp.color);
+                    // sp.x 存储的是屏幕坐标，sp.y 是相对于进度条底部向下的偏移
+                    RECT sandRect = {
+                        (int)(sp.x - sp.size/2),
+                        (int)(barY + barH + sp.y - sp.size/2),
+                        (int)(sp.x + sp.size/2),
+                        (int)(barY + barH + sp.y + sp.size/2)
+                    };
+                    FillRect(memDC, &sandRect, sandBrush);
+                    DeleteObject(sandBrush);
+                }
+                
+                // 绘制剩余时间文本
+                int remaining = (int)((g_oscPauseEndTime - now) / 1000);
+                wchar_t timeText[64];
+                swprintf_s(timeText, L"\x23F8 OSC \x6682\x505C %ds", remaining);
+                
+                SetTextColor(memDC, RGB(255, 255, 255));
+                HFONT font = CreateFontW(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+                HFONT oldFont = (HFONT)SelectObject(memDC, font);
+                
+                TextOutW(memDC, barX, 12, timeText, (int)wcslen(timeText));
+                
+                // 绘制热键提示
+                std::wstring hk;
+                if (g_oscPauseHotkeyMods & MOD_CONTROL) hk += L"Ctrl+";
+                if (g_oscPauseHotkeyMods & MOD_ALT) hk += L"Alt+";
+                if (g_oscPauseHotkeyMods & MOD_SHIFT) hk += L"Shift+";
+                if (g_oscPauseHotkeyMods & MOD_WIN) hk += L"Win+";
+                if (g_oscPauseHotkey >= VK_F1 && g_oscPauseHotkey <= VK_F24) {
+                    hk += L"F" + std::to_wstring(g_oscPauseHotkey - VK_F1 + 1);
+                } else if (g_oscPauseHotkey >= 'A' && g_oscPauseHotkey <= 'Z') {
+                    hk += (wchar_t)g_oscPauseHotkey;
+                }
+                wchar_t hint[64];
+                swprintf_s(hint, L"[%s] \x6062\x590D", hk.c_str());
+                SetTextColor(memDC, RGB(180, 180, 180));
+                HFONT smallFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+                SelectObject(memDC, smallFont);
+                TextOutW(memDC, barX, 35, hint, (int)wcslen(hint));
+                DeleteObject(smallFont);
+                
+                SelectObject(memDC, oldFont);
+                DeleteObject(font);
+            }
+            
+            // 绘制爆发粒子
+            for (const auto& p : g_particles) {
+                HBRUSH particleBrush = CreateSolidBrush(p.color);
+                RECT pRect = {
+                    (int)(p.x - p.size/2),
+                    (int)(p.y - p.size/2),
+                    (int)(p.x + p.size/2),
+                    (int)(p.y + p.size/2)
+                };
+                FillRect(memDC, &pRect, particleBrush);
+                DeleteObject(particleBrush);
+            }
+            
+            // 复制到屏幕
+            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        
+        case WM_TIMER: {
+            // 覆盖层自己的定时器，用于更新动画
+            if (wParam == 2) {
+                // 检查暂停是否结束
+                DWORD now = GetTickCount();
+                if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
+                    // 暂停自然结束
+                    g_oscPaused = false;
+                    g_oscPauseEndTime = 0;
+                    MainDebugLog("[Overlay] OSC pause ended naturally");
+                }
+                
+                // 检查是否应该销毁覆盖层
+                if (!g_oscPaused && g_particles.empty() && g_sandParticles.empty()) {
+                    KillTimer(hwnd, 2);
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                
+                // 触发重绘
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        
+        case WM_DESTROY:
+            KillTimer(hwnd, 2);
+            g_overlayHwnd = nullptr;
+            g_overlayActive = false;
+            g_particles.clear();
+            g_sandParticles.clear();
+            g_particleBurst = false;
+            MainDebugLog("[Overlay] Destroyed overlay window");
+            return 0;
+            
+        default:
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
+
+// 创建覆盖层窗口
+void CreateOverlayWindow() {
+    if (g_overlayHwnd) return;
+    
+    HINSTANCE hInst = GetModuleHandle(nullptr);
+    
+    // 获取屏幕尺寸
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    
+    // 进度条窗口尺寸（屏幕顶部居中）- 增加高度以显示粒子效果
+    int winW = 320;
+    int winH = 80;  // 增加高度以容纳沙漏粒子和爆发效果
+    int winX = (screenW - winW) / 2;  // 居中
+    int winY = 10;  // 距离顶部10像素
+    
+    // 注册窗口类（只注册一次）
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = OverlayWndProc;
+        wc.hInstance = hInst;
+        wc.hCursor = nullptr;
+        wc.hbrBackground = NULL;
+        wc.lpszClassName = L"VRCLyricsOverlay_Class";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    
+    // 创建顶层窗口，点击穿透，不抢焦点
+    g_overlayHwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        L"VRCLyricsOverlay_Class", L"",
+        WS_POPUP,
+        winX, winY, winW, winH,
+        nullptr, nullptr, hInst, nullptr);
+    
+    // 设置透明度
+    SetLayeredWindowAttributes(g_overlayHwnd, 0, 200, LWA_ALPHA);
+    
+    // 设置覆盖层自己的定时器（16ms，约60fps）
+    SetTimer(g_overlayHwnd, 2, 16, nullptr);
+    
+    ShowWindow(g_overlayHwnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(g_overlayHwnd);
+    g_overlayActive = true;
+    
+    MainDebugLog("[Overlay] Created overlay window at top center of screen with timer");
+}
+
+// 销毁覆盖层窗口
+void DestroyOverlayWindow() {
+    if (g_overlayHwnd) {
+        // 定时器会在WM_DESTROY中清理
+        DestroyWindow(g_overlayHwnd);
+        g_overlayHwnd = nullptr;
+        g_overlayActive = false;
+        g_particles.clear();
+        g_sandParticles.clear();
+        g_particleBurst = false;
+        MainDebugLog("[Overlay] Destroyed overlay window via DestroyOverlayWindow()");
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
@@ -4698,6 +5225,63 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
             
+            // 注册全局热键：用户自定义热键暂停OSC发送30秒
+            RegisterHotKey(hwnd, HOTKEY_OSC_PAUSE, g_oscPauseHotkeyMods, g_oscPauseHotkey);
+            
+            // 设置低级键盘钩子（用于VRChat全屏模式）
+            g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
+            if (g_keyboardHook) {
+                MainDebugLog("[Main] Low-level keyboard hook installed for VRChat fullscreen mode");
+            } else {
+                MainDebugLog("[Main] Warning: Failed to install low-level keyboard hook");
+            }
+            
+            // 启动OSC接收器（用于接收VRChat手势触发的暂停命令）
+            g_oscReceiver = new moekoe::OSCReceiver(9001);
+            g_oscReceiver->setPauseCallback([]() {
+                // 在主线程中切换暂停状态
+                PostMessage(g_hwnd, WM_USER + 102, 0, 0);
+            });
+            if (g_oscReceiver->start()) {
+                MainDebugLog("[Main] OSC Receiver started on port 9001");
+            } else {
+                MainDebugLog("[Main] Warning: Failed to start OSC Receiver");
+            }
+            
+            return 0;
+        }
+        
+        case WM_HOTKEY: {
+            if (wParam == HOTKEY_OSC_PAUSE) {
+                // 切换暂停状态
+                DWORD now = GetTickCount();
+                
+                if (g_oscPaused) {
+                    // 已经在暂停中 - 取消暂停，触发粒子爆发
+                    MainDebugLog("[Hotkey] Canceling OSC pause (WM_HOTKEY)");
+                    
+                    if (g_overlayHwnd) {
+                        RECT rc;
+                        GetClientRect(g_overlayHwnd, &rc);
+                        TriggerParticleBurst(rc.right / 2, rc.bottom / 2);
+                    }
+                    
+                    g_oscPaused = false;
+                    g_oscPauseEndTime = 0;
+                    
+                    // 延迟销毁（等粒子效果完成）
+                    SetTimer(hwnd, 1001, 1500, nullptr);
+                } else {
+                    // 开始新的暂停
+                    g_oscPaused = true;
+                    g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
+                    MainDebugLog("[OSC] Paused for 30 seconds");
+                    
+                    // 创建覆盖层窗口
+                    CreateOverlayWindow();
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
         
@@ -4731,7 +5315,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             bool oldConnect = g_btnConnectHover, oldApply = g_btnApplyHover;
             bool oldClose = g_btnCloseHover, oldMin = g_btnMinHover, oldUpdate = g_btnUpdateHover, oldLaunch = g_btnLaunchHover;
-            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover, oldTheme = g_btnThemeHover;
+            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover, oldTheme = g_btnThemeHover, oldHotkeyBox = g_hotkeyBoxHover;
             bool oldTabHover[3] = {g_tabHover[0], g_tabHover[1], g_tabHover[2]};
 
             // Tab hover detection
@@ -4822,19 +5406,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_platformMenuHover = -1;
                 g_btnConnectHover = false;
                 g_btnLaunchHover = false;
-                // Settings tab positions (relative to rowY = contentY + 55):
+                // Settings tab positions (calculated same as drawing code):
                 // rowY starts at contentY + 55
-                // IP section: rowY unchanged
-                // rowY += 75 (Port section)
-                // rowY += 70 (first checkbox)
-                // rowY += 38 * 6 (six more checkboxes) 
-                // rowY += 38 (admin checkbox)
-                // Admin Status text: rowY += 38, drawn at rowY + 4
-                // Export Log: rowY += 55
-                int adminY = rowY + 75 + 70 + 38*7 + 4;  // contentY + 55 + 75 + 70 + 266 + 4 = contentY + 470
-                int exportLogY = rowY + 75 + 70 + 38*7 + 55;  // contentY + 55 + 75 + 70 + 266 + 55 = contentY + 521
-                g_btnAdminHover = !IsRunningAsAdmin() && IsInRect(x, y, checkboxX, adminY, 150, 22);
-                g_btnExportLogHover = IsInRect(x, y, checkboxX, exportLogY, leftColW - 36 - checkboxX, 38);
+                int ipRowY = rowY;
+                int portRowY = rowY + 75;
+                int checkboxRowY = rowY + 75 + 70;
+                int autoUpdateRowY = checkboxRowY + 38;
+                int showPlatformRowY = autoUpdateRowY + 38;
+                int trayRowY = showPlatformRowY + 38;
+                int startMinimizedRowY = trayRowY + 38;
+                int autoStartRowY = startMinimizedRowY + 38;
+                int runAsAdminRowY = autoStartRowY + 38;
+                int adminStatusY = runAsAdminRowY + 38;
+                int hotkeyRowY = adminStatusY + 50;
+                int exportLogRowY = hotkeyRowY + 55;
+                
+                int hotkeyBoxX = checkboxX + 90;
+                
+                g_btnAdminHover = !IsRunningAsAdmin() && IsInRect(x, y, checkboxX, adminStatusY, 150, 22);
+                g_hotkeyBoxHover = IsInRect(x, y, hotkeyBoxX, hotkeyRowY, 120, 32);
+                // 只有当按钮在可见区域内时才检测悬停
+                g_btnExportLogHover = (exportLogRowY + 38 < g_winH - CARD_PADDING) && 
+                                       IsInRect(x, y, checkboxX, exportLogRowY, leftColW - 36 - checkboxX, 38);
             }
             
             g_btnApplyHover = false;
@@ -4860,7 +5453,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 oldLaunch != g_btnLaunchHover || oldExportLog != g_btnExportLogHover ||
                 oldTheme != g_btnThemeHover ||
                 oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] || oldTabHover[2] != g_tabHover[2] ||
-                g_btnAdminHover != oldAdmin || g_charProgressHover != oldCharProgressHover) {
+                g_btnAdminHover != oldAdmin || g_charProgressHover != oldCharProgressHover || g_hotkeyBoxHover != oldHotkeyBox) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -4890,7 +5483,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (g_brushCard) DeleteObject(g_brushCard);
                 g_brushBg = CreateSolidBrush(COLOR_BG);
                 g_brushCard = CreateSolidBrush(COLOR_CARD);
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -4931,7 +5524,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         // Skip this version
                         g_skipVersion = g_latestVersion;
                         g_updateAvailable = false;
-                        SaveConfig(L"config_gui.json");
+                        SaveConfig(g_configPath);
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 } else if (!g_checkingUpdate) {
@@ -5303,7 +5896,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             g_systemInfoExpandAnim.speed = 0.15;  // 150ms收缩
                         }
 
-                        SaveConfig(L"config_gui.json");
+                        SaveConfig(g_configPath);
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                     return 0;
@@ -5388,7 +5981,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int autoStartRowY = startMinimizedRowY + 38;
             int runAsAdminRowY = autoStartRowY + 38;
             int adminStatusY = runAsAdminRowY + 38;
-            int exportLogRowY = adminStatusY + 55;
+            int hotkeyRowY = adminStatusY + 50;
+            int exportLogRowY = hotkeyRowY + 55;
             
             // Click on IP or Port input field - show hint
             if (IsInRect(x, y, CARD_PADDING + 18, ipRowY + 24, leftColW - 36, 36) ||
@@ -5399,35 +5993,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Checkbox for show performance
             if (IsInRect(x, y, checkboxX, checkboxRowY, checkboxSize, checkboxSize)) {
                 g_showPerfOnPause = !g_showPerfOnPause;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // Checkbox for auto update
             if (IsInRect(x, y, checkboxX, autoUpdateRowY, checkboxSize, checkboxSize)) {
                 g_autoUpdate = !g_autoUpdate;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // Checkbox for show platform
             if (IsInRect(x, y, checkboxX, showPlatformRowY, checkboxSize, checkboxSize)) {
                 g_showPlatform = !g_showPlatform;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // Checkbox for minimize to tray
             if (IsInRect(x, y, checkboxX, trayRowY, checkboxSize, checkboxSize)) {
                 g_minimizeToTray = !g_minimizeToTray;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // Checkbox for start minimized
             if (IsInRect(x, y, checkboxX, startMinimizedRowY, checkboxSize, checkboxSize)) {
                 g_startMinimized = !g_startMinimized;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -5435,14 +6029,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (IsInRect(x, y, checkboxX, autoStartRowY, checkboxSize, checkboxSize)) {
                 g_autoStart = !g_autoStart;
                 SetAutoStart(g_autoStart);
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // Checkbox for run as admin
             if (IsInRect(x, y, checkboxX, runAsAdminRowY, checkboxSize, checkboxSize)) {
                 g_runAsAdmin = !g_runAsAdmin;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -5455,8 +6049,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 return 0;
             }
-            // Export log button
-            if (IsInRect(x, y, checkboxX, exportLogRowY, leftColW - 36 - checkboxX, 32)) {
+            // Hotkey input field click - enter editing mode
+            int hotkeyBoxX = checkboxX + 90;
+            if (IsInRect(x, y, hotkeyBoxX, hotkeyRowY, 120, 32)) {
+                g_editingHotkey = true;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            // Export log button - only if visible
+            if (exportLogRowY + 38 < g_winH - CARD_PADDING && 
+                IsInRect(x, y, checkboxX, exportLogRowY, leftColW - 36 - checkboxX, 32)) {
                 ExportLogs(hwnd);
                 return 0;
             }
@@ -5516,6 +6118,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_KEYDOWN: {
+            // Handle hotkey editing
+            if (g_editingHotkey) {
+                // Escape cancels editing
+                if (wParam == VK_ESCAPE) {
+                    g_editingHotkey = false;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                
+                // Capture the new hotkey
+                UINT newKey = (UINT)wParam;
+                UINT newMods = 0;
+                
+                // Check modifier keys
+                if (GetKeyState(VK_CONTROL) & 0x8000) newMods |= MOD_CONTROL;
+                if (GetKeyState(VK_MENU) & 0x8000) newMods |= MOD_ALT;  // Alt key
+                if (GetKeyState(VK_SHIFT) & 0x8000) newMods |= MOD_SHIFT;
+                if (GetKeyState(VK_LWIN) & 0x8000 || GetKeyState(VK_RWIN) & 0x8000) newMods |= MOD_WIN;
+                
+                // Don't allow modifier-only hotkeys
+                if (newKey != VK_CONTROL && newKey != VK_SHIFT && newKey != VK_MENU && newKey != VK_LWIN && newKey != VK_RWIN) {
+                    // Unregister old hotkey
+                    UnregisterHotKey(hwnd, HOTKEY_OSC_PAUSE);
+                    
+                    // Update hotkey
+                    g_oscPauseHotkey = newKey;
+                    g_oscPauseHotkeyMods = newMods;
+                    
+                    // Register new hotkey
+                    RegisterHotKey(hwnd, HOTKEY_OSC_PAUSE, g_oscPauseHotkeyMods, g_oscPauseHotkey);
+                    
+                    // Save config
+                    SaveConfig(g_configPath);
+                    
+                    char debugBuf[128];
+                    sprintf_s(debugBuf, "[Hotkey] Changed to mods=%d, key=%d", g_oscPauseHotkeyMods, g_oscPauseHotkey);
+                    MainDebugLog(debugBuf);
+                }
+                
+                g_editingHotkey = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            
             // Handle keyboard input for editing fields
             if (g_editingField != EDIT_NONE) {
                 if (wParam == VK_BACK) {
@@ -5614,39 +6260,76 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_TIMER: {
-            UpdateAnimations();
-            UpdatePerfStats();
-
-            // Update cursor blink state (500ms interval)
-            DWORD now = GetTickCount();
-            if (g_editingField != EDIT_NONE && (now - g_lastCursorBlink) >= 500) {
-                g_cursorVisible = !g_cursorVisible;
-                g_lastCursorBlink = now;
-                InvalidateRect(hwnd, nullptr, FALSE);
+            // Handle overlay destruction timer (for particle burst effect)
+            if (wParam == 1001) {
+                KillTimer(hwnd, 1001);
+                // 只有在暂停已结束且粒子效果也结束时才销毁
+                if (!g_oscPaused && g_particles.empty() && g_overlayHwnd) {
+                    DestroyOverlayWindow();
+                    MainDebugLog("[Timer] Overlay destroyed after particle effect");
+                } else if (!g_oscPaused && g_overlayHwnd) {
+                    // 粒子效果还在进行，再等待一段时间
+                    SetTimer(hwnd, 1001, 500, nullptr);
+                }
+                // 不要 return，继续执行主定时器逻辑
             }
+            
+            // 主定时器逻辑（timer ID = 1）
+            if (wParam == 1) {
+                UpdateAnimations();
+                UpdatePerfStats();
 
-            // Smart redraw: only redraw when needed
-            
-            // Detect system lag recovery (timer interval > 500ms instead of normal 16ms)
-            if (g_lastTimerTick > 0 && (now - g_lastTimerTick) > 500) {
-                // System just recovered from lag - reset OSC timer to prevent burst sends
-                g_lastOscSendTime = now;
-            }
-            g_lastTimerTick = now;
-            
-            bool animActive = IsAnimationActive();
-            
-            if (animActive) {
-                // Animation running - need smooth updates
-                InvalidateRect(hwnd, nullptr, FALSE);
-            } else if (g_needsRedraw) {
-                // Content changed - redraw once
-                InvalidateRect(hwnd, nullptr, FALSE);
-                g_needsRedraw = false;
-            } else if (now - g_lastContentChange >= IDLE_REDRAW_INTERVAL) {
-                // Periodic refresh for time display etc.
-                InvalidateRect(hwnd, nullptr, FALSE);
-                g_lastContentChange = now;
+                // 检查OSC暂停状态是否过期（自然结束）
+                DWORD now = GetTickCount();
+                if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
+                    g_oscPaused = false;
+                    g_oscPauseEndTime = 0;
+                    g_needsRedraw = true;
+                    MainDebugLog("[Timer] OSC pause ended naturally");
+                    
+                    // 暂停自然结束，销毁覆盖层
+                    DestroyOverlayWindow();
+                }
+
+                // Update cursor blink state (500ms interval)
+                if (g_editingField != EDIT_NONE && (now - g_lastCursorBlink) >= 500) {
+                    g_cursorVisible = !g_cursorVisible;
+                    g_lastCursorBlink = now;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+
+                // 暂停状态下每秒更新主窗口倒计时显示
+                static DWORD lastPauseUpdate = 0;
+                if (g_oscPaused && (now - lastPauseUpdate) >= 1000) {
+                    lastPauseUpdate = now;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                
+                // 覆盖层窗口有自己的定时器更新，这里不需要更新
+
+                // Smart redraw: only redraw when needed
+                
+                // Detect system lag recovery (timer interval > 500ms instead of normal 16ms)
+                if (g_lastTimerTick > 0 && (now - g_lastTimerTick) > 500) {
+                    // System just recovered from lag - reset OSC timer to prevent burst sends
+                    g_lastOscSendTime = now;
+                }
+                g_lastTimerTick = now;
+                
+                bool animActive = IsAnimationActive();
+                
+                if (animActive) {
+                    // Animation running - need smooth updates
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (g_needsRedraw) {
+                    // Content changed - redraw once
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    g_needsRedraw = false;
+                } else if (now - g_lastContentChange >= IDLE_REDRAW_INTERVAL) {
+                    // Periodic refresh for time display etc.
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    g_lastContentChange = now;
+                }
             }
             return 0;
         }
@@ -5738,7 +6421,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         // Skip this version
                         g_skipVersion = g_latestVersion;
                         g_updateAvailable = false;
-                        SaveConfig(L"config_gui.json");
+                        SaveConfig(g_configPath);
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 }
@@ -5846,11 +6529,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_winY = rc.top;
                 g_winW = rc.right - rc.left;
                 g_winH = rc.bottom - rc.top;
-                SaveConfig(L"config_gui.json");
+                SaveConfig(g_configPath);
             }
             RemoveTrayIcon();
             DestroyWindow(hwnd);
             return 0;
+        
+        case WM_USER + 102: {
+            // OSC接收器回调 - 切换暂停状态
+            DWORD now = GetTickCount();
+            
+            if (g_oscPaused) {
+                // 已经在暂停中 - 取消暂停，触发粒子爆发
+                MainDebugLog("[OSC Receiver] Canceling OSC pause");
+                
+                if (g_overlayHwnd) {
+                    RECT rc;
+                    GetClientRect(g_overlayHwnd, &rc);
+                    TriggerParticleBurst(rc.right / 2, rc.bottom / 2);
+                }
+                
+                g_oscPaused = false;
+                g_oscPauseEndTime = 0;
+                
+                // 延迟销毁（等粒子效果完成）
+                SetTimer(hwnd, 1001, 1500, nullptr);
+            } else {
+                // 开始新的暂停
+                g_oscPaused = true;
+                g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
+                MainDebugLog("[OSC Receiver] OSC paused for 30 seconds");
+                
+                // 创建覆盖层窗口
+                CreateOverlayWindow();
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         
         case WM_DESTROY:
             // Cleanup performance monitoring threads
@@ -5861,6 +6576,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_lyricsSearchThread.joinable()) {
                 g_lyricsSearchThread.join();
             }
+            
+            // 销毁覆盖层窗口
+            DestroyOverlayWindow();
+            
+            // 取消注册热键
+            UnregisterHotKey(hwnd, HOTKEY_OSC_PAUSE);
+            
+            // 移除低级键盘钩子
+            if (g_keyboardHook) {
+                UnhookWindowsHookEx(g_keyboardHook);
+                g_keyboardHook = nullptr;
+            }
+            
+            // 停止OSC接收器
+            if (g_oscReceiver) {
+                g_oscReceiver->stop();
+                delete g_oscReceiver;
+                g_oscReceiver = nullptr;
+            }
+            
             if (g_fontTitle) DeleteObject(g_fontTitle);
             if (g_fontSubtitle) DeleteObject(g_fontSubtitle);
             if (g_fontNormal) DeleteObject(g_fontNormal);
@@ -6493,6 +7228,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     InitializeCriticalSection(&g_cs);
     g_startTime = GetTickCount();
 
+    // 获取程序所在目录，设置配置文件绝对路径
+    GetModuleFileNameW(nullptr, g_configPath, MAX_PATH);
+    wchar_t* lastSlash = wcsrchr(g_configPath, L'\\');
+    if (lastSlash) {
+        wcscpy(lastSlash + 1, L"config_gui.json");
+        wcscpy(g_noLyricConfigPath, g_configPath);
+        wcscpy(wcsrchr(g_noLyricConfigPath, L'\\') + 1, L"config.json");
+    }
+
     // 初始化异步性能监控
     InitializePerfMonitoring();
 
@@ -6500,15 +7244,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     UpdateThemeColors();
     
     // Check if this is first run (config file doesn't exist)
-    bool isFirstRun = (_waccess(L"config_gui.json", 0) == -1);
+    bool isFirstRun = (_waccess(g_configPath, 0) == -1);
     if (isFirstRun) {
         g_minimizeToTray = ShowFirstRunDialog();
     }
     
-    LoadConfig(L"config_gui.json");
+    LoadConfig(g_configPath);
     UpdateThemeColors();  // 根据配置重新加载主题颜色
     
-    g_noLyricMsgs = LoadNoLyricMessages(L"config.json");
+    g_noLyricMsgs = LoadNoLyricMessages(g_noLyricConfigPath);
     if (g_noLyricMsgs.empty()) {
         g_noLyricMsgs = {
             L"~ \x6CA1\x6709\x6B4C\x8BCD ~",

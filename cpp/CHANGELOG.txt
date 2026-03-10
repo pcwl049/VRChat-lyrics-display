@@ -1,6 +1,23 @@
 # VRChat Lyrics Display 更新日志
 
-## v0.3.6 (当前版本)
+## v0.4.0 (当前版本)
+- 新增暂停功能：按快捷键（默认F10）暂停OSC发送30秒
+- 新增进度条覆盖层：暂停时在屏幕顶部显示剩余时间进度条
+- 新增粒子效果：暂停结束时有爆发粒子效果
+- 新增OSC接收器：支持VRChat手势触发暂停（无需管理员权限）
+  - 监听端口：9001
+  - 参数名称：LyricsPause
+  - 支持地址：/avatar/parameters/LyricsPause、/lyrics/pause
+- 改进键盘钩子：使用GetAsyncKeyState提高全屏模式兼容性
+- 设置页布局优化
+
+### VRChat OSC手势触发配置方法
+1. 在VRChat中打开OSC菜单：Quick Menu → Options → OSC
+2. 创建自定义参数：参数名 `LyricsPause`，类型 Bool 或 Float
+3. 绑定到手势（如ThumbsUp、RockNRoll等）
+4. 做出绑定的手势即可触发暂停/恢复
+
+## v0.3.6
 - 动画效果增强和渲染优化
 - 优化毛玻璃效果显示
 - 改进UI响应速度

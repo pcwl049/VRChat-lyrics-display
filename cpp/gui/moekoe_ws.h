@@ -49,6 +49,33 @@ private:
     SOCKET sock_ = INVALID_SOCKET;
 };
 
+// OSC Receiver for VRChat parameters (pause control via VRChat gestures)
+// Users can bind VRChat gestures to send OSC parameters
+class OSCReceiver {
+public:
+    using PauseCallback = std::function<void()>;
+    
+    OSCReceiver(int port = 9001);
+    ~OSCReceiver();
+    
+    void setPauseCallback(PauseCallback cb) { pauseCallback_ = cb; }
+    bool start();
+    void stop();
+    bool isRunning() const { return running_; }
+    int getPort() const { return port_; }
+    
+private:
+    void run();
+    bool parseOSCMessage(const uint8_t* data, size_t len);
+    std::string readString(const uint8_t* data, size_t len, size_t& pos);
+    
+    int port_;
+    SOCKET sock_ = INVALID_SOCKET;
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+    PauseCallback pauseCallback_;
+};
+
 class MoeKoeWS {
 public:
     using Callback = std::function<void(const SongInfo&)>;
