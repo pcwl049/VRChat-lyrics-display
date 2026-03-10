@@ -5706,37 +5706,100 @@ DWORD WINAPI WorkerThread1(LPVOID param) {
 DWORD WINAPI WorkerThread2(LPVOID param) {
     static IDXGIFactory1* pDXGIFactory = nullptr;
     static bool initialized = false;
+    
+    // 初始化LibreHardwareMonitor WMI连接（保底方案用于显存占用）
+    static IWbemServices* pLHMServices = nullptr;
+    static bool lhmInitialized = false;
+    static IWbemLocator* pLocator = nullptr;
 
     if (!initialized) {
         if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pDXGIFactory))) {
             initialized = true;
         }
+        
+        // 初始化LibreHardwareMonitor WMI
+        if (!lhmInitialized) {
+            if (SUCCEEDED(CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator))) {
+                if (SUCCEEDED(pLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLHMServices))) {
+                    CoSetProxyBlanket(pLHMServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+                    lhmInitialized = true;
+                }
+            }
+        }
     }
 
-    while (g_threadRunning[1] && pDXGIFactory) {
-        UINT adapterIndex = 0;
-        IDXGIAdapter1* pAdapter = nullptr;
-        while (pDXGIFactory->EnumAdapters1(adapterIndex, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
-            DXGI_ADAPTER_DESC1 desc;
-            if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
-                std::lock_guard<std::mutex> lock(g_perfDataMutex);
-                g_latestPerfData.gpuVramTotal = desc.DedicatedVideoMemory;
-                // Note: 获取已用显存需要更复杂的DXGI调用，这里暂时设为0
-                g_latestPerfData.gpuVramUsed = 0;
+    while (g_threadRunning[1] && (pDXGIFactory || lhmInitialized)) {
+        // 优先使用DXGI获取显存总量
+        if (pDXGIFactory) {
+            UINT adapterIndex = 0;
+            IDXGIAdapter1* pAdapter = nullptr;
+            while (pDXGIFactory->EnumAdapters1(adapterIndex, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
+                DXGI_ADAPTER_DESC1 desc;
+                if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
+                    std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                    g_latestPerfData.gpuVramTotal = desc.DedicatedVideoMemory;
+                    // Note: 获取已用显存需要更复杂的DXGI调用，这里暂时设为0
+                    g_latestPerfData.gpuVramUsed = 0;
 
+                    pAdapter->Release();
+                    break;  // 使用第一个适配器
+                }
                 pAdapter->Release();
-                break;  // 使用第一个适配器
+                adapterIndex++;
             }
-            pAdapter->Release();
-            adapterIndex++;
         }
+        
+        // 保底方案：使用LibreHardwareMonitor WMI获取显存占用
+        if (lhmInitialized && pLHMServices && g_latestPerfData.gpuVramUsed == 0) {
+            IEnumWbemClassObject* pEnumerator = nullptr;
+            HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
+                BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Data' AND Name='GPU Memory Used'"), 
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
+            
+            if (SUCCEEDED(hr) && pEnumerator) {
+                IWbemClassObject* pclsObj = nullptr;
+                ULONG uReturn = 0;
+                if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                    VARIANT vtProp;
+                    VariantInit(&vtProp);
+                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
+                        std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                        g_latestPerfData.gpuVramUsed = (ULONGLONG)(vtProp.fltVal * 1024 * 1024);  // 转换为字节
+                    }
+                    VariantClear(&vtProp);
+                    pclsObj->Release();
+                }
+                pEnumerator->Release();
+            }
+        }
+        
         Sleep(2000);  // 每2秒更新一次
     }
+    
+    // 清理
+    if (pLHMServices) pLHMServices->Release();
+    if (pLocator) pLocator->Release();
+    
     return 0;
 }
 
 // 线程3: NVML/ADL - GPU占用率
 DWORD WINAPI WorkerThread3(LPVOID param) {
+    static IWbemServices* pLHMServices = nullptr;
+    static bool lhmInitialized = false;
+    
+    // 初始化LibreHardwareMonitor WMI连接（保底方案）
+    if (!lhmInitialized) {
+        IWbemLocator* pLocator = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator))) {
+            if (SUCCEEDED(pLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLHMServices))) {
+                CoSetProxyBlanket(pLHMServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+                lhmInitialized = true;
+            }
+            pLocator->Release();
+        }
+    }
+    
     while (g_threadRunning[2]) {
         int gpuUsage = 0;
 
@@ -5761,6 +5824,29 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
                 }
             }
         }
+        
+        // 保底方案：使用LibreHardwareMonitor WMI
+        if (gpuUsage == 0 && lhmInitialized && pLHMServices) {
+            IEnumWbemClassObject* pEnumerator = nullptr;
+            HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
+                BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Load' AND Name='GPU Core'"), 
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
+            
+            if (SUCCEEDED(hr) && pEnumerator) {
+                IWbemClassObject* pclsObj = nullptr;
+                ULONG uReturn = 0;
+                if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                    VARIANT vtProp;
+                    VariantInit(&vtProp);
+                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
+                        gpuUsage = (int)vtProp.fltVal;
+                    }
+                    VariantClear(&vtProp);
+                    pclsObj->Release();
+                }
+                pEnumerator->Release();
+            }
+        }
 
         // 更新共享数据
         {
@@ -5771,6 +5857,10 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
 
         Sleep(2000);  // 每2秒更新一次
     }
+    
+    // 清理LibreHardwareMonitor WMI
+    if (pLHMServices) pLHMServices->Release();
+    
     return 0;
 }
 
@@ -5780,6 +5870,10 @@ DWORD WINAPI WorkerThread4(LPVOID param) {
     static bool wmiInitialized = false;
     static IWbemLocator* pLocator = nullptr;
     static IWbemServices* pServices = nullptr;
+    
+    // 初始化LibreHardwareMonitor WMI连接（保底方案）
+    static IWbemServices* pLHMServices = nullptr;
+    static bool lhmInitialized = false;
 
     if (!wmiInitialized) {
         HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator);
@@ -5793,49 +5887,71 @@ DWORD WINAPI WorkerThread4(LPVOID param) {
             }
         }
     }
+    
+    // 初始化LibreHardwareMonitor WMI
+    if (!lhmInitialized && pLocator) {
+        if (SUCCEEDED(pLocator->ConnectServer(BSTR(L"ROOT\\LibreHardwareMonitor"), nullptr, nullptr, 0, 0, 0, 0, &pLHMServices))) {
+            CoSetProxyBlanket(pLHMServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+            lhmInitialized = true;
+        }
+    }
 
-    while (g_threadRunning[3] && wmiInitialized && pServices) {
+    while (g_threadRunning[3] && (wmiInitialized || lhmInitialized)) {
         int cpuTemp = 0;
         int gpuTemp = 0;
 
-        // 获取CPU温度
-        IEnumWbemClassObject* pEnumerator = nullptr;
-        HRESULT hr = pServices->ExecQuery(BSTR(L"WQL"), BSTR(L"SELECT * FROM Win32_PerfFormattedData_Counters WHERE Name LIKE '%Processor Time%'"), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
+        // 方法1: 尝试使用 MSAcpi_ThermalZoneTemperature 获取温度
+        if (wmiInitialized && pServices) {
+            IEnumWbemClassObject* pTempEnum = nullptr;
+            HRESULT hr = pServices->ExecQuery(BSTR(L"WQL"), BSTR(L"SELECT * FROM MSAcpi_ThermalZoneTemperature WHERE Active=True"), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pTempEnum);
 
-        if (SUCCEEDED(hr) && pEnumerator) {
-            IWbemClassObject* pclsObj = nullptr;
-            ULONG uReturn = 0;
-            if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                // CPU温度通常在 MSAcpi_ThermalZoneTemperature 中
-                pclsObj->Release();
-            }
-            pEnumerator->Release();
-        }
-
-        // 尝试使用 MSAcpi_ThermalZoneTemperature 获取温度
-        IEnumWbemClassObject* pTempEnum = nullptr;
-        hr = pServices->ExecQuery(BSTR(L"WQL"), BSTR(L"SELECT * FROM MSAcpi_ThermalZoneTemperature WHERE Active=True"), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pTempEnum);
-
-        if (SUCCEEDED(hr) && pTempEnum) {
-            IWbemClassObject* pclsObj = nullptr;
-            ULONG uReturn = 0;
-            while (pTempEnum->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
-                VARIANT vtProp;
-                VariantInit(&vtProp);
-                hr = pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0);
-                if (SUCCEEDED(hr) && vtProp.vt == VT_I4) {
-                    // 温度是以0.1开尔文为单位的
-                    int tempK = vtProp.lVal / 10;
-                    int tempC = tempK - 273;  // 转换为摄氏度
-                    if (tempC > 0 && tempC < 150) {  // 合理的温度范围
-                        cpuTemp = tempC;
-                        break;
+            if (SUCCEEDED(hr) && pTempEnum) {
+                IWbemClassObject* pclsObj = nullptr;
+                ULONG uReturn = 0;
+                while (pTempEnum->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                    VARIANT vtProp;
+                    VariantInit(&vtProp);
+                    hr = pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0);
+                    if (SUCCEEDED(hr) && vtProp.vt == VT_I4) {
+                        // 温度是以0.1开尔文为单位的
+                        int tempK = vtProp.lVal / 10;
+                        int tempC = tempK - 273;  // 转换为摄氏度
+                        if (tempC > 0 && tempC < 150) {  // 合理的温度范围
+                            cpuTemp = tempC;
+                            break;
+                        }
                     }
+                    VariantClear(&vtProp);
+                    pclsObj->Release();
                 }
-                VariantClear(&vtProp);
-                pclsObj->Release();
+                pTempEnum->Release();
             }
-            pTempEnum->Release();
+        }
+        
+        // 保底方案：使用LibreHardwareMonitor WMI
+        if (cpuTemp == 0 && lhmInitialized && pLHMServices) {
+            IEnumWbemClassObject* pEnumerator = nullptr;
+            HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
+                BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Temperature' AND (Name='CPU Core' OR Name='CPU Package' OR Name='CPU')"), 
+                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
+            
+            if (SUCCEEDED(hr) && pEnumerator) {
+                IWbemClassObject* pclsObj = nullptr;
+                ULONG uReturn = 0;
+                while (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                    VARIANT vtProp;
+                    VariantInit(&vtProp);
+                    if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
+                        cpuTemp = (int)vtProp.fltVal;
+                        if (cpuTemp > 0 && cpuTemp < 150) {
+                            break;
+                        }
+                    }
+                    VariantClear(&vtProp);
+                    pclsObj->Release();
+                }
+                pEnumerator->Release();
+            }
         }
 
         // 更新共享数据
@@ -5851,6 +5967,7 @@ DWORD WINAPI WorkerThread4(LPVOID param) {
     // 清理WMI
     if (pServices) pServices->Release();
     if (pLocator) pLocator->Release();
+    if (pLHMServices) pLHMServices->Release();
 
     return 0;
 }
