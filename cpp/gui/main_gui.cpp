@@ -1502,23 +1502,10 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     }
     
     // === RAM信息 ===
-    double ramTotalGB = (double)g_ramTotal / 1024.0 / 1024.0 / 1024.0;
     double ramUsedGB = (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0;
     
-    msg += L"💾";
-    if (g_ramTotal > 0) {
-        wchar_t ramInfoBuf[32];
-        swprintf_s(ramInfoBuf, L"%.0fG", ramTotalGB);
-        msg += ramInfoBuf;
-    } else {
-        msg += L"RAM";
-    }
-    msg += L" 📊";
-    if (g_latestPerfData.ramUsed > 0 && g_ramTotal > 0) {
-        wchar_t ramBuf[32];
-        swprintf_s(ramBuf, L"%.1fG/%.0fG", ramUsedGB, ramTotalGB);
-        msg += ramBuf;
-    } else if (g_latestPerfData.ramUsed > 0) {
+    msg += L"💾RAM 📊";
+    if (g_latestPerfData.ramUsed > 0) {
         wchar_t ramBuf[32];
         swprintf_s(ramBuf, L"%.1fG", ramUsedGB);
         msg += ramBuf;
@@ -1551,13 +1538,8 @@ std::wstring BuildPerformanceOSCMessage(int type) {
         msg += L"N/A";
     }
     msg += L" 🎞️";
-    double vramTotalGB = (double)g_gpuMemTotal / 1024.0;
     double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
-    if (g_gpuMemUsed > 0 && g_gpuMemTotal > 0) {
-        wchar_t gpuMemBuf[32];
-        swprintf_s(gpuMemBuf, L"%.1fG/%.0fG", vramUsedGB, vramTotalGB);
-        msg += gpuMemBuf;
-    } else if (g_gpuMemUsed > 0) {
+    if (g_gpuMemUsed > 0) {
         wchar_t gpuMemBuf[32];
         swprintf_s(gpuMemBuf, L"%.1fG", vramUsedGB);
         msg += gpuMemBuf;
