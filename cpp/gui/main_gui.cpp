@@ -1364,9 +1364,9 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     msg += L"\n";
     
     // CPU进度条
-    int cpuFilled = (int)(g_cpuUsage / 100.0 * 8);
+    int cpuFilled = (int)(g_cpuUsage / 100.0 * 7);
     msg += L"[";
-    for (int i = 0; i < 8; i++) msg += (i < cpuFilled) ? L"█" : L"░";
+    for (int i = 0; i < 7; i++) msg += (i < cpuFilled) ? L"█" : L"░";
     msg += L"]\n";
     
     // RAM信息
@@ -1384,9 +1384,9 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     msg += L"\n";
     
     // RAM进度条
-    int ramFilled = (int)(g_ramUsage / 100.0 * 8);
+    int ramFilled = (int)(g_ramUsage / 100.0 * 7);
     msg += L"[";
-    for (int i = 0; i < 8; i++) msg += (i < ramFilled) ? L"█" : L"░";
+    for (int i = 0; i < 7; i++) msg += (i < ramFilled) ? L"█" : L"░";
     msg += L"]\n";
     
     // GPU信息
@@ -1409,12 +1409,12 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     
     // GPU进度条
     if (g_latestPerfData.gpuUsageValid) {
-        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 8);
+        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 7);
         msg += L"[";
-        for (int i = 0; i < 8; i++) msg += (i < gpuFilled) ? L"█" : L"░";
+        for (int i = 0; i < 7; i++) msg += (i < gpuFilled) ? L"█" : L"░";
         msg += L"]";
     } else {
-        msg += L"[░░░░░░░░]";
+        msg += L"[░░░░░░░]";
     }
     
     return msg;
