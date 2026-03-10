@@ -5829,8 +5829,11 @@ DWORD WINAPI WorkerThread4(LPVOID param) {
                 if (SUCCEEDED(hr) && vtProp.vt == VT_I4) {
                     // 温度是以0.1开尔文为单位的
                     int tempK = vtProp.lVal / 10;
-                    cpuTemp = tempK - 273;  // 转换为摄氏度
-                    break;  // 使用第一个温度传感器
+                    int tempC = tempK - 273;  // 转换为摄氏度
+                    if (tempC > 0 && tempC < 150) {  // 合理的温度范围
+                        cpuTemp = tempC;
+                        break;
+                    }
                 }
                 VariantClear(&vtProp);
                 pclsObj->Release();
@@ -5843,7 +5846,6 @@ DWORD WINAPI WorkerThread4(LPVOID param) {
             std::lock_guard<std::mutex> lock(g_perfDataMutex);
             g_latestPerfData.cpuTemp = cpuTemp;
             g_latestPerfData.cpuTempValid = (cpuTemp > 0);
-            // GPU温度暂未实现
         }
 
         Sleep(2000);  // 每2秒更新一次
