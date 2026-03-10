@@ -11,6 +11,27 @@
 
 namespace moekoe {
 
+// Check if a port is open (for Netease debug mode detection)
+static bool isPortOpen(int port) {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return false;
+    
+    // Set timeout
+    DWORD timeout = 1000;  // 1 second
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
+    int result = connect(sock, (sockaddr*)&addr, sizeof(addr));
+    closesocket(sock);
+    
+    return (result == 0);
+}
+
 // Debug log to file - use temp directory
 static void DebugLog(const char* msg) {
     char tempPath[MAX_PATH];
@@ -151,6 +172,16 @@ std::string NeteaseWS::receiveMessage() {
 bool NeteaseWS::connect() {
     DebugLog("[Netease] connect() called");
     if (running_) return true;
+    
+    // 检测调试端口是否开启
+    if (!isPortOpen(port_)) {
+        songInfo_.title = L"\x8FDE\x63A5\x5931\x8D25";
+        songInfo_.artist = L"\x7F51\x6613\x4E91\x672A\x5F00\x542F\x8C03\x8BD5\x6A21\x5F0F\xFF08\x7AEF\x53E3" + std::to_wstring(port_) + L"\xFF09";
+        songInfo_.hasData = true;
+        if (callback_) callback_(songInfo_);
+        DebugLog("[Netease] Port check failed - debug mode not enabled");
+        return false;
+    }
     
     songInfo_.title = L"\x6B63\x5728\x8FDE\x63A5...";
     songInfo_.artist = L"";

@@ -1853,7 +1853,14 @@ void ExportLogs(HWND hwnd) {
 
 std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     std::wstring msg;
-    if (!info.hasData || info.title.empty()) return L"\x7B49\x5F85\x97F3\x4E50...";
+    if (!info.hasData || info.title.empty()) {
+        // 根据连接状态显示不同提示
+        if (!g_isConnected) {
+            return L"\x672A\x8FDE\x63A5 - \x70B9\x51FB\x5DE6\x4FA7\"\x8FDE\x63A5\"\x6309\x94AE";  // 未连接 - 点击左侧"连接"按钮
+        } else {
+            return L"\x7B49\x5F85\x97F3\x4E50\x64AD\x653E...";  // 等待音乐播放...
+        }
+    }
     
     const size_t MAX_MSG_LEN = 144;
     
