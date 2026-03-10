@@ -3750,7 +3750,10 @@ void OnPaint(HWND hwnd) {
         // === Auto Detect Button ===
         int btnW = leftColW - 36;
         int btnH = 36;
-        int btnY = showSystemInfo ? (modeBtnY + modeBtnH + 20 + 140 + 20) : (modeBtnY + modeBtnH + 20);
+        // 使用expandAnim平滑计算按钮位置，使其随系统信息展开而移动
+        int baseBtnY = modeBtnY + modeBtnH + 20;
+        int expandedBtnY = baseBtnY + 140 + 20;
+        int btnY = (int)(baseBtnY + (expandedBtnY - baseBtnY) * expandAnim);
         DrawButtonAnim(memDC, CARD_PADDING + 18, btnY, btnW, btnH, L"\x81EA\x52A8\x68C0\x6D4B", g_btnAutoDetectAnim, false);
 
         // === Show Order Button ===
