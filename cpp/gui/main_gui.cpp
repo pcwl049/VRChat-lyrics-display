@@ -1467,7 +1467,7 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     msg += cpuBuf;
     if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
         wchar_t tempBuf[16];
-        swprintf_s(tempBuf, L" 🌡️%.0f°C", g_latestPerfData.cpuTemp);
+        swprintf_s(tempBuf, L" 🌡️%d°C", g_latestPerfData.cpuTemp);
         msg += tempBuf;
     }
     msg += L"\n";
@@ -1490,15 +1490,7 @@ std::wstring BuildPerformanceOSCMessage(int type) {
                 msg += L"░";  // 空格
             }
         }
-        msg += L"] ";
-        wchar_t labelBuf[32];
-        if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
-            swprintf_s(labelBuf, L"%.0f%%占用,%.0f°C", g_cpuUsage, (double)g_latestPerfData.cpuTemp);
-        } else {
-            swprintf_s(labelBuf, L"%.0f%%占用", g_cpuUsage);
-        }
-        msg += labelBuf;
-        msg += L"\n";
+        msg += L"]\n";
     }
     
     // === RAM信息 ===
@@ -1521,18 +1513,14 @@ std::wstring BuildPerformanceOSCMessage(int type) {
         for (int i = 0; i < 7; i++) {
             msg += (i < ramFilled) ? L"█" : L"░";
         }
-        msg += L"] ";
-        wchar_t labelBuf[16];
-        swprintf_s(labelBuf, L"%.0f%%", g_ramUsage);
-        msg += labelBuf;
-        msg += L"\n";
+        msg += L"]\n";
     }
     
     // === GPU信息 ===
     msg += L"🎮" + g_gpuDisplayName + L" ";
     if (g_latestPerfData.gpuUsageValid) {
         wchar_t gpuBuf[32];
-        swprintf_s(gpuBuf, L"%.0f%%", g_latestPerfData.gpuUsage);
+        swprintf_s(gpuBuf, L"%d%%", g_latestPerfData.gpuUsage);
         msg += gpuBuf;
     } else {
         msg += L"N/A";
@@ -1567,17 +1555,9 @@ std::wstring BuildPerformanceOSCMessage(int type) {
                 msg += L"░";  // 空格
             }
         }
-        msg += L"] ";
-        wchar_t labelBuf[48];
-        if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
-            double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
-            swprintf_s(labelBuf, L"%.0f%%占用,%.0f%%显存", g_latestPerfData.gpuUsage, vramPercent);
-        } else {
-            swprintf_s(labelBuf, L"%.0f%%占用", g_latestPerfData.gpuUsage);
-        }
-        msg += labelBuf;
+        msg += L"]\n";
     } else {
-        msg += L"[░░░░░░░] N/A";
+        msg += L"[░░░░░░░]\n";
     }
     
     return msg;
@@ -2155,7 +2135,7 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
             // Line 3: System info compact
             wchar_t buf3[40];
             if (g_latestPerfData.gpuUsageValid) {
-                swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG G:%.0f%%", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0, g_latestPerfData.gpuUsage);
+                swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG G:%d%%", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0, g_latestPerfData.gpuUsage);
             } else {
                 swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0);
             }
