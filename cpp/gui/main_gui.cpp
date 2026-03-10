@@ -1535,6 +1535,17 @@ void LoadConfig(const wchar_t* path) {
     
     // Load skipped version
     g_skipVersion = getStr("skip_version");
+    
+    // Initialize system info expand animation based on performance mode
+    if (g_performanceMode == 1) {
+        // Performance mode: fully expanded
+        g_systemInfoExpandAnim.value = 1.0;
+        g_systemInfoExpandAnim.target = 1.0;
+    } else {
+        // Music mode: fully collapsed
+        g_systemInfoExpandAnim.value = 0.0;
+        g_systemInfoExpandAnim.target = 0.0;
+    }
 }
 
 void SaveConfig(const wchar_t* path) {
