@@ -1457,10 +1457,10 @@ int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
 }
 
 std::wstring BuildPerformanceOSCMessage(int type) {
-    // 一次性显示所有硬件信息
+    // 一次性显示所有硬件信息（新格式）
     std::wstring msg;
     
-    // CPU信息
+    // === CPU信息 ===
     msg += L"⚡" + g_cpuDisplayName + L" ";
     wchar_t cpuBuf[32];
     swprintf_s(cpuBuf, L"%.0f%%", g_cpuUsage);
@@ -1472,30 +1472,76 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     }
     msg += L"\n";
     
-    // CPU进度条
-    int cpuFilled = (int)(g_cpuUsage / 100.0 * 7);
-    msg += L"[";
-    for (int i = 0; i < 7; i++) msg += (i < cpuFilled) ? L"█" : L"░";
-    msg += L"]\n";
+    // CPU进度条（双标记：占用率+温度）
+    {
+        int cpuFilled = (int)(g_cpuUsage / 100.0 * 20);  // 20格进度条
+        int tempPos = -1;
+        if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
+            tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 20);  // 温度按100°C上限
+            if (tempPos > 20) tempPos = 20;
+        }
+        msg += L"[";
+        for (int i = 0; i < 20; i++) {
+            if (i == tempPos && tempPos >= 0) {
+                msg += L"│";  // 温度标记
+            } else if (i < cpuFilled) {
+                msg += L"█";  // 占用率填充
+            } else {
+                msg += L"░";  // 空格
+            }
+        }
+        msg += L"] ";
+        wchar_t labelBuf[32];
+        if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
+            swprintf_s(labelBuf, L"%.0f%%占用,%.0f°C", g_cpuUsage, (double)g_latestPerfData.cpuTemp);
+        } else {
+            swprintf_s(labelBuf, L"%.0f%%占用", g_cpuUsage);
+        }
+        msg += labelBuf;
+        msg += L"\n";
+    }
     
-    // RAM信息
-    msg += L"💾" + g_ramDisplayName + L" ";
-    if (g_latestPerfData.ramUsed > 0) {
+    // === RAM信息 ===
+    double ramTotalGB = (double)g_ramTotal / 1024.0 / 1024.0 / 1024.0;
+    double ramUsedGB = (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0;
+    
+    msg += L"💾";
+    if (g_ramTotal > 0) {
+        wchar_t ramInfoBuf[32];
+        swprintf_s(ramInfoBuf, L"%.0fG", ramTotalGB);
+        msg += ramInfoBuf;
+    } else {
+        msg += L"RAM";
+    }
+    msg += L" 📊";
+    if (g_latestPerfData.ramUsed > 0 && g_ramTotal > 0) {
         wchar_t ramBuf[32];
-        swprintf_s(ramBuf, L"%.1fG", (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0);
+        swprintf_s(ramBuf, L"%.1fG/%.0fG", ramUsedGB, ramTotalGB);
+        msg += ramBuf;
+    } else if (g_latestPerfData.ramUsed > 0) {
+        wchar_t ramBuf[32];
+        swprintf_s(ramBuf, L"%.1fG", ramUsedGB);
         msg += ramBuf;
     } else {
         msg += L"N/A";
     }
     msg += L"\n";
     
-    // RAM进度条
-    int ramFilled = (int)(g_ramUsage / 100.0 * 7);
-    msg += L"[";
-    for (int i = 0; i < 7; i++) msg += (i < ramFilled) ? L"█" : L"░";
-    msg += L"]\n";
+    // RAM进度条（单标记）
+    {
+        int ramFilled = (int)(g_ramUsage / 100.0 * 20);
+        msg += L"[";
+        for (int i = 0; i < 20; i++) {
+            msg += (i < ramFilled) ? L"█" : L"░";
+        }
+        msg += L"] ";
+        wchar_t labelBuf[16];
+        swprintf_s(labelBuf, L"%.0f%%", g_ramUsage);
+        msg += labelBuf;
+        msg += L"\n";
+    }
     
-    // GPU信息
+    // === GPU信息 ===
     msg += L"🎮" + g_gpuDisplayName + L" ";
     if (g_latestPerfData.gpuUsageValid) {
         wchar_t gpuBuf[32];
@@ -1504,30 +1550,52 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     } else {
         msg += L"N/A";
     }
-    if (g_gpuMemUsed > 0) {
+    msg += L" 🎞️";
+    double vramTotalGB = (double)g_gpuMemTotal / 1024.0;
+    double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
+    if (g_gpuMemUsed > 0 && g_gpuMemTotal > 0) {
         wchar_t gpuMemBuf[32];
-        swprintf_s(gpuMemBuf, L" 🎞️%.1fG", (double)g_gpuMemUsed / 1024.0);
+        swprintf_s(gpuMemBuf, L"%.1fG/%.0fG", vramUsedGB, vramTotalGB);
         msg += gpuMemBuf;
+    } else if (g_gpuMemUsed > 0) {
+        wchar_t gpuMemBuf[32];
+        swprintf_s(gpuMemBuf, L"%.1fG", vramUsedGB);
+        msg += gpuMemBuf;
+    } else {
+        msg += L"N/A";
     }
     msg += L"\n";
     
-    // GPU进度条（使用率)
+    // GPU进度条（双标记：占用率+显存）
     if (g_latestPerfData.gpuUsageValid) {
-        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 7);
-        msg += L"[";
-        for (int i = 0; i < 7; i++) msg += (i < gpuFilled) ? L"█" : L"░";
-        msg += L"]\n";
-
-        // 显存进度条（使用竖线）
+        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 20);
+        int vramPos = -1;
         if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
             double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
-            int vramFilled = (int)(vramPercent / 100.0 * 7);
-            msg += L"[";
-            for (int i = 0; i < 7; i++) msg += (i < vramFilled) ? L"│" : L" ";
-            msg += L"]";
+            vramPos = (int)(vramPercent / 100.0 * 20);
+            if (vramPos > 20) vramPos = 20;
         }
+        msg += L"[";
+        for (int i = 0; i < 20; i++) {
+            if (i == vramPos && vramPos >= 0) {
+                msg += L"│";  // 显存标记
+            } else if (i < gpuFilled) {
+                msg += L"█";  // 占用率填充
+            } else {
+                msg += L"░";  // 空格
+            }
+        }
+        msg += L"] ";
+        wchar_t labelBuf[48];
+        if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
+            double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
+            swprintf_s(labelBuf, L"%.0f%%占用,%.0f%%显存", g_latestPerfData.gpuUsage, vramPercent);
+        } else {
+            swprintf_s(labelBuf, L"%.0f%%占用", g_latestPerfData.gpuUsage);
+        }
+        msg += labelBuf;
     } else {
-        msg += L"[░░░░░░░]";
+        msg += L"[░░░░░░░░░░░░░░░░░░░░] N/A";
     }
     
     return msg;
