@@ -6035,43 +6035,113 @@ void InitializePerfMonitoring() {
 
     // 加载NVML库（NVIDIA）
 
-    if (g_gpuVendor == GPU_NVIDIA) {
 
-        g_nvmlDll = LoadLibraryW(L"nvml.dll");
 
-        if (g_nvmlDll) {
-
-            nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
-
-            nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
-
-            nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
-
-            nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
-
-            nvmlDeviceGetName = (nvmlDeviceGetName_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetName");
+        if (g_gpuVendor == GPU_NVIDIA) {
 
 
 
-            if (nvmlInit && nvmlDeviceGetHandleByIndex && nvmlDeviceGetUtilizationRates) {
+            g_nvmlDll = LoadLibraryW(L"nvml.dll");
 
-                if (nvmlInit() == 0) {
 
-                    g_nvmlAvailable = true;
 
-                    if (nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice) != 0) {
+            if (g_nvmlDll) {
 
-                        g_nvmlDevice = nullptr;
+
+
+                nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
+
+
+
+                nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
+
+
+
+                nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
+
+
+
+                nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
+
+
+
+                nvmlDeviceGetName = (nvmlDeviceGetName_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetName");
+
+
+
+    
+
+
+
+                if (nvmlInit && nvmlDeviceGetHandleByIndex && nvmlDeviceGetUtilizationRates) {
+
+
+
+                    int initResult = nvmlInit();
+
+
+
+                    if (initResult == 0) {
+
+
+
+                        g_nvmlAvailable = true;
+
+
+
+                        
+
+
+
+                        int handleResult = nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice);
+
+
+
+                        if (handleResult != 0) {
+
+
+
+                            g_nvmlDevice = nullptr;
+
+
+
+                            // 获取设备句柄失败，可能需要管理员权限
+
+
+
+                        }
+
+
+
+                    } else {
+
+
+
+                        // nvmlInit失败，可能需要管理员权限或NVIDIA驱动未正确安装
+
+
 
                     }
 
+
+
                 }
+
+
+
+            } else {
+
+
+
+                // nvml.dll未找到，可能需要安装NVIDIA驱动或NVIDIA System Tools
+
+
 
             }
 
-        }
 
-    }
+
+        }
 
 
 
