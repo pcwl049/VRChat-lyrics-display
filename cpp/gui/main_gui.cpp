@@ -1185,7 +1185,14 @@ bool g_lhmAvailable = false;
 typedef int (*nvmlInit_t)();
 typedef int (*nvmlShutdown_t)();
 typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int, void*);
-typedef int (*nvmlDeviceGetUtilizationRates_t)(void*, unsigned int*);
+
+// NVML Utilization结构体
+typedef struct nvmlUtilization_st {
+    unsigned int gpu;       // GPU使用率
+    unsigned int memory;    // 内存使用率
+} nvmlUtilization_t;
+
+typedef int (*nvmlDeviceGetUtilizationRates_t)(void*, nvmlUtilization_t*);
 typedef int (*nvmlDeviceGetName_t)(void*, char*, unsigned int);
 
 static HMODULE g_nvmlDll = nullptr;
@@ -5807,9 +5814,9 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
             // NVIDIA NVML
             void* device = nullptr;
             if (nvmlDeviceGetHandleByIndex(0, &device) == 0) {
-                unsigned int utilization = 0;
+                nvmlUtilization_t utilization;
                 if (nvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
-                    gpuUsage = (int)utilization;
+                    gpuUsage = (int)utilization.gpu;
                 }
             }
         } else if (g_gpuVendor == GPU_AMD && g_adlAvailable && ADL_Main_Control_Create && ADL_Overdrive5_CurrentActivity_Get) {
