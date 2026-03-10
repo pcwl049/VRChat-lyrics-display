@@ -28,22 +28,90 @@
 #pragma comment(lib, "gdiplus.lib")
 using namespace Gdiplus;
 
-// Debug log using Windows API - write to user temp directory
-static void MainDebugLog(const char* msg) {
+// Log levels
+enum LogLevel {
+    LOG_DEBUG,
+    LOG_INFO,
+    LOG_WARNING,
+    LOG_ERROR
+};
+
+static const char* LOG_LEVEL_STR[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
+
+// Log rotation settings
+static const long long MAX_LOG_SIZE = 10 * 1024 * 1024;  // 10MB
+static const int MAX_LOG_FILES = 5;
+
+// Rotate log files if current log exceeds MAX_LOG_SIZE
+static void RotateLogFile(const char* basePath) {
+    HANDLE hFile = CreateFileA(basePath, 
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    
+    if (hFile != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER fileSize;
+        if (GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart >= MAX_LOG_SIZE) {
+            CloseHandle(hFile);
+            
+            // Delete oldest log file (_5)
+            char oldPath[MAX_PATH];
+            sprintf_s(oldPath, "%s_5", basePath);
+            DeleteFileA(oldPath);
+            
+            // Rotate log files: _4 -> _5, _3 -> _4, _2 -> _3, _1 -> _2
+            for (int i = 4; i >= 1; i--) {
+                char srcPath[MAX_PATH];
+                char dstPath[MAX_PATH];
+                sprintf_s(srcPath, "%s_%d", basePath, i);
+                sprintf_s(dstPath, "%s_%d", basePath, i + 1);
+                MoveFileA(srcPath, dstPath);
+            }
+            
+            // Move current log to _1
+            char rotatedPath[MAX_PATH];
+            sprintf_s(rotatedPath, "%s_1", basePath);
+            MoveFileA(basePath, rotatedPath);
+        } else {
+            CloseHandle(hFile);
+        }
+    }
+}
+
+// Debug log using Windows API - write to user temp directory with timestamp and level
+static void MainDebugLog(const char* msg, LogLevel level = LOG_INFO) {
     char tempPath[MAX_PATH];
     GetTempPathA(MAX_PATH, tempPath);
     strcat_s(tempPath, "\\vrclayrics_debug.log");
+    
+    // Check and rotate log file if needed
+    RotateLogFile(tempPath);
+    
+    // Get current timestamp
+    time_t now = time(nullptr);
+    struct tm t;
+    localtime_s(&t, &now);
+    char timestamp[32];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &t);
+    
+    // Format: [2026-03-10 15:30:45] [INFO] message
+    char formattedMsg[4096];
+    sprintf_s(formattedMsg, "[%s] [%s] %s", timestamp, LOG_LEVEL_STR[level], msg);
     
     HANDLE hFile = CreateFileA(tempPath, 
         FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         DWORD written;
-        WriteFile(hFile, msg, (DWORD)strlen(msg), &written, NULL);
+        WriteFile(hFile, formattedMsg, (DWORD)strlen(formattedMsg), &written, NULL);
         WriteFile(hFile, "\r\n", 2, &written, NULL);
         CloseHandle(hFile);
     }
-    OutputDebugStringA(msg);
+    OutputDebugStringA(formattedMsg);
 }
+
+// Convenience macros for logging
+#define LOG_DEBUG(msg) MainDebugLog(msg, LOG_DEBUG)
+#define LOG_INFO(msg) MainDebugLog(msg, LOG_INFO)
+#define LOG_WARNING(msg) MainDebugLog(msg, LOG_WARNING)
+#define LOG_ERROR(msg) MainDebugLog(msg, LOG_ERROR)
 #include <shellapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
@@ -1691,39 +1759,82 @@ void ExportLogs(HWND hwnd) {
     LeaveCriticalSection(&g_cs);
     allLogs += "\n";
     
-    // Read vrclayrics_debug.log
-    allLogs += "=== vrclayrics_debug.log ===\n";
+    // Read vrclayrics_debug.log (last 400 lines)
+    allLogs += "=== vrclayrics_debug.log (last 400 lines) ===\n";
     char vrclayricsLogPath[MAX_PATH];
     sprintf_s(vrclayricsLogPath, "%svrclayrics_debug.log", tempPath);
     FILE* mf = fopen(vrclayricsLogPath, "r");
     if (mf) {
         char buf[4096];
+        std::vector<std::string> allLines;
         while (fgets(buf, sizeof(buf), mf)) {
-            allLogs += buf;
+            allLines.push_back(buf);
         }
         fclose(mf);
+        
+        // Get last 400 lines
+        int startLine = (int)allLines.size() - 400;
+        if (startLine < 0) startLine = 0;
+        for (int i = startLine; i < (int)allLines.size(); i++) {
+            allLogs += allLines[i];
+        }
+        allLogs += "... (" + std::to_string(allLines.size()) + " total lines, showing last 400)\n";
     } else {
         allLogs += "(log file not found)\n";
     }
     allLogs += "\n";
     
-    // Read netease_debug.log
-    allLogs += "=== netease_debug.log ===\n";
+    // Read netease_debug.log (last 400 lines)
+    allLogs += "=== netease_debug.log (last 400 lines) ===\n";
     char neteaseLogPath[MAX_PATH];
     sprintf_s(neteaseLogPath, "%snetease_debug.log", tempPath);
     FILE* nf = fopen(neteaseLogPath, "r");
     if (nf) {
         char buf[4096];
+        std::vector<std::string> allLines;
         while (fgets(buf, sizeof(buf), nf)) {
-            allLogs += buf;
+            allLines.push_back(buf);
         }
         fclose(nf);
+        
+        // Get last 400 lines
+        int startLine = (int)allLines.size() - 400;
+        if (startLine < 0) startLine = 0;
+        for (int i = startLine; i < (int)allLines.size(); i++) {
+            allLogs += allLines[i];
+        }
+        allLogs += "... (" + std::to_string(allLines.size()) + " total lines, showing last 400)\n";
     } else {
         allLogs += "(log file not found)\n";
     }
     allLogs += "\n";
     
-    // Collect recent errors (last 50 lines containing "ERROR" or "error" or "fail")
+    // Read smtc_debug.log (last 400 lines)
+    allLogs += "=== smtc_debug.log (last 400 lines) ===\n";
+    char smtcLogPath[MAX_PATH];
+    sprintf_s(smtcLogPath, "%ssmtc_debug.log", tempPath);
+    FILE* sf = fopen(smtcLogPath, "r");
+    if (sf) {
+        char buf[4096];
+        std::vector<std::string> allLines;
+        while (fgets(buf, sizeof(buf), sf)) {
+            allLines.push_back(buf);
+        }
+        fclose(sf);
+        
+        // Get last 400 lines
+        int startLine = (int)allLines.size() - 400;
+        if (startLine < 0) startLine = 0;
+        for (int i = startLine; i < (int)allLines.size(); i++) {
+            allLogs += allLines[i];
+        }
+        allLogs += "... (" + std::to_string(allLines.size()) + " total lines, showing last 400)\n";
+    } else {
+        allLogs += "(log file not found)\n";
+    }
+    allLogs += "\n";
+    
+    // Collect recent errors (last 50 lines containing error keywords)
     allLogs += "=== Recent Errors (from all logs) ===\n";
     std::vector<std::string> errorLines;
     
@@ -1743,9 +1854,28 @@ void ExportLogs(HWND hwnd) {
             std::string line = allLines[i];
             std::string lowerLine = line;
             for (char& c : lowerLine) c = tolower(c);
-            if (lowerLine.find("error") != std::string::npos ||
-                lowerLine.find("fail") != std::string::npos ||
-                lowerLine.find("exception") != std::string::npos) {
+            
+            // Check for English error keywords
+            bool isError = (lowerLine.find("error") != std::string::npos ||
+                          lowerLine.find("fail") != std::string::npos ||
+                          lowerLine.find("exception") != std::string::npos ||
+                          lowerLine.find("warning") != std::string::npos);
+            
+            // Check for Chinese error keywords
+            if (!isError) {
+                // UTF-8 Chinese keywords
+                const char* chineseErrors[] = {
+                    "错误", "失败", "异常", "无法", "拒绝", "未找到", "不支持"
+                };
+                for (const char* keyword : chineseErrors) {
+                    if (line.find(keyword) != std::string::npos) {
+                        isError = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (isError) {
                 errorLines.push_back(std::string("[") + logName + "] " + line);
             }
         }
@@ -1753,6 +1883,7 @@ void ExportLogs(HWND hwnd) {
     
     extractErrors(vrclayricsLogPath, "main");
     extractErrors(neteaseLogPath, "netease");
+    extractErrors(smtcLogPath, "smtc");
     
     if (errorLines.empty()) {
         allLogs += "(no recent errors found)\n";
@@ -5829,15 +5960,24 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
 
         if (g_gpuVendor == GPU_NVIDIA && g_nvmlAvailable && nvmlInit && nvmlDeviceGetUtilizationRates) {
             // NVIDIA NVML
+            LOG_DEBUG("[GPU] Trying NVML detection...");
             void* device = nullptr;
             if (nvmlDeviceGetHandleByIndex(0, &device) == 0) {
                 nvmlUtilization_t utilization;
                 if (nvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
                     gpuUsage = (int)utilization.gpu;
+                    char msg[128];
+                    sprintf_s(msg, "[GPU] NVML detection successful: %d%%", gpuUsage);
+                    LOG_INFO(msg);
+                } else {
+                    LOG_WARNING("[GPU] NVML utilization query failed");
                 }
+            } else {
+                LOG_WARNING("[GPU] NVML device handle failed");
             }
         } else if (g_gpuVendor == GPU_AMD && g_adlAvailable && ADL_Main_Control_Create && ADL_Overdrive5_CurrentActivity_Get) {
             // AMD ADL
+            LOG_DEBUG("[GPU] Trying AMD ADL detection...");
             int adapterCount = 0;
             if (ADL_Adapter_NumberOfAdapters_Get(&adapterCount) == 0 && adapterCount > 0) {
                 // ADL_Adapter_AdapterInfo_Get 需要适配器信息结构
@@ -5845,12 +5985,20 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
                 int activity = 0;
                 if (ADL_Overdrive5_CurrentActivity_Get(0, &activity, nullptr, nullptr, nullptr) == 0) {
                     gpuUsage = activity;
+                    char msg[128];
+                    sprintf_s(msg, "[GPU] AMD ADL detection successful: %d%%", gpuUsage);
+                    LOG_INFO(msg);
+                } else {
+                    LOG_WARNING("[GPU] AMD ADL utilization query failed");
                 }
+            } else {
+                LOG_WARNING("[GPU] AMD ADL adapter enumeration failed");
             }
         }
         
         // 保底方案1: 使用nvidia-smi命令行工具（NVIDIA）
         if (gpuUsage == 0 && g_gpuVendor == GPU_NVIDIA) {
+            LOG_DEBUG("[GPU] Trying nvidia-smi detection...");
             STARTUPINFOW si = { sizeof(si)};
             PROCESS_INFORMATION pi = {0};
             SECURITY_ATTRIBUTES sa = { sizeof(sa)};
@@ -5889,8 +6037,14 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
                     gpuUsage = atoi(output.c_str());
                     if (gpuUsage < 0) gpuUsage = 0;
                     if (gpuUsage > 100) gpuUsage = 100;
+                    char msg[128];
+                    sprintf_s(msg, "[GPU] nvidia-smi detection successful: %d%%", gpuUsage);
+                    LOG_INFO(msg);
+                } else {
+                    LOG_WARNING("[GPU] nvidia-smi returned empty output");
                 }
             } else {
+                LOG_WARNING("[GPU] nvidia-smi process creation failed");
                 if (hReadPipe) CloseHandle(hReadPipe);
                 if (hWritePipe) CloseHandle(hWritePipe);
             }
@@ -5898,6 +6052,7 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
         
         // 保底方案2: 使用LibreHardwareMonitor WMI
         if (gpuUsage == 0 && lhmInitialized && pLHMServices) {
+            LOG_DEBUG("[GPU] Trying LibreHardwareMonitor WMI detection...");
             IEnumWbemClassObject* pEnumerator = nullptr;
             HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
                 BSTR(L"SELECT Value FROM Sensor WHERE SensorType='Load' AND Name='GPU Core'"), 
@@ -5911,11 +6066,20 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
                     VariantInit(&vtProp);
                     if (SUCCEEDED(pclsObj->Get(L"Value", 0, &vtProp, 0, 0)) && vtProp.vt == VT_R4) {
                         gpuUsage = (int)vtProp.fltVal;
+                        char msg[128];
+                        sprintf_s(msg, "[GPU] LibreHardwareMonitor WMI detection successful: %d%%", gpuUsage);
+                        LOG_INFO(msg);
+                    } else {
+                        LOG_WARNING("[GPU] LibreHardwareMonitor WMI query failed");
                     }
                     VariantClear(&vtProp);
                     pclsObj->Release();
+                } else {
+                    LOG_WARNING("[GPU] LibreHardwareMonitor WMI no data returned");
                 }
                 pEnumerator->Release();
+            } else {
+                LOG_WARNING("[GPU] LibreHardwareMonitor WMI query failed");
             }
         }
 
@@ -5924,6 +6088,9 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
             std::lock_guard<std::mutex> lock(g_perfDataMutex);
             g_latestPerfData.gpuUsage = gpuUsage;
             g_latestPerfData.gpuUsageValid = (gpuUsage > 0);
+            if (gpuUsage == 0) {
+                LOG_DEBUG("[GPU] All detection methods failed, GPU usage = 0");
+            }
         }
 
         Sleep(2000);  // 每2秒更新一次

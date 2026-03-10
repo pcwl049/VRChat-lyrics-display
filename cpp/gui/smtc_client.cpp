@@ -19,6 +19,49 @@ using namespace winrt::Windows::ApplicationModel;
 
 namespace smtc {
 
+// Log levels
+enum LogLevel {
+    LOG_DEBUG,
+    LOG_INFO,
+    LOG_WARNING,
+    LOG_ERROR
+};
+
+static const char* LOG_LEVEL_STR[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
+
+// Debug log to file - use temp directory
+static void DebugLog(const char* msg, LogLevel level = LOG_INFO) {
+    char tempPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    strcat_s(tempPath, "\\smtc_debug.log");
+    
+    // Get current timestamp
+    time_t now = time(nullptr);
+    struct tm t;
+    localtime_s(&t, &now);
+    char timestamp[32];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &t);
+    
+    // Format: [2026-03-10 15:30:45] [INFO] message
+    char formattedMsg[4096];
+    sprintf_s(formattedMsg, "[%s] [%s] %s", timestamp, LOG_LEVEL_STR[level], msg);
+    
+    HANDLE hFile = CreateFileA(tempPath, 
+        FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(hFile, formattedMsg, (DWORD)strlen(formattedMsg), &written, NULL);
+        WriteFile(hFile, "\r\n", 2, &written, NULL);
+        CloseHandle(hFile);
+    }
+}
+
+// Convenience macros for logging
+#define LOG_DEBUG(msg) DebugLog(msg, LOG_DEBUG)
+#define LOG_INFO(msg) DebugLog(msg, LOG_INFO)
+#define LOG_WARNING(msg) DebugLog(msg, LOG_WARNING)
+#define LOG_ERROR(msg) DebugLog(msg, LOG_ERROR)
+
 // Convert WinRT TimeSpan to seconds
 static double TimeSpanToSeconds(TimeSpan ts) {
     return std::chrono::duration<double>(ts).count();
@@ -46,8 +89,10 @@ bool SMTCClient::isAvailable() {
         init_apartment(apartment_type::single_threaded);
         // Try to request the manager - this will fail on older Windows
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+        LOG_INFO("[SMTC] SMTC is available");
         return manager != nullptr;
     } catch (...) {
+        LOG_WARNING("[SMTC] SMTC not available (WinRT API not supported)");
         return false;
     }
 }
@@ -68,7 +113,9 @@ bool SMTCClient::start() {
         // Initialize WinRT apartment
         init_apartment(apartment_type::single_threaded);
         initialized_ = true;
+        LOG_INFO("[SMTC] Client started successfully");
     } catch (...) {
+        LOG_ERROR("[SMTC] Failed to initialize WinRT apartment");
         return false;
     }
     
@@ -79,32 +126,50 @@ bool SMTCClient::start() {
 
 void SMTCClient::stop() {
     running_ = false;
+    LOG_INFO("[SMTC] Client stopped");
     if (thread_.joinable()) {
         thread_.join();
     }
 }
 
 void SMTCClient::run() {
+    LOG_INFO("[SMTC] run() started");
+    
     try {
         // Request session manager
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
         manager_ = reinterpret_cast<void*>(winrt::get_abi(manager));
+        LOG_INFO("[SMTC] Session manager acquired successfully");
         
         // Subscribe to current session changed event
         auto token = manager.CurrentSessionChanged([this](auto&&, auto&&) {
+            LOG_DEBUG("[SMTC] CurrentSessionChanged event fired");
             processMediaUpdate();
         });
         
         // Subscribe to media properties changed for all sessions
         auto sessions = manager.GetSessions();
+        char msg[128];
+        sprintf_s(msg, "[SMTC] Found sessions: %d", sessions.Size());
+        LOG_INFO(msg);
+        
         for (auto session : sessions) {
+            auto appId = session.SourceAppUserModelId();
+            std::string appIdStr(appId.begin(), appId.end());
+            char sessionMsg[256];
+            sprintf_s(sessionMsg, "[SMTC] Session: %s", appIdStr.c_str());
+            LOG_DEBUG(sessionMsg);
+            
             session.MediaPropertiesChanged([this](auto&&, auto&&) {
+                LOG_DEBUG("[SMTC] MediaPropertiesChanged event fired");
                 processMediaUpdate();
             });
             session.PlaybackInfoChanged([this](auto&&, auto&&) {
+                LOG_DEBUG("[SMTC] PlaybackInfoChanged event fired");
                 processMediaUpdate();
             });
             session.TimelinePropertiesChanged([this](auto&&, auto&&) {
+                LOG_DEBUG("[SMTC] TimelinePropertiesChanged event fired");
                 processMediaUpdate();
             });
         }
@@ -124,12 +189,14 @@ void SMTCClient::run() {
     } catch (const winrt::hresult_error& e) {
         // WinRT error
         char msg[256];
-        sprintf_s(msg, "SMTC Error: 0x%08X", e.code().value);
-        OutputDebugStringA(msg);
+        sprintf_s(msg, "[SMTC] WinRT Error: 0x%08X", e.code().value);
+        LOG_ERROR(msg);
     } catch (...) {
         // Other error
-        OutputDebugStringA("SMTC: Unknown error");
+        LOG_ERROR("[SMTC] Unknown error in run()");
     }
+    
+    LOG_INFO("[SMTC] run() exited");
 }
 
 void SMTCClient::processMediaUpdate() {
