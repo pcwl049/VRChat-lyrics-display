@@ -1402,11 +1402,9 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     } else {
         msg += L"N/A";
     }
-    if (g_gpuMemTotal > 0) {
+    if (g_gpuMemUsed > 0) {
         wchar_t gpuMemBuf[32];
-        swprintf_s(gpuMemBuf, L" 🎞️%.1fG/%.1fG", 
-            (double)g_gpuMemUsed / 1024.0,
-            (double)g_gpuMemTotal / 1024.0);
+        swprintf_s(gpuMemBuf, L" 🎞️%.1fG", (double)g_gpuMemUsed / 1024.0);
         msg += gpuMemBuf;
     }
     msg += L"\n";
@@ -4751,7 +4749,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             // === Tab clicks ===
             int tabW = 80;
-            for (int t = 0; t < 2; t++) {
+            for (int t = 0; t < 3; t++) {  // 3个标签页：主页、性能、设置
                 int tabX = CARD_PADDING + 18 + t * (tabW + 8);
                 if (IsInRect(x, y, tabX, tabY, tabW, tabH)) {
                     if (g_currentTab != t) {
