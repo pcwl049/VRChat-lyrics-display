@@ -1140,6 +1140,16 @@ void NeteaseWS::parseLrcLyrics(const std::string& lrc, const std::string& tLrc) 
     
     // Create LyricLine objects
     for (const auto& line : lines) {
+        // 跳过空歌词行
+        if (line.second.empty()) continue;
+        
+        // 跳过只包含时间戳的行（去掉时间戳后为空）
+        std::wstring trimmedText = line.second;
+        while (!trimmedText.empty() && (trimmedText[0] == L' ' || trimmedText[0] == L'\t')) {
+            trimmedText = trimmedText.substr(1);
+        }
+        if (trimmedText.empty()) continue;
+        
         LyricLine ll;
         ll.startTime = static_cast<int>(line.first);
         ll.text = line.second;

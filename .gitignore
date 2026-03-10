@@ -51,3 +51,6 @@ KuGouMusicApi/
 *.py
 requirements.txt
 start.bat
+
+.iflow/
+gha-creds-*.json

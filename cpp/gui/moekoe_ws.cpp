@@ -397,10 +397,15 @@ static std::vector<LyricLine> parseKRC(const std::string& krcData) {
                         }
                         
                         if (!text.empty() && startTime >= 0) {
-                            // Skip metadata lines like "�̽��� - ׹��" at the start
+                            // Skip metadata lines like "歌手 - 歌名" at the start
                             if (lyrics.empty() && startTime == 0) {
-                                // Check if it's artist-title line
+                                // Check if it's artist-title line (contains " - ")
                                 if (text.find(" - ") != std::string::npos) {
+                                    line.clear();
+                                    continue;
+                                }
+                                // Also skip lines that look like metadata (short, no time)
+                                if (text.length() < 5) {
                                     line.clear();
                                     continue;
                                 }
@@ -409,12 +414,40 @@ static std::vector<LyricLine> parseKRC(const std::string& krcData) {
                             LyricLine lyric;
                             lyric.startTime = startTime;
                             lyric.duration = duration;
-                            // Convert UTF-8 to wstring
+                            
+                            // Convert UTF-8 to wstring with better error handling
                             int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
                             if (wlen > 0) {
                                 lyric.text.resize(wlen - 1);
-                                MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &lyric.text[0], wlen);
+                                int converted = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &lyric.text[0], wlen);
+                                
+                                // If conversion failed or text is empty, skip this line
+                                if (converted == 0 || lyric.text.empty()) {
+                                    if (f) {
+                                        fprintf(f, "Warning: UTF-8 conversion failed for text: [%s] (error: %d)\n", text.c_str(), GetLastError());
+                                    }
+                                    line.clear();
+                                    continue;
+                                }
+                                
+                                // Debug output
+                                if (f && lyrics.size() < 5) {
+                                    std::string utf8Text;
+                                    int len = WideCharToMultiByte(CP_UTF8, 0, lyric.text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                                    if (len > 0) {
+                                        utf8Text.resize(len - 1);
+                                        WideCharToMultiByte(CP_UTF8, 0, lyric.text.c_str(), -1, &utf8Text[0], len, nullptr, nullptr);
+                                        fprintf(f, "Converted: [%s]\n", utf8Text.c_str());
+                                    }
+                                }
+                            } else {
+                                if (f) {
+                                    fprintf(f, "Warning: Could not determine UTF-8 length for text: [%s]\n", text.c_str());
+                                }
+                                line.clear();
+                                continue;
                             }
+                            
                             lyrics.push_back(lyric);
                         }
                     }

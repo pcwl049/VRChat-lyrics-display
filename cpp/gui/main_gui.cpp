@@ -68,8 +68,101 @@ static void MainDebugLog(const char* msg) {
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
 
+// 从Git配置自动检测仓库地址（变量定义）
+std::string g_autoDetectedRepo = "";
+
+// 从Git配置自动检测仓库地址（函数实现）
+std::string GetRepoFromGitConfig() {
+    std::string repoPath = ".git/config";
+    
+    // 读取.git/config文件
+    FILE* f = fopen(repoPath.c_str(), "r");
+    if (!f) {
+        return GITHUB_REPO;  // 读取失败，使用默认值
+    }
+    
+    char line[512];
+    std::string originUrl = "";
+    
+    while (fgets(line, sizeof(line), f)) {
+        std::string str = line;
+        // 查找 [remote "origin"] 部分
+        if (str.find("[remote \"origin\"]") != std::string::npos) {
+            // 继续读取，直到找到url
+            while (fgets(line, sizeof(line), f)) {
+                std::string urlLine = line;
+                if (urlLine.find("[") != std::string::npos) {
+                    break;  // 遇到新的section，停止
+                }
+                if (urlLine.find("url") != std::string::npos) {
+                    // 提取url
+                    size_t pos = urlLine.find("=");
+                    if (pos != std::string::npos) {
+                        originUrl = urlLine.substr(pos + 1);
+                        // 去除前后空白
+                        size_t start = originUrl.find_first_not_of(" \t");
+                        size_t end = originUrl.find_last_not_of(" \t\r\n");
+                        if (start != std::string::npos && end != std::string::npos) {
+                            originUrl = originUrl.substr(start, end - start + 1);
+                        }
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    fclose(f);
+    
+    if (originUrl.empty()) {
+        return GITHUB_REPO;  // 未找到origin，使用默认值
+    }
+    
+    // 解析GitHub URL
+    // 支持格式：
+    // https://github.com/owner/repo.git
+    // git@github.com:owner/repo.git
+    std::string ownerRepo = "";
+    
+    if (originUrl.find("github.com") != std::string::npos) {
+        size_t startPos = originUrl.find("github.com");
+        if (startPos != std::string::npos) {
+            startPos += 11;  // 跳过"github.com"
+            
+            // 处理https://或git@开头
+            if (originUrl.find("https://") != std::string::npos) {
+                // https://github.com/owner/repo.git
+                startPos += 1;  // 跳过"/"
+            } else if (originUrl.find("git@") != std::string::npos) {
+                // git@github.com:owner/repo.git
+                startPos += 1;  // 跳过":"
+            } else {
+                startPos += 1;  // 跳过"/"
+            }
+            
+            // 提取 owner/repo
+            ownerRepo = originUrl.substr(startPos);
+            // 去除.git后缀
+            size_t gitPos = ownerRepo.find(".git");
+            if (gitPos != std::string::npos) {
+                ownerRepo = ownerRepo.substr(0, gitPos);
+            }
+        }
+    }
+    
+    if (ownerRepo.empty()) {
+        return GITHUB_REPO;  // 解析失败，使用默认值
+    }
+    
+    return ownerRepo;
+}
+
+std::string GetGitHubApiUrl(const std::string& repo) {
+    return "https://api.github.com/repos/" + repo + "/releases/latest";
+}
+
 // Theme colors (支持深浅色模式)
-bool g_darkMode = true;  // 默认深色模式
+bool g_darkMode = true;  // 固定深色模式
 
 // Dark theme colors
 struct ThemeColors {
@@ -81,39 +174,21 @@ struct ThemeColors {
 ThemeColors g_colors;
 
 void UpdateThemeColors() {
-    if (g_darkMode) {
-        // Dark theme (毛玻璃深空蓝主题)
-        g_colors.bgStart = RGB(18, 18, 24);
-        g_colors.bgEnd = RGB(18, 18, 24);
-        g_colors.bg = RGB(18, 18, 24);
-        g_colors.card = RGB(30, 40, 60);
-        g_colors.cardBorder = RGB(50, 70, 100);
-        g_colors.accent = RGB(80, 180, 255);
-        g_colors.accentGlow = RGB(60, 140, 220);
-        g_colors.text = RGB(240, 245, 255);
-        g_colors.textDim = RGB(140, 150, 170);
-        g_colors.border = RGB(50, 70, 100);
-        g_colors.titlebar = RGB(20, 28, 45);
-        g_colors.editBg = RGB(35, 45, 65);
-        g_colors.glassTint = RGB(20, 30, 50);
-        g_colors.glassAlpha = 100;  // 大幅降低不透明度，让毛玻璃非常明显
-    } else {
-        // Light theme (柔和深灰蓝主题 - 彻底避免过曝)
-        g_colors.bgStart = RGB(140, 145, 155);
-        g_colors.bgEnd = RGB(140, 145, 155);
-        g_colors.bg = RGB(140, 145, 155);  // 中灰色背景
-        g_colors.card = RGB(165, 170, 180);  // 卡片稍亮
-        g_colors.cardBorder = RGB(100, 110, 125);
-        g_colors.accent = RGB(35, 115, 200);
-        g_colors.accentGlow = RGB(25, 95, 170);
-        g_colors.text = RGB(30, 35, 45);
-        g_colors.textDim = RGB(70, 80, 95);
-        g_colors.border = RGB(100, 110, 125);
-        g_colors.titlebar = RGB(125, 130, 140);
-        g_colors.editBg = RGB(150, 155, 165);
-        g_colors.glassTint = RGB(110, 120, 135);
-        g_colors.glassAlpha = 80;  // 大幅提高透明度，让毛玻璃非常明显
-    }
+    // 固定使用深色主题 (毛玻璃深空蓝主题)
+    g_colors.bgStart = RGB(18, 18, 24);
+    g_colors.bgEnd = RGB(18, 18, 24);
+    g_colors.bg = RGB(18, 18, 24);
+    g_colors.card = RGB(30, 40, 60);
+    g_colors.cardBorder = RGB(50, 70, 100);
+    g_colors.accent = RGB(80, 180, 255);
+    g_colors.accentGlow = RGB(60, 140, 220);
+    g_colors.text = RGB(240, 245, 255);
+    g_colors.textDim = RGB(140, 150, 170);
+    g_colors.border = RGB(50, 70, 100);
+    g_colors.titlebar = RGB(20, 28, 45);
+    g_colors.editBg = RGB(35, 45, 65);
+    g_colors.glassTint = RGB(20, 30, 50);
+    g_colors.glassAlpha = 100;  // 大幅降低不透明度，让毛玻璃非常明显
 }
 
 // Color access macros (保持兼容性)
@@ -133,16 +208,16 @@ void UpdateThemeColors() {
 #define GLASS_ALPHA g_colors.glassAlpha
 
 // Theme-dependent colors (根据主题自动选择)
-#define COLOR_BTN_BG (g_darkMode ? RGB(40, 40, 55) : RGB(225, 230, 240))
-#define COLOR_BTN_HOVER (g_darkMode ? RGB(55, 55, 75) : RGB(210, 215, 225))
-#define COLOR_MENU_BG (g_darkMode ? RGB(35, 40, 50) : RGB(240, 242, 248))
-#define COLOR_MENU_BORDER (g_darkMode ? RGB(70, 75, 85) : RGB(180, 185, 195))
-#define COLOR_MENU_HOVER (g_darkMode ? RGB(50, 55, 65) : RGB(225, 230, 240))
-#define COLOR_BOX_BG (g_darkMode ? RGB(40, 45, 55) : RGB(248, 250, 255))
-#define COLOR_BOX_HOVER (g_darkMode ? RGB(50, 55, 65) : RGB(235, 240, 250))
-#define COLOR_BOX_BORDER (g_darkMode ? RGB(60, 65, 75) : RGB(190, 195, 205))
-#define COLOR_BOX_BORDER_HOVER (g_darkMode ? RGB(80, 90, 110) : RGB(150, 160, 175))
-#define COLOR_CHECK_BG (g_darkMode ? RGB(50, 50, 65) : RGB(220, 225, 235))
+#define COLOR_BTN_BG RGB(40, 40, 55)
+#define COLOR_BTN_HOVER RGB(55, 55, 75)
+#define COLOR_MENU_BG RGB(35, 40, 50)
+#define COLOR_MENU_BORDER RGB(70, 75, 85)
+#define COLOR_MENU_HOVER RGB(50, 55, 65)
+#define COLOR_BOX_BG RGB(40, 45, 55)
+#define COLOR_BOX_HOVER RGB(50, 55, 65)
+#define COLOR_BOX_BORDER RGB(60, 65, 75)
+#define COLOR_BOX_BORDER_HOVER RGB(80, 90, 110)
+#define COLOR_CHECK_BG RGB(50, 50, 65)
 #define COLOR_CHECK_ACCENT COLOR_ACCENT
 #define COLOR_SUCCESS RGB(80, 200, 120)
 #define COLOR_WARNING RGB(255, 180, 50)
@@ -681,7 +756,12 @@ bool CheckForUpdate(bool manualCheck = false) {
     HINTERNET hConnect = WinHttpConnect(hSession, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
     
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/repos/pcwl049/VRChat-lyrics-display/releases/latest", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    // 使用自动检测的仓库地址
+    std::string repo = g_autoDetectedRepo.empty() ? GITHUB_REPO : g_autoDetectedRepo;
+    std::string path = "/repos/" + repo + "/releases/latest";
+    std::wstring wpath(path.begin(), path.end());
+    
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
     
     BOOL bResult = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
@@ -1405,7 +1485,7 @@ std::string BuildPerformanceOSCMessage(int type) {
                 msg += L"│";
             }
         }
-        msg += L]";
+        msg += L"]";
     }
 
     return WstringToUtf8(msg);
@@ -1503,7 +1583,7 @@ void LoadConfig(const wchar_t* path) {
     g_showPerfOnPause = getBool("show_perf_on_pause", true);
     g_autoUpdate = getBool("auto_update", true);
     g_showPlatform = getBool("show_platform", true);
-    g_darkMode = getBool("dark_mode", true);
+    // g_darkMode固定为true，不再从配置加载
 
     // Apply theme
     UpdateThemeColors();
@@ -1533,7 +1613,7 @@ void SaveConfig(const wchar_t* path) {
             g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false",
             g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
             g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
-            g_darkMode ? "true" : "false", g_autoStart ? "true" : "false");
+            "true", g_autoStart ? "true" : "false");  // g_darkMode固定为true
     fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
     fprintf(f, "  \"skip_version\": \"%ls\"\n}\n", g_skipVersion.c_str());
@@ -2070,26 +2150,14 @@ void EnableBlurBehind(HWND hwnd) {
     auto fn = (SetWindowCompositionAttribute_t)GetProcAddress(hUser, "SetWindowCompositionAttribute");
     
     if (fn) {
-        if (g_darkMode) {
-            // Dark mode: 深色毛玻璃
-            ACCENT_POLICY policy = { 4, 2, (COLOR_GLASS_TINT & 0xFFFFFF) | (GLASS_ALPHA << 24), 0 };
-            struct _WINDOWCOMPOSITIONATTRIBDATA {
-                int Attrib;
-                void* pvData;
-                int cbData;
-            } data = { 19, &policy, sizeof(policy) };
-            fn(hwnd, &data);
-        } else {
-            // Light mode: 浅色毛玻璃，使用更柔和的颜色
-            COLORREF lightTint = RGB(200, 205, 215);
-            ACCENT_POLICY policy = { 4, 2, (lightTint & 0xFFFFFF) | (200 << 24), 0 };
-            struct _WINDOWCOMPOSITIONATTRIBDATA {
-                int Attrib;
-                void* pvData;
-                int cbData;
-            } data = { 19, &policy, sizeof(policy) };
-            fn(hwnd, &data);
-        }
+        // 固定使用深色模式毛玻璃
+        ACCENT_POLICY policy = { 4, 2, (COLOR_GLASS_TINT & 0xFFFFFF) | (GLASS_ALPHA << 24), 0 };
+        struct _WINDOWCOMPOSITIONATTRIBDATA {
+            int Attrib;
+            void* pvData;
+            int cbData;
+        } data = { 19, &policy, sizeof(policy) };
+        fn(hwnd, &data);
     }
     
     FreeLibrary(hUser);
@@ -2121,7 +2189,7 @@ void UpdateWindowSystemTheme(HWND hwnd) {
             int corner = 2;  // ROUND - 使用系统圆角
             fn(hwnd, 33, &corner, sizeof(corner));
             // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            BOOL dark = g_darkMode ? TRUE : FALSE;
+            BOOL dark = TRUE;  // 固定深色模式
             fn(hwnd, 20, &dark, sizeof(dark));
         }
         FreeLibrary(hDwm);
@@ -2381,20 +2449,53 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             SelectObject(tempDC, oldFont);
             
-            // Content
+            // Content with word wrap
             HFONT contentFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
             oldFont = (HFONT)SelectObject(tempDC, contentFont);
             int lineY = 70;
             int lineH = 32;
+            int maxWidth = w - 60;  // 减去左右边距
+            
             std::wstring content = g_dialogConfig.content;
             size_t pos = 0;
             while (pos < content.length()) {
                 size_t nextPos = content.find(L'\n', pos);
                 if (nextPos == std::wstring::npos) nextPos = content.length();
                 std::wstring line = content.substr(pos, nextPos - pos);
-                TextOutW(tempDC, 25, lineY, line.c_str(), (int)line.length());
-                lineY += lineH;
                 pos = nextPos + 1;
+                
+                // 如果这一行太长，需要自动换行
+                if (line.length() > 0) {
+                    SIZE textSize;
+                    GetTextExtentPoint32W(tempDC, line.c_str(), (int)line.length(), &textSize);
+                    
+                    if (textSize.cx > maxWidth && line.length() > 1) {
+                        // 需要换行，按字符分割
+                        std::wstring wrappedLine;
+                        for (size_t i = 0; i < line.length(); i++) {
+                            std::wstring testLine = wrappedLine + line[i];
+                            GetTextExtentPoint32W(tempDC, testLine.c_str(), (int)testLine.length(), &textSize);
+                            
+                            if (textSize.cx > maxWidth && !wrappedLine.empty()) {
+                                // 输出当前行
+                                TextOutW(tempDC, 30, lineY, wrappedLine.c_str(), (int)wrappedLine.length());
+                                lineY += lineH;
+                                wrappedLine = line[i];
+                            } else {
+                                wrappedLine += line[i];
+                            }
+                        }
+                        // 输出最后一行
+                        if (!wrappedLine.empty()) {
+                            TextOutW(tempDC, 30, lineY, wrappedLine.c_str(), (int)wrappedLine.length());
+                            lineY += lineH;
+                        }
+                    } else {
+                        // 行长度合适，直接输出
+                        TextOutW(tempDC, 30, lineY, line.c_str(), (int)line.length());
+                        lineY += lineH;
+                    }
+                }
             }
             SelectObject(tempDC, oldFont);
             
@@ -3002,8 +3103,8 @@ void DrawButtonAnim(HDC hdc, int x, int y, int w, int h, const wchar_t* text, An
 
 void DrawTitleBarButton(HDC hdc, int x, int y, int size, const wchar_t* symbol, Animation& anim) {
     double hover = anim.value;
-    COLORREF bgBase = g_darkMode ? RGB(35, 35, 40) : RGB(220, 225, 235);
-    COLORREF bgHover = g_darkMode ? RGB(60, 60, 70) : RGB(200, 205, 215);
+    COLORREF bgBase = RGB(35, 35, 40);
+    COLORREF bgHover = RGB(60, 60, 70);
     int r = (int)(GetRValue(bgBase) + (GetRValue(bgHover) - GetRValue(bgBase)) * hover);
     int g = (int)(GetGValue(bgBase) + (GetGValue(bgHover) - GetGValue(bgBase)) * hover);
     int b = (int)(GetBValue(bgBase) + (GetBValue(bgHover) - GetBValue(bgBase)) * hover);
@@ -3097,8 +3198,8 @@ void OnPaint(HWND hwnd) {
         int btnY = 14;
         int btnSize = 38;
         double hover = g_btnUpdateAnim.value;
-        COLORREF bgBase = g_darkMode ? RGB(35, 35, 40) : RGB(220, 225, 235);
-        COLORREF bgHover = g_darkMode ? RGB(60, 60, 70) : RGB(200, 205, 215);
+        COLORREF bgBase = RGB(35, 35, 40);
+        COLORREF bgHover = RGB(60, 60, 70);
         int r = (int)(GetRValue(bgBase) + (GetRValue(bgHover) - GetRValue(bgBase)) * hover);
         int g = (int)(GetGValue(bgBase) + (GetGValue(bgHover) - GetGValue(bgBase)) * hover);
         int b = (int)(GetBValue(bgBase) + (GetBValue(bgHover) - GetBValue(bgBase)) * hover);
@@ -3119,7 +3220,7 @@ void OnPaint(HWND hwnd) {
             graphics.SetTransform(&matrix);
             
             // 绘制搜索图标 (🔍)
-            Gdiplus::SolidBrush textBrush(g_darkMode ? Gdiplus::Color(180, 180, 190) : Gdiplus::Color(100, 100, 110));
+            Gdiplus::SolidBrush textBrush(Gdiplus::Color(180, 180, 190));  // 固定深色模式颜色
             Gdiplus::FontFamily fontFamily(L"Segoe UI Emoji");
             Gdiplus::Font font(&fontFamily, 16, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
             Gdiplus::StringFormat format;
@@ -3160,8 +3261,7 @@ void OnPaint(HWND hwnd) {
     }
 
     // Title bar buttons (order: Theme, Update, Minimize, Close)
-    const wchar_t* themeIcon = g_darkMode ? L"\u263D" : L"\u2600";  // Moon or Sun
-    DrawTitleBarButton(memDC, w - 210, 14, 38, themeIcon, g_btnThemeAnim);
+    // 主题切换按钮已移除，固定深色模式
     // Update button at w - 160 (drawn above)
     DrawTitleBarButton(memDC, w - 110, 14, 38, L"\u2500", g_btnMinAnim);  // Minimize
     DrawTitleBarButton(memDC, w - 60, 14, 38, L"\u2715", g_btnCloseAnim);  // Close
@@ -3192,7 +3292,7 @@ void OnPaint(HWND hwnd) {
         
         // 非活动标签绘制背景（悬停或默认）
         if (!isActive || g_tabSlideAnim.isActive()) {
-            COLORREF tabBg = isHover ? (g_darkMode ? RGB(60, 60, 80) : RGB(230, 235, 245)) : (g_darkMode ? RGB(40, 40, 55) : RGB(245, 248, 255));
+            COLORREF tabBg = isHover ? RGB(60, 60, 80) : RGB(40, 40, 55);
             DrawRoundRect(memDC, tabX, tabY, tabW, tabH, 8, tabBg);
         }
     }
@@ -4369,6 +4469,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             MainDebugLog("[Main] WM_CREATE - Application starting");
+            
+            // 从Git配置自动检测仓库地址
+            g_autoDetectedRepo = GetRepoFromGitConfig();
+            std::string logMsg = "[Main] Auto-detected repo: " + g_autoDetectedRepo;
+            MainDebugLog(logMsg.c_str());
+            
             // Fonts - larger for high DPI
             g_fontTitle = CreateFontW(48, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
@@ -4603,7 +4709,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_windowScaleAnim.target = 1.0;
                 g_windowScaleAnim.speed = 0.12;
                 
-                g_darkMode = !g_darkMode;
+                // 深浅色切换功能已移除，固定使用深色模式
+// g_darkMode = !g_darkMode;  // 已禁用
                 UpdateThemeColors();
                 EnableBlurBehind(hwnd);
                 UpdateWindowSystemTheme(hwnd);
