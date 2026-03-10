@@ -35,7 +35,14 @@ void GlassWindow::Paint(HDC hdc) {
     int h = rc.bottom - rc.top;
     
     HDC memDC = CreateCompatibleDC(hdc);
+    if (!memDC) return;
+    
     HBITMAP memBitmap = CreateCompatibleBitmap(hdc, w, h);
+    if (!memBitmap) {
+        DeleteDC(memDC);
+        return;
+    }
+    
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
     
     // Dark gradient background

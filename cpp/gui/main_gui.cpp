@@ -15,7 +15,13 @@
 #include <wincrypt.h>
 #include <dwmapi.h>
 #include <psapi.h>
+#include <dxgi1_4.h>
+#include <wbemidl.h>
 #include <cstdio>
+#include <mutex>
+#include <atomic>
+#include <thread>
+#pragma comment(lib, "wbemuuid.lib")
 
 // GDI+ for anti-aliased rendering
 #include <gdiplus.h>
@@ -165,6 +171,19 @@ const int CARD_PADDING = 25;
 // Forward declarations
 std::string WstringToUtf8(const std::wstring& wstr);
 std::wstring Utf8ToWstring(const std::string& str);
+int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length);
+std::wstring BuildProgressBar(double progress, int bars);
+std::string BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
+
+// 异步性能检测线程函数
+DWORD WINAPI WorkerThread1(LPVOID param);  // 原生API: CPU/RAM
+DWORD WINAPI WorkerThread2(LPVOID param);  // DXGI: GPU显存
+DWORD WINAPI WorkerThread3(LPVOID param);  // NVML/ADL: GPU占用率
+DWORD WINAPI WorkerThread4(LPVOID param);  // LibreHardwareMonitor: 温度
+
+// 初始化函数
+void InitializePerfMonitoring();
+void ShutdownPerfMonitoring();
 
 // Animation helpers
 struct Animation {
@@ -210,6 +229,9 @@ const DWORD STARTUP_ANIM_DURATION = 500;  // 启动动画时长(ms)
 // Tab slide animation state
 int g_prevTab = 0;
 int g_tabSlideDirection = 0;  // -1 = left, 1 = right
+Animation g_displayModeSlideAnim;  // 显示模式滑动动画
+int g_prevDisplayMode = 0;  // 显示模式滑动动画的前一个模式
+Animation g_systemInfoExpandAnim;  // 系统信息展开动画
 
 // Global state
 CRITICAL_SECTION g_cs;
@@ -253,11 +275,33 @@ int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
 bool g_autoPlatformSwitch = false; // Auto switch platforms when playing (disabled by default)
 const DWORD PLATFORM_SWITCH_DELAY = 2000; // Wait 2s before switching platforms
-int g_currentTab = 0;        // 0=Main, 1=Settings
-bool g_tabHover[2] = {false, false};
+int g_currentTab = 0;        // 0=Main, 1=Performance, 2=Settings
+bool g_tabHover[3] = {false, false, false};
+
+// Display mode hover state
+bool g_displayModeHover[2] = {false, false};  // 0=音乐, 1=性能
+bool g_autoDetectHover = false;
+bool g_showOrderHover = false;
+
+// Performance display settings
+int g_performanceMode = 0;  // 0=Music info, 1=System performance
+std::wstring g_cpuDisplayName = L"CPU";
+std::wstring g_ramDisplayName = L"RAM";
+std::wstring g_gpuDisplayName = L"GPU";
 
 // Platform selection dropdown menu
 bool g_platformMenuOpen = false;
+
+// Edit controls - inline text editing state
+enum EditField { EDIT_NONE = 0, EDIT_IP = 1, EDIT_PORT = 2, EDIT_CPU_NAME = 3, EDIT_RAM_NAME = 4, EDIT_GPU_NAME = 5 };
+EditField g_editingField = EDIT_NONE;
+int g_cursorPos = 0;           // Cursor position in text
+int g_selectStart = 0;         // Selection start (for drag selection)
+int g_selectEnd = 0;           // Selection end
+bool g_cursorVisible = true;   // Cursor blink state
+DWORD g_lastCursorBlink = 0;   // Last cursor blink time
+std::wstring g_editingText;    // Current editing text
+bool g_mouseDragging = false;  // Mouse drag for selection
 int g_platformMenuHover = -1;  // Which menu item is hovered (-1 = none)
 bool g_platformBoxHover = false;  // Platform status box hover
 
@@ -971,7 +1015,7 @@ bool DownloadAndInstallUpdate() {
 }
 
 // Button animations
-Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim;
+Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim, g_btnAutoDetectAnim, g_btnShowOrderAnim;
 bool g_btnThemeHover = false;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
 bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false;
@@ -1022,6 +1066,80 @@ int g_listenMinutes = 0;     // Today's total listen minutes
 DWORD g_lastListenUpdate = 0;
 SIZE_T g_diskFreeGB = 0;     // Free disk space in GB
 int g_quoteIndex = 0;        // Current quote index
+
+// === 异步性能检测架构 ===
+
+// 性能数据结构
+struct PerfData {
+    // CPU
+    int cpuUsage = 0;         // 原生API (必有)
+    int cpuTemp = 0;          // LibreHardwareMonitor (可能没有)
+    bool cpuTempValid = false;
+
+    // RAM
+    int ramUsage = 0;         // 原生API (必有)
+    DWORD64 ramUsed = 0;      // 原生API (必有)
+    DWORD64 ramTotal = 0;     // 原生API (必有)
+
+    // GPU
+    int gpuUsage = 0;         // NVML/ADL/LibreHardwareMonitor (可能没有)
+    bool gpuUsageValid = false;
+    DWORD64 gpuVramUsed = 0;  // DXGI (必有)
+    DWORD64 gpuVramTotal = 0; // DXGI (必有)
+};
+
+// 共享数据（线程安全）
+PerfData g_latestPerfData;
+std::mutex g_perfDataMutex;
+
+// 线程同步
+std::atomic<bool> g_threadRunning[4] = {false, false, false, false};
+HANDLE g_workerThreads[4] = {nullptr, nullptr, nullptr, nullptr};
+
+// 库可用性标志
+bool g_nvmlAvailable = false;
+bool g_adlAvailable = false;
+bool g_lhmAvailable = false;
+
+// NVML函数指针（NVIDIA）
+typedef int (*nvmlInit_t)();
+typedef int (*nvmlShutdown_t)();
+typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int, void*);
+typedef int (*nvmlDeviceGetUtilizationRates_t)(void*, unsigned int*);
+typedef int (*nvmlDeviceGetName_t)(void*, char*, unsigned int);
+
+static HMODULE g_nvmlDll = nullptr;
+static nvmlInit_t nvmlInit = nullptr;
+static nvmlShutdown_t nvmlShutdown = nullptr;
+static nvmlDeviceGetHandleByIndex_t nvmlDeviceGetHandleByIndex = nullptr;
+static nvmlDeviceGetUtilizationRates_t nvmlDeviceGetUtilizationRates = nullptr;
+static nvmlDeviceGetName_t nvmlDeviceGetName = nullptr;
+static void* g_nvmlDevice = nullptr;
+
+// ADL函数指针（AMD）
+typedef int (*ADL_Main_Control_Create_t)(void*, int);
+typedef int (*ADL_Main_Control_Destroy_t)();
+typedef int (*ADL_Adapter_NumberOfAdapters_Get_t)(int*);
+typedef int (*ADL_Adapter_AdapterInfo_Get_t)(void*, int);
+typedef int (*ADL_Overdrive5_CurrentActivity_Get_t)(int, int*, int*, int*, int*);
+
+static HMODULE g_adlDll = nullptr;
+static ADL_Main_Control_Create_t ADL_Main_Control_Create = nullptr;
+static ADL_Main_Control_Destroy_t ADL_Main_Control_Destroy = nullptr;
+static ADL_Adapter_NumberOfAdapters_Get_t ADL_Adapter_NumberOfAdapters_Get = nullptr;
+static ADL_Adapter_AdapterInfo_Get_t ADL_Adapter_AdapterInfo_Get = nullptr;
+static ADL_Overdrive5_CurrentActivity_Get_t ADL_Overdrive5_CurrentActivity_Get = nullptr;
+
+// 系统环境
+enum GPUVendor { GPU_UNKNOWN, GPU_NVIDIA, GPU_AMD, GPU_INTEL };
+GPUVendor g_gpuVendor = GPU_UNKNOWN;
+
+// 传统兼容性变量（用于UI显示）
+double g_cpuUsage = 0.0;     // CPU usage percentage
+double g_ramUsage = 0.0;     // RAM usage percentage
+SIZE_T g_ramTotal = 0;       // Total RAM in bytes
+size_t g_gpuMemUsed = 0;     // GPU memory used (MB)
+size_t g_gpuMemTotal = 0;    // GPU memory total (MB)
 
 // Music quotes - max 6 Chinese chars (18 bytes) to fit 144 limit
 const wchar_t* g_musicQuotes[] = {
@@ -1079,37 +1197,24 @@ std::wstring BuildProgressBar(double progress, int bars) {
 }
 
 void UpdatePerfStats() {
-    // === System CPU Usage ===
-    FILETIME idleTime, kernelTime, userTime;
-    if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-        ULONGLONG idle = ((ULONGLONG)idleTime.dwHighDateTime << 32) | idleTime.dwLowDateTime;
-        ULONGLONG kernel = ((ULONGLONG)kernelTime.dwHighDateTime << 32) | kernelTime.dwLowDateTime;
-        ULONGLONG user = ((ULONGLONG)userTime.dwHighDateTime << 32) | userTime.dwLowDateTime;
-        
-        ULONGLONG lastIdle = ((ULONGLONG)g_lastIdleTime.dwHighDateTime << 32) | g_lastIdleTime.dwLowDateTime;
-        ULONGLONG lastKernel = ((ULONGLONG)g_lastKernelTime.dwHighDateTime << 32) | g_lastKernelTime.dwLowDateTime;
-        ULONGLONG lastUser = ((ULONGLONG)g_lastUserTime.dwHighDateTime << 32) | g_lastUserTime.dwLowDateTime;
-        
-        if (lastIdle > 0 || lastKernel > 0) {
-            ULONGLONG idleDelta = idle - lastIdle;
-            ULONGLONG totalDelta = (kernel - lastKernel) + (user - lastUser);
-            if (totalDelta > 0) {
-                g_sysCpuUsage = (double)(totalDelta - idleDelta) / totalDelta * 100.0;
-                if (g_sysCpuUsage < 0) g_sysCpuUsage = 0;
-                if (g_sysCpuUsage > 100) g_sysCpuUsage = 100;
-            }
-        }
-        g_lastIdleTime = idleTime;
-        g_lastKernelTime = kernelTime;
-        g_lastUserTime = userTime;
+    // 从异步线程获取最新数据
+    PerfData perfData;
+    {
+        std::lock_guard<std::mutex> lock(g_perfDataMutex);
+        perfData = g_latestPerfData;
     }
-    
-    // === System Memory ===
-    MEMORYSTATUSEX memStatus = {sizeof(memStatus)};
-    if (GlobalMemoryStatusEx(&memStatus)) {
-        g_sysMemTotal = (SIZE_T)(memStatus.ullTotalPhys / 1024);
-        g_sysMemUsed = (SIZE_T)((memStatus.ullTotalPhys - memStatus.ullAvailPhys) / 1024);
-    }
+
+    // 更新传统兼容性变量（用于UI显示）
+    g_cpuUsage = perfData.cpuUsage;
+    g_ramUsage = perfData.ramUsage;
+    g_ramTotal = perfData.ramTotal;
+    g_gpuMemUsed = perfData.gpuVramUsed / (1024 * 1024);  // 转换为MB
+    g_gpuMemTotal = perfData.gpuVramTotal / (1024 * 1024);  // 转换为MB
+
+    // 同时更新系统变量（保持兼容性）
+    g_sysCpuUsage = g_cpuUsage;
+    g_sysMemUsed = perfData.ramUsed / 1024;  // 转换为KB
+    g_sysMemTotal = perfData.ramTotal / 1024;  // 转换为KB
     
     // === Battery Status ===
     SYSTEM_POWER_STATUS powerStatus;
@@ -1149,6 +1254,161 @@ std::wstring Utf8ToWstring(const std::string& str) {
     std::wstring result(len - 1, 0);
     MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
     return result;
+}
+
+int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
+    if (!text || length <= 0) return 0;
+
+    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SIZE size;
+    GetTextExtentPoint32W(hdc, text, length, &size);
+    SelectObject(hdc, oldFont);
+
+    return size.cx;
+}
+
+std::string BuildPerformanceOSCMessage(int type) {
+    std::wstring name;
+    std::wstring icon;
+    double value1 = 0.0;  // 主要参数（占用率）
+    double value2 = 0.0;  // 第二参数（温度/显存占用）
+    bool hasSecondValue = false;
+    std::wstring unit1, unit2;
+    std::wstring desc1, desc2;
+
+    switch (type) {
+        case 0:  // CPU
+            name = g_cpuDisplayName;
+            icon = L"⚡";
+            value1 = g_cpuUsage;
+            value2 = g_latestPerfData.cpuTemp;
+            hasSecondValue = g_latestPerfData.cpuTempValid;
+            unit1 = L"%";
+            unit2 = L"°C";
+            desc1 = L"占用";
+            desc2 = L"温度";
+            break;
+        case 1:  // RAM
+            name = g_ramDisplayName;
+            icon = L"💾";
+            value1 = g_ramUsage;
+            hasSecondValue = false;
+            unit1 = L"%";
+            desc1 = L"占用";
+            break;
+        case 2:  // GPU
+            name = g_gpuDisplayName;
+            icon = L"🎮";
+            value1 = g_latestPerfData.gpuUsage;
+            if (g_latestPerfData.gpuUsageValid) {
+                value1 = g_latestPerfData.gpuUsage;
+            }
+            if (g_gpuMemTotal > 0) {
+                value2 = (double)g_gpuMemUsed * 100.0 / g_gpuMemTotal;
+            }
+            hasSecondValue = true;
+            unit1 = L"%";
+            unit2 = L"%";
+            desc1 = L"占用";
+            desc2 = L"显存";
+            break;
+    }
+
+    std::wstring msg;
+
+    // 第一行：图标 + 名称 + 主要参数 + 第二参数
+    msg = icon + name + L" ";
+    
+    wchar_t param1[16];
+    swprintf_s(param1, L"%.0f%s", value1, unit1.c_str());
+    msg += param1;
+    
+    if (hasSecondValue) {
+        wchar_t param2[32];
+        if (type == 0) {  // CPU - 温度
+            swprintf_s(param2, L" 🌡️%.0f%s", value2, unit2.c_str());
+        } else if (type == 2) {  // GPU - 显存占用
+            swprintf_s(param2, L" 🎞️%.0fG/%.0fG", (double)g_gpuMemUsed / 1024.0, (double)g_gpuMemTotal / 1024.0);
+        }
+        msg += param2;
+    } else if (type == 1) {  // RAM - 显示已用/总量
+        wchar_t param2[32];
+        swprintf_s(param2, L" 📊%.0fG/%.0fG", (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0, (double)g_latestPerfData.ramTotal / 1024.0 / 1024.0 / 1024.0);
+        msg += param2;
+    }
+
+    msg += L"\n";
+
+    // 第二行：进度条
+    int bars = 20;
+    
+    if (type == 0) {  // CPU - 双标记（占用率 | 温度）
+        int filled1 = (int)(value1 / 100.0 * bars);
+        int filled2 = (int)(value2 / 100.0 * bars);
+        if (filled1 < 0) filled1 = 0;
+        if (filled1 > bars) filled1 = bars;
+        if (filled2 < 0) filled2 = 0;
+        if (filled2 > bars) filled2 = bars;
+
+        msg += L"[";
+        for (int i = 0; i < bars; i++) {
+            if (i < filled1 && i < filled2) {
+                msg += L"█";  // 两者都满
+            } else if (i < filled1) {
+                msg += L"▓";  // 占用率满，温度不满
+            } else if (i < filled2) {
+                msg += L"░";  // 占用率不满，温度满（不太可能）
+            } else {
+                msg += L"░";  // 都不满
+            }
+            
+            // 在两个标记之间添加分隔符
+            if (i == filled1 - 1 && filled1 > 0 && filled1 < bars && i < bars - 1) {
+                msg += L"│";
+            }
+        }
+        msg += L"]";
+
+    } else if (type == 1) {  // RAM - 单标记
+        int filled = (int)(value1 / 100.0 * bars);
+        if (filled < 0) filled = 0;
+        if (filled > bars) filled = bars;
+
+        msg += L"[";
+        for (int i = 0; i < bars; i++) {
+            msg += (i < filled) ? L"█" : L"░";
+        }
+        msg += L"]";
+
+    } else if (type == 2) {  // GPU - 双标记（占用率 | 显存占用）
+        int filled1 = (int)(value1 / 100.0 * bars);
+        int filled2 = (int)(value2 / 100.0 * bars);
+        if (filled1 < 0) filled1 = 0;
+        if (filled1 > bars) filled1 = bars;
+        if (filled2 < 0) filled2 = 0;
+        if (filled2 > bars) filled2 = bars;
+
+        msg += L"[";
+        for (int i = 0; i < bars; i++) {
+            if (i < filled1 && i < filled2) {
+                msg += L"█";
+            } else if (i < filled1) {
+                msg += L"▓";
+            } else if (i < filled2) {
+                msg += L"░";
+            } else {
+                msg += L"░";
+            }
+            
+            // 在两个标记之间添加分隔符
+            if (i == filled1 - 1 && filled1 > 0 && filled1 < bars && i < bars - 1) {
+                msg += L"│";
+            }
+        }
+        msg += L]";
+    }
+
+    return WstringToUtf8(msg);
 }
 
 std::vector<std::wstring> LoadNoLyricMessages(const wchar_t* configPath) {
@@ -2919,13 +3179,13 @@ void OnPaint(HWND hwnd) {
     DrawRoundRect(memDC, CARD_PADDING, contentY, 5, 35, 2, COLOR_ACCENT);
     
     // === Tabs (在卡片内部) ===
-    const wchar_t* tabNames[] = { L"\x4E3B\x9875", L"\x8BBE\x7F6E" };  // 主页, 设置
-    int tabW = 80;
+    const wchar_t* tabNames[] = { L"\x4E3B\x9875", L"\x6027\x80FD", L"\x8BBE\x7F6E" };  // 主页, 性能, 设置
+    int tabW = 70;
     int tabH = 32;
     int tabY = contentY + 10;
-    
+
     // 先绘制所有非活动标签的背景
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < 3; t++) {
         int tabX = CARD_PADDING + 18 + t * (tabW + 8);
         bool isActive = (t == g_currentTab);
         bool isHover = g_tabHover[t];
@@ -2956,7 +3216,7 @@ void OnPaint(HWND hwnd) {
     }
     
     // 最后绘制所有标签的文字（带颜色渐变动画）
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < 3; t++) {
         int tabX = CARD_PADDING + 18 + t * (tabW + 8);
         bool isActive = (t == g_currentTab);
         bool isAnimating = g_tabSlideAnim.isActive();
@@ -3242,6 +3502,161 @@ void OnPaint(HWND hwnd) {
                 }
             }
         }
+    } else if (g_currentTab == 1) {
+        // === PERFORMANCE TAB: Display Mode, System Info, Buttons ===
+
+        // === Display Mode Selector (Music / Performance) ===
+        int modeBtnW = 70;
+        int modeBtnH = 32;
+        int modeBtnSpacing = 6;
+        int totalModeBtnW = 2 * modeBtnW + modeBtnSpacing;
+        int modeBtnStartX = CARD_PADDING + 18 + (leftColW - 36 - totalModeBtnW) / 2;
+        int modeBtnY = rowY + 30;
+
+        // Display mode label
+        DrawTextLeft(memDC, L"\x663E\x793A\x6A21\x5F0F:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontLabel);
+
+        // Draw mode buttons with slide animation (like tabs)
+        for (int m = 0; m < 2; m++) {
+            int btnX = modeBtnStartX + m * (modeBtnW + modeBtnSpacing);
+            bool isActive = (g_performanceMode == m);
+            bool isHover = g_displayModeHover[m];
+
+            if (!isActive || g_displayModeSlideAnim.isActive()) {
+                COLORREF btnBg = isHover ? RGB(60, 60, 80) : RGB(40, 40, 55);
+                DrawRoundRect(memDC, btnX, modeBtnY, modeBtnW, modeBtnH, 8, btnBg);
+            }
+        }
+
+        // Slide animation for mode selector
+        if (g_displayModeSlideAnim.isActive()) {
+            double slideProgress = g_displayModeSlideAnim.value;
+            int prevBtnX = modeBtnStartX + g_prevDisplayMode * (modeBtnW + modeBtnSpacing);
+            int currBtnX = modeBtnStartX + g_performanceMode * (modeBtnW + modeBtnSpacing);
+            int animBtnX = (int)(prevBtnX + (currBtnX - prevBtnX) * slideProgress);
+            DrawRoundRect(memDC, animBtnX, modeBtnY, modeBtnW, modeBtnH, 8, COLOR_ACCENT);
+        } else {
+            int activeBtnX = modeBtnStartX + g_performanceMode * (modeBtnW + modeBtnSpacing);
+            DrawRoundRect(memDC, activeBtnX, modeBtnY, modeBtnW, modeBtnH, 8, COLOR_ACCENT);
+        }
+
+        // Draw mode text
+        const wchar_t* modeNames[] = { L"\x97F3\x4E50", L"\x6027\x80FD" };
+        for (int m = 0; m < 2; m++) {
+            int btnX = modeBtnStartX + m * (modeBtnW + modeBtnSpacing);
+            bool isActive = (g_performanceMode == m);
+            COLORREF textColor = isActive ? RGB(255, 255, 255) : COLOR_TEXT;
+            DrawTextCentered(memDC, modeNames[m], btnX + modeBtnW / 2, modeBtnY + 3, textColor, g_fontNormal);
+        }
+
+        // === System Info Section (only in Performance mode, with animation) ===
+        double expandAnim = g_systemInfoExpandAnim.value;
+        bool showSystemInfo = (g_performanceMode == 1) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
+
+        if (showSystemInfo) {
+            int infoX = CARD_PADDING + 18;
+            int infoY = modeBtnY + modeBtnH + 20;
+            int infoW = leftColW - 36;
+            int infoH = (int)(140 * expandAnim);
+
+            // Background with alpha
+            COLORREF infoBg = COLOR_BOX_BG;
+            if (expandAnim < 1.0) {
+                int alpha = (int)(255 * expandAnim);
+                DrawRoundRectAlpha(memDC, infoX, infoY, infoW, infoH, 8, infoBg, alpha);
+            } else {
+                DrawRoundRect(memDC, infoX, infoY, infoW, infoH, 8, infoBg);
+            }
+
+            // Clip to animation region
+            if (expandAnim < 1.0 && infoH > 0) {
+                HRGN clipRgn = CreateRectRgn(infoX, infoY, infoX + infoW, infoY + infoH);
+                SelectClipRgn(memDC, clipRgn);
+            }
+
+            // CPU input
+            int inputH = 36;
+            int inputY = infoY + 15;
+            DrawTextLeft(memDC, L"CPU", infoX, inputY + 7, COLOR_TEXT_DIM, g_fontNormal);
+            bool cpuEditing = (g_editingField == EDIT_CPU_NAME);
+            COLORREF cpuBorder = cpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
+            DrawRoundRectWithBorder(memDC, infoX + 50, inputY, infoW - 50, inputH, 6, COLOR_EDIT_BG, cpuBorder);
+
+            // Draw text
+            const wchar_t* cpuText = g_cpuDisplayName.c_str();
+            DrawTextLeft(memDC, cpuText, infoX + 60, inputY + 7, COLOR_TEXT, g_fontNormal);
+
+            // Draw cursor if editing and visible
+            if (cpuEditing && g_cursorVisible) {
+                int cursorX = infoX + 60 + GetTextWidth(memDC, cpuText, g_fontNormal, g_cursorPos);
+                HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+                MoveToEx(memDC, cursorX, inputY + 10, nullptr);
+                LineTo(memDC, cursorX, inputY + 26);
+                SelectObject(memDC, oldPen);
+                DeleteObject(pen);
+            }
+
+            // RAM input
+            inputY += 45;
+            DrawTextLeft(memDC, L"RAM", infoX, inputY + 7, COLOR_TEXT_DIM, g_fontNormal);
+            bool ramEditing = (g_editingField == EDIT_RAM_NAME);
+            COLORREF ramBorder = ramEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
+            DrawRoundRectWithBorder(memDC, infoX + 50, inputY, infoW - 50, inputH, 6, COLOR_EDIT_BG, ramBorder);
+
+            // Draw text
+            const wchar_t* ramText = g_ramDisplayName.c_str();
+            DrawTextLeft(memDC, ramText, infoX + 60, inputY + 7, COLOR_TEXT, g_fontNormal);
+
+            // Draw cursor if editing and visible
+            if (ramEditing && g_cursorVisible) {
+                int cursorX = infoX + 60 + GetTextWidth(memDC, ramText, g_fontNormal, g_cursorPos);
+                HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+                MoveToEx(memDC, cursorX, inputY + 10, nullptr);
+                LineTo(memDC, cursorX, inputY + 26);
+                SelectObject(memDC, oldPen);
+                DeleteObject(pen);
+            }
+
+            // GPU input
+            inputY += 45;
+            DrawTextLeft(memDC, L"GPU", infoX, inputY + 7, COLOR_TEXT_DIM, g_fontNormal);
+            bool gpuEditing = (g_editingField == EDIT_GPU_NAME);
+            COLORREF gpuBorder = gpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
+            DrawRoundRectWithBorder(memDC, infoX + 50, inputY, infoW - 50, inputH, 6, COLOR_EDIT_BG, gpuBorder);
+
+            // Draw text
+            const wchar_t* gpuText = g_gpuDisplayName.c_str();
+            DrawTextLeft(memDC, gpuText, infoX + 60, inputY + 7, COLOR_TEXT, g_fontNormal);
+
+            // Draw cursor if editing and visible
+            if (gpuEditing && g_cursorVisible) {
+                int cursorX = infoX + 60 + GetTextWidth(memDC, gpuText, g_fontNormal, g_cursorPos);
+                HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+                MoveToEx(memDC, cursorX, inputY + 10, nullptr);
+                LineTo(memDC, cursorX, inputY + 26);
+                SelectObject(memDC, oldPen);
+                DeleteObject(pen);
+            }
+
+            // Cancel clipping
+            if (expandAnim < 1.0 && infoH > 0) {
+                SelectClipRgn(memDC, nullptr);
+            }
+        }
+
+        // === Auto Detect Button ===
+        int btnW = leftColW - 36;
+        int btnH = 36;
+        int btnY = showSystemInfo ? (modeBtnY + modeBtnH + 20 + 140 + 20) : (modeBtnY + modeBtnH + 20);
+        DrawButtonAnim(memDC, CARD_PADDING + 18, btnY, btnW, btnH, L"\x81EA\x52A8\x68C0\x6D4B", g_btnAutoDetectAnim, false);
+
+        // === Show Order Button ===
+        btnY += 44;
+        DrawButtonAnim(memDC, CARD_PADDING + 18, btnY, btnW, btnH, L"\x663E\x793A\x987A\x5E8F", g_btnShowOrderAnim, false);
+
     } else {
         // === SETTINGS TAB: IP, Port, Checkboxes ===
         DrawTextLeft(memDC, L"OSC IP:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontSmall);
@@ -3815,6 +4230,8 @@ bool IsAnimationActive() {
     if (g_btnLaunchAnim.isActive()) return true;
     if (g_btnExportLogAnim.isActive()) return true;
     if (g_btnThemeAnim.isActive()) return true;
+    if (g_btnAutoDetectAnim.isActive()) return true;
+    if (g_btnShowOrderAnim.isActive()) return true;
     
     // 窗口启动动画
     if (!g_startupAnimComplete) return true;
@@ -3823,7 +4240,13 @@ bool IsAnimationActive() {
     
     // 标签页切换动画
     if (g_tabSlideAnim.isActive()) return true;
-    
+
+    // 显示模式切换动画
+    if (g_displayModeSlideAnim.isActive()) return true;
+
+    // 系统信息展开动画
+    if (g_systemInfoExpandAnim.isActive()) return true;
+
     // 下拉菜单动画（只在菜单可见时才认为活跃）
     if (g_menuExpandAnim.isActive() && (g_platformMenuOpen || g_menuExpandAnim.value > 0.01)) return true;
     
@@ -3846,6 +4269,8 @@ void UpdateAnimations() {
     g_btnLaunchAnim.setTarget(g_btnLaunchHover ? 1.0 : 0.0);
     g_btnExportLogAnim.setTarget(g_btnExportLogHover ? 1.0 : 0.0);
     g_btnThemeAnim.setTarget(g_btnThemeHover ? 1.0 : 0.0);
+    g_btnAutoDetectAnim.setTarget(g_autoDetectHover ? 1.0 : 0.0);
+    g_btnShowOrderAnim.setTarget(g_showOrderHover ? 1.0 : 0.0);
     g_btnConnectAnim.update();
     g_btnApplyAnim.update();
     g_btnCloseAnim.update();
@@ -3854,6 +4279,8 @@ void UpdateAnimations() {
     g_btnLaunchAnim.update();
     g_btnExportLogAnim.update();
     g_btnThemeAnim.update();
+    g_btnAutoDetectAnim.update();
+    g_btnShowOrderAnim.update();
     
     // 窗口启动动画（缩放）- 简化版本，不再使用淡入
     if (!g_startupAnimComplete) {
@@ -3867,7 +4294,13 @@ void UpdateAnimations() {
     
     // 标签页切换动画
     g_tabSlideAnim.update();
-    
+
+    // 显示模式切换动画
+    g_displayModeSlideAnim.update();
+
+    // 系统信息展开动画
+    g_systemInfoExpandAnim.update();
+
     // 下拉菜单展开动画
     g_menuExpandAnim.update();
     
@@ -4021,11 +4454,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool oldConnect = g_btnConnectHover, oldApply = g_btnApplyHover;
             bool oldClose = g_btnCloseHover, oldMin = g_btnMinHover, oldUpdate = g_btnUpdateHover, oldLaunch = g_btnLaunchHover;
             bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover, oldTheme = g_btnThemeHover;
-            bool oldTabHover[2] = {g_tabHover[0], g_tabHover[1]};
-            
+            bool oldTabHover[3] = {g_tabHover[0], g_tabHover[1], g_tabHover[2]};
+
             // Tab hover detection
-            int tabW = 80;
-            for (int t = 0; t < 2; t++) {
+            int tabW = 70;
+            for (int t = 0; t < 3; t++) {
                 int tabX = CARD_PADDING + 18 + t * (tabW + 8);
                 g_tabHover[t] = IsInRect(x, y, tabX, tabY, tabW, tabH);
             }
@@ -4080,6 +4513,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (g_platformBoxHover != oldPlatformBoxHover || g_platformMenuHover != oldMenuHover) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
+            } else if (g_currentTab == 1) {
+                // Performance tab hover detection
+                int modeBtnW = 70;
+                int modeBtnH = 32;
+                int modeBtnSpacing = 6;
+                int totalModeBtnW = 2 * modeBtnW + modeBtnSpacing;
+                int modeBtnStartX = CARD_PADDING + 18 + (leftColW - 36 - totalModeBtnW) / 2;
+                int modeBtnY = rowY + 30;
+
+                // Display mode buttons
+                for (int m = 0; m < 2; m++) {
+                    int btnX = modeBtnStartX + m * (modeBtnW + modeBtnSpacing);
+                    g_displayModeHover[m] = IsInRect(x, y, btnX, modeBtnY, modeBtnW, modeBtnH);
+                }
+
+                // Auto Detect and Show Order buttons
+                int btnW = leftColW - 36;
+                int btnH = 36;
+                int btnY = (g_performanceMode == 1) ? (modeBtnY + modeBtnH + 20 + 140 + 20) : (modeBtnY + modeBtnH + 20);
+                g_autoDetectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH);
+                g_showOrderHover = IsInRect(x, y, CARD_PADDING + 18, btnY + 44, btnW, btnH);
+
             } else {
                 // Close platform menu when switching tabs
                 g_platformMenuOpen = false;
@@ -4126,7 +4581,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 oldClose != g_btnCloseHover || oldMin != g_btnMinHover || oldUpdate != g_btnUpdateHover ||
                 oldLaunch != g_btnLaunchHover || oldExportLog != g_btnExportLogHover ||
                 oldTheme != g_btnThemeHover ||
-                oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] ||
+                oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] || oldTabHover[2] != g_tabHover[2] ||
                 g_btnAdminHover != oldAdmin || g_charProgressHover != oldCharProgressHover) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -4534,6 +4989,113 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ShowErrorDialog(L"\x9519\x8BEF", L"\x672A\x627E\x5230\x7F51\x6613\x4E91\x97F3\x4E50\xFF0C\x8BF7\x624B\x52A8\x542F\x52A8\x5E76\x6DFB\x52A0\x53C2\x6570:\n--remote-debugging-port=9222");
                 }
             }
+        } else if (g_currentTab == 1) {
+            // === PERFORMANCE TAB click handling ===
+            int leftColW = 260;
+            int rowY = TITLEBAR_H + 50 + 30;
+
+            // Display mode buttons (must match drawing code)
+            int modeBtnW = 70;
+            int modeBtnH = 32;
+            int modeBtnSpacing = 6;
+            int totalModeBtnW = 2 * modeBtnW + modeBtnSpacing;
+            int modeBtnStartX = CARD_PADDING + 18 + (leftColW - 36 - totalModeBtnW) / 2;
+            int modeBtnY = rowY + 30;
+
+            for (int m = 0; m < 2; m++) {
+                int btnX = modeBtnStartX + m * (modeBtnW + modeBtnSpacing);
+                if (IsInRect(x, y, btnX, modeBtnY, modeBtnW, modeBtnH)) {
+                    if (g_performanceMode != m) {
+                        g_prevDisplayMode = g_performanceMode;
+                        g_performanceMode = m;
+                        g_displayModeSlideAnim.setTarget(1.0);
+                        g_displayModeSlideAnim.value = 0.0;
+
+                        // 触发系统信息展开/收缩动画
+                        if (m == 1) {
+                            // 切换到性能模式，展开
+                            g_systemInfoExpandAnim.value = 0.0;
+                            g_systemInfoExpandAnim.target = 1.0;
+                            g_systemInfoExpandAnim.speed = 0.15;  // 150ms展开
+                        } else {
+                            // 切换到音乐模式，收缩
+                            g_systemInfoExpandAnim.value = 1.0;
+                            g_systemInfoExpandAnim.target = 0.0;
+                            g_systemInfoExpandAnim.speed = 0.15;  // 150ms收缩
+                        }
+
+                        SaveConfig(L"config_gui.json");
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                    return 0;
+                }
+            }
+
+            // System info input boxes
+            double expandAnim = g_systemInfoExpandAnim.value;
+            bool showSystemInfo = (g_performanceMode == 1) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
+
+            if (showSystemInfo) {
+                int infoX = CARD_PADDING + 18;
+                int infoY = modeBtnY + modeBtnH + 20;
+                int infoW = leftColW - 36;
+                int inputH = 36;
+                int inputY = infoY + 15;
+
+                // CPU input click
+                if (IsInRect(x, y, infoX + 50, inputY, infoW - 50, inputH)) {
+                    g_editingField = EDIT_CPU_NAME;
+                    g_editingText = g_cpuDisplayName;
+                    g_cursorPos = (int)g_editingText.length();
+                    g_selectStart = g_selectEnd = g_cursorPos;
+                    g_lastCursorBlink = GetTickCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+
+                // RAM input click
+                inputY += 45;
+                if (IsInRect(x, y, infoX + 50, inputY, infoW - 50, inputH)) {
+                    g_editingField = EDIT_RAM_NAME;
+                    g_editingText = g_ramDisplayName;
+                    g_cursorPos = (int)g_editingText.length();
+                    g_selectStart = g_selectEnd = g_cursorPos;
+                    g_lastCursorBlink = GetTickCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+
+                // GPU input click
+                inputY += 45;
+                if (IsInRect(x, y, infoX + 50, inputY, infoW - 50, inputH)) {
+                    g_editingField = EDIT_GPU_NAME;
+                    g_editingText = g_gpuDisplayName;
+                    g_cursorPos = (int)g_editingText.length();
+                    g_selectStart = g_selectEnd = g_cursorPos;
+                    g_lastCursorBlink = GetTickCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+            }
+
+            // Auto Detect and Show Order buttons
+            int btnW = leftColW - 36;
+            int btnH = 36;
+            int btnY = showSystemInfo ? (modeBtnY + modeBtnH + 20 + 140 + 20) : (modeBtnY + modeBtnH + 20);
+
+            if (IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH)) {
+                // Auto Detect button clicked
+                ShowInfoDialog(L"\x63D0\x793A", L"\x81EA\x52A8\x68C0\x6D4B\x529F\x80FD\x5F85\x5B9E\x73B0");
+                return 0;
+            }
+
+            btnY += 44;
+            if (IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH)) {
+                // Show Order button clicked
+                ShowInfoDialog(L"\x63D0\x793A", L"\x663E\x793A\x987A\x5E8F\x529F\x80FD\x5F85\x5B9E\x73B0");
+                return 0;
+            }
+
         } else {
             // === SETTINGS TAB click handling ===
             // IP and Port input fields - show hint to edit config file
@@ -4634,13 +5196,157 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     
     case WM_LBUTTONUP: if (g_dragging) { g_dragging = false; ReleaseCapture(); } return 0;
-        
+
+        case WM_CHAR: {
+            // Handle character input for editing fields
+            if (g_editingField != EDIT_NONE) {
+                wchar_t ch = (wchar_t)wParam;
+
+                // Allow printable characters (no control characters except space)
+                if (ch >= 32 && ch != 127) {
+                    // Delete selected text if any
+                    if (g_selectStart != g_selectEnd) {
+                        int start = min(g_selectStart, g_selectEnd);
+                        int end = max(g_selectStart, g_selectEnd);
+                        g_editingText.erase(start, end - start);
+                        g_cursorPos = start;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                    }
+
+                    // Insert character at cursor position
+                    if (g_cursorPos < (int)g_editingText.length()) {
+                        g_editingText.insert(g_cursorPos, 1, ch);
+                    } else {
+                        g_editingText += ch;
+                    }
+                    g_cursorPos++;
+                    g_selectStart = g_selectEnd = g_cursorPos;
+                    g_lastCursorBlink = GetTickCount();
+
+                    // Update corresponding display name
+                    switch (g_editingField) {
+                        case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
+                        case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
+                        case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                    }
+
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            // Handle keyboard input for editing fields
+            if (g_editingField != EDIT_NONE) {
+                if (wParam == VK_BACK) {
+                    // Backspace: delete character before cursor
+                    if (g_selectStart != g_selectEnd) {
+                        // Delete selected text
+                        int start = min(g_selectStart, g_selectEnd);
+                        int end = max(g_selectStart, g_selectEnd);
+                        g_editingText.erase(start, end - start);
+                        g_cursorPos = start;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                    } else if (g_cursorPos > 0) {
+                        // Delete character before cursor
+                        g_editingText.erase(g_cursorPos - 1, 1);
+                        g_cursorPos--;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                    }
+                    g_lastCursorBlink = GetTickCount();
+
+                    // Update corresponding display name
+                    switch (g_editingField) {
+                        case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
+                        case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
+                        case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                    }
+
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wParam == VK_DELETE) {
+                    // Delete: delete character at cursor
+                    if (g_selectStart != g_selectEnd) {
+                        // Delete selected text
+                        int start = min(g_selectStart, g_selectEnd);
+                        int end = max(g_selectStart, g_selectEnd);
+                        g_editingText.erase(start, end - start);
+                        g_cursorPos = start;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                    } else if (g_cursorPos < (int)g_editingText.length()) {
+                        // Delete character at cursor
+                        g_editingText.erase(g_cursorPos, 1);
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                    }
+                    g_lastCursorBlink = GetTickCount();
+
+                    // Update corresponding display name
+                    switch (g_editingField) {
+                        case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
+                        case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
+                        case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                    }
+
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wParam == VK_LEFT) {
+                    // Left arrow: move cursor left
+                    if (g_cursorPos > 0) {
+                        g_cursorPos--;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                        g_lastCursorBlink = GetTickCount();
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                } else if (wParam == VK_RIGHT) {
+                    // Right arrow: move cursor right
+                    if (g_cursorPos < (int)g_editingText.length()) {
+                        g_cursorPos++;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                        g_lastCursorBlink = GetTickCount();
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                } else if (wParam == VK_HOME) {
+                    // Home: move cursor to start
+                    g_cursorPos = 0;
+                    g_selectStart = g_selectEnd = g_cursorPos;
+                    g_lastCursorBlink = GetTickCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wParam == VK_END) {
+                    // End: move cursor to end
+                    g_cursorPos = (int)g_editingText.length();
+                    g_selectStart = g_selectEnd = g_cursorPos;
+                    g_lastCursorBlink = GetTickCount();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wParam == VK_RETURN) {
+                    // Enter: finish editing
+                    g_editingField = EDIT_NONE;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wParam == VK_ESCAPE) {
+                    // Escape: cancel editing
+                    switch (g_editingField) {
+                        case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
+                        case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
+                        case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                    }
+                    g_editingField = EDIT_NONE;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            return 0;
+        }
+
         case WM_TIMER: {
             UpdateAnimations();
             UpdatePerfStats();
-            
-            // Smart redraw: only redraw when needed
+
+            // Update cursor blink state (500ms interval)
             DWORD now = GetTickCount();
+            if (g_editingField != EDIT_NONE && (now - g_lastCursorBlink) >= 500) {
+                g_cursorVisible = !g_cursorVisible;
+                g_lastCursorBlink = now;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+
+            // Smart redraw: only redraw when needed
             
             // Detect system lag recovery (timer interval > 500ms instead of normal 16ms)
             if (g_lastTimerTick > 0 && (now - g_lastTimerTick) > 500) {
@@ -4858,6 +5564,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         
         case WM_DESTROY:
+            // Cleanup performance monitoring threads
+            ShutdownPerfMonitoring();
+
             // Cleanup lyrics search thread
             g_lyricsSearchRunning = false;
             if (g_lyricsSearchThread.joinable()) {
@@ -4882,6 +5591,403 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// === 异步性能检测线程实现 ===
+
+// 线程1: 原生API - CPU/RAM
+DWORD WINAPI WorkerThread1(LPVOID param) {
+    while (g_threadRunning[0]) {
+        FILETIME idleTime, kernelTime, userTime;
+        if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+            ULONGLONG idle = ((ULONGLONG)idleTime.dwHighDateTime << 32) | idleTime.dwLowDateTime;
+            ULONGLONG kernel = ((ULONGLONG)kernelTime.dwHighDateTime << 32) | kernelTime.dwLowDateTime;
+            ULONGLONG user = ((ULONGLONG)userTime.dwHighDateTime << 32) | userTime.dwLowDateTime;
+
+            ULONGLONG lastIdle = ((ULONGLONG)g_lastIdleTime.dwHighDateTime << 32) | g_lastIdleTime.dwLowDateTime;
+            ULONGLONG lastKernel = ((ULONGLONG)g_lastKernelTime.dwHighDateTime << 32) | g_lastKernelTime.dwLowDateTime;
+            ULONGLONG lastUser = ((ULONGLONG)g_lastUserTime.dwHighDateTime << 32) | g_lastUserTime.dwLowDateTime;
+
+            if (lastIdle > 0 || lastKernel > 0) {
+                ULONGLONG idleDelta = idle - lastIdle;
+                ULONGLONG totalDelta = (kernel - lastKernel) + (user - lastUser);
+                if (totalDelta > 0) {
+                    double cpuUsage = (double)(totalDelta - idleDelta) / totalDelta * 100.0;
+                    if (cpuUsage < 0) cpuUsage = 0;
+                    if (cpuUsage > 100) cpuUsage = 100;
+
+                    std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                    g_latestPerfData.cpuUsage = (int)cpuUsage;
+                }
+            }
+            g_lastIdleTime = idleTime;
+            g_lastKernelTime = kernelTime;
+            g_lastUserTime = userTime;
+        }
+
+        // RAM
+        MEMORYSTATUSEX memStatus = {sizeof(memStatus)};
+        if (GlobalMemoryStatusEx(&memStatus)) {
+            std::lock_guard<std::mutex> lock(g_perfDataMutex);
+            g_latestPerfData.ramUsed = memStatus.ullTotalPhys - memStatus.ullAvailPhys;
+            g_latestPerfData.ramTotal = memStatus.ullTotalPhys;
+            if (memStatus.ullTotalPhys > 0) {
+                g_latestPerfData.ramUsage = (int)((memStatus.ullTotalPhys - memStatus.ullAvailPhys) * 100.0 / memStatus.ullTotalPhys);
+            }
+        }
+
+        Sleep(1000);  // 每秒更新一次
+    }
+    return 0;
+}
+
+// 线程2: DXGI - GPU显存
+DWORD WINAPI WorkerThread2(LPVOID param) {
+    static IDXGIFactory1* pDXGIFactory = nullptr;
+    static bool initialized = false;
+
+    if (!initialized) {
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pDXGIFactory))) {
+            initialized = true;
+        }
+    }
+
+    while (g_threadRunning[1] && pDXGIFactory) {
+        UINT adapterIndex = 0;
+        IDXGIAdapter1* pAdapter = nullptr;
+        while (pDXGIFactory->EnumAdapters1(adapterIndex, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
+            DXGI_ADAPTER_DESC1 desc;
+            if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
+                std::lock_guard<std::mutex> lock(g_perfDataMutex);
+                g_latestPerfData.gpuVramTotal = desc.DedicatedVideoMemory;
+                // Note: 获取已用显存需要更复杂的DXGI调用，这里暂时设为0
+                g_latestPerfData.gpuVramUsed = 0;
+
+                pAdapter->Release();
+                break;  // 使用第一个适配器
+            }
+            pAdapter->Release();
+            adapterIndex++;
+        }
+        Sleep(2000);  // 每2秒更新一次
+    }
+    return 0;
+}
+
+// 线程3: NVML/ADL - GPU占用率
+DWORD WINAPI WorkerThread3(LPVOID param) {
+    while (g_threadRunning[2]) {
+        int gpuUsage = 0;
+
+        if (g_gpuVendor == GPU_NVIDIA && g_nvmlAvailable && nvmlInit && nvmlDeviceGetUtilizationRates) {
+            // NVIDIA NVML
+            void* device = nullptr;
+            if (nvmlDeviceGetHandleByIndex(0, &device) == 0) {
+                unsigned int utilization = 0;
+                if (nvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
+                    gpuUsage = (int)utilization;
+                }
+            }
+        } else if (g_gpuVendor == GPU_AMD && g_adlAvailable && ADL_Main_Control_Create && ADL_Overdrive5_CurrentActivity_Get) {
+            // AMD ADL
+            int adapterCount = 0;
+            if (ADL_Adapter_NumberOfAdapters_Get(&adapterCount) == 0 && adapterCount > 0) {
+                // ADL_Adapter_AdapterInfo_Get 需要适配器信息结构
+                // 这里简化处理，直接获取活动信息
+                int activity = 0;
+                if (ADL_Overdrive5_CurrentActivity_Get(0, &activity, nullptr, nullptr, nullptr) == 0) {
+                    gpuUsage = activity;
+                }
+            }
+        }
+
+        // 更新共享数据
+        {
+            std::lock_guard<std::mutex> lock(g_perfDataMutex);
+            g_latestPerfData.gpuUsage = gpuUsage;
+            g_latestPerfData.gpuUsageValid = (gpuUsage > 0);
+        }
+
+        Sleep(2000);  // 每2秒更新一次
+    }
+    return 0;
+}
+
+// 线程4: WMI - 温度检测
+DWORD WINAPI WorkerThread4(LPVOID param) {
+    // 初始化WMI
+    static bool wmiInitialized = false;
+    static IWbemLocator* pLocator = nullptr;
+    static IWbemServices* pServices = nullptr;
+
+    if (!wmiInitialized) {
+        HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLocator);
+        if (SUCCEEDED(hr)) {
+            hr = pLocator->ConnectServer(BSTR(L"ROOT\\CIMV2"), nullptr, nullptr, 0, 0, 0, 0, &pServices);
+            if (SUCCEEDED(hr)) {
+                hr = CoSetProxyBlanket(pServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
+                if (SUCCEEDED(hr)) {
+                    wmiInitialized = true;
+                }
+            }
+        }
+    }
+
+    while (g_threadRunning[3] && wmiInitialized && pServices) {
+        int cpuTemp = 0;
+        int gpuTemp = 0;
+
+        // 获取CPU温度
+        IEnumWbemClassObject* pEnumerator = nullptr;
+        HRESULT hr = pServices->ExecQuery(BSTR(L"WQL"), BSTR(L"SELECT * FROM Win32_PerfFormattedData_Counters WHERE Name LIKE '%Processor Time%'"), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnumerator);
+
+        if (SUCCEEDED(hr) && pEnumerator) {
+            IWbemClassObject* pclsObj = nullptr;
+            ULONG uReturn = 0;
+            if (pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                // CPU温度通常在 MSAcpi_ThermalZoneTemperature 中
+                pclsObj->Release();
+            }
+            pEnumerator->Release();
+        }
+
+        // 尝试使用 MSAcpi_ThermalZoneTemperature 获取温度
+        IEnumWbemClassObject* pTempEnum = nullptr;
+        hr = pServices->ExecQuery(BSTR(L"WQL"), BSTR(L"SELECT * FROM MSAcpi_ThermalZoneTemperature WHERE Active=True"), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pTempEnum);
+
+        if (SUCCEEDED(hr) && pTempEnum) {
+            IWbemClassObject* pclsObj = nullptr;
+            ULONG uReturn = 0;
+            while (pTempEnum->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn) == S_OK) {
+                VARIANT vtProp;
+                VariantInit(&vtProp);
+                hr = pclsObj->Get(L"CurrentTemperature", 0, &vtProp, 0, 0);
+                if (SUCCEEDED(hr) && vtProp.vt == VT_I4) {
+                    // 温度是以0.1开尔文为单位的
+                    int tempK = vtProp.lVal / 10;
+                    cpuTemp = tempK - 273;  // 转换为摄氏度
+                    break;  // 使用第一个温度传感器
+                }
+                VariantClear(&vtProp);
+                pclsObj->Release();
+            }
+            pTempEnum->Release();
+        }
+
+        // 更新共享数据
+        {
+            std::lock_guard<std::mutex> lock(g_perfDataMutex);
+            g_latestPerfData.cpuTemp = cpuTemp;
+            g_latestPerfData.cpuTempValid = (cpuTemp > 0);
+            // GPU温度暂未实现
+        }
+
+        Sleep(2000);  // 每2秒更新一次
+    }
+
+    // 清理WMI
+    if (pServices) pServices->Release();
+    if (pLocator) pLocator->Release();
+
+    return 0;
+}
+
+// 初始化性能监控
+
+void InitializePerfMonitoring() {
+
+    // 检测GPU供应商
+
+    IDXGIFactory1* pFactory = nullptr;
+
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory))) {
+
+        UINT adapterIndex = 0;
+
+        IDXGIAdapter1* pAdapter = nullptr;
+
+        while (pFactory->EnumAdapters1(adapterIndex, &pAdapter) != DXGI_ERROR_NOT_FOUND) {
+
+            DXGI_ADAPTER_DESC1 desc;
+
+            if (SUCCEEDED(pAdapter->GetDesc1(&desc))) {
+
+                std::wstring vendorName = desc.Description;
+
+                if (vendorName.find(L"NVIDIA") != std::wstring::npos) {
+
+                    g_gpuVendor = GPU_NVIDIA;
+
+                } else if (vendorName.find(L"AMD") != std::wstring::npos || vendorName.find(L"Radeon") != std::wstring::npos) {
+
+                    g_gpuVendor = GPU_AMD;
+
+                } else if (vendorName.find(L"Intel") != std::wstring::npos) {
+
+                    g_gpuVendor = GPU_INTEL;
+
+                }
+
+                pAdapter->Release();
+
+                break;
+
+            }
+
+            pAdapter->Release();
+
+            adapterIndex++;
+
+        }
+
+        pFactory->Release();
+
+    }
+
+
+
+    // 加载NVML库（NVIDIA）
+
+    if (g_gpuVendor == GPU_NVIDIA) {
+
+        g_nvmlDll = LoadLibraryW(L"nvml.dll");
+
+        if (g_nvmlDll) {
+
+            nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
+
+            nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
+
+            nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
+
+            nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
+
+            nvmlDeviceGetName = (nvmlDeviceGetName_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetName");
+
+
+
+            if (nvmlInit && nvmlDeviceGetHandleByIndex && nvmlDeviceGetUtilizationRates) {
+
+                if (nvmlInit() == 0) {
+
+                    g_nvmlAvailable = true;
+
+                    if (nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice) != 0) {
+
+                        g_nvmlDevice = nullptr;
+
+                    }
+
+                }
+
+            }
+
+        }
+
+    }
+
+
+
+    // 加载ADL库（AMD）
+
+    if (g_gpuVendor == GPU_AMD) {
+
+        g_adlDll = LoadLibraryW(L"atiadlxx.dll");
+
+        if (g_adlDll) {
+
+            ADL_Main_Control_Create = (ADL_Main_Control_Create_t)GetProcAddress(g_adlDll, "ADL_Main_Control_Create");
+
+            ADL_Main_Control_Destroy = (ADL_Main_Control_Destroy_t)GetProcAddress(g_adlDll, "ADL_Main_Control_Destroy");
+
+            ADL_Adapter_NumberOfAdapters_Get = (ADL_Adapter_NumberOfAdapters_Get_t)GetProcAddress(g_adlDll, "ADL_Adapter_NumberOfAdapters_Get");
+
+            ADL_Adapter_AdapterInfo_Get = (ADL_Adapter_AdapterInfo_Get_t)GetProcAddress(g_adlDll, "ADL_Adapter_AdapterInfo_Get");
+
+            ADL_Overdrive5_CurrentActivity_Get = (ADL_Overdrive5_CurrentActivity_Get_t)GetProcAddress(g_adlDll, "ADL_Overdrive5_CurrentActivity_Get");
+
+
+
+            if (ADL_Main_Control_Create && ADL_Adapter_NumberOfAdapters_Get) {
+
+                if (ADL_Main_Control_Create(nullptr, 1) == 0) {
+
+                    g_adlAvailable = true;
+
+                }
+
+            }
+
+        }
+
+    }
+
+
+
+    // 初始化COM（用于WMI）
+
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+
+
+    // 启动工作线程
+
+    g_threadRunning[0] = true;
+
+    g_threadRunning[1] = true;
+
+    g_threadRunning[2] = true;   // 启动GPU占用率线程
+
+    g_threadRunning[3] = true;   // 启动温度检测线程
+
+
+
+    g_workerThreads[0] = CreateThread(nullptr, 0, WorkerThread1, nullptr, 0, nullptr);
+
+    g_workerThreads[1] = CreateThread(nullptr, 0, WorkerThread2, nullptr, 0, nullptr);
+
+    g_workerThreads[2] = CreateThread(nullptr, 0, WorkerThread3, nullptr, 0, nullptr);
+
+    g_workerThreads[3] = CreateThread(nullptr, 0, WorkerThread4, nullptr, 0, nullptr);
+
+}
+
+// 关闭性能监控
+void ShutdownPerfMonitoring() {
+    // 停止线程
+    for (int i = 0; i < 4; i++) {
+        g_threadRunning[i] = false;
+    }
+
+    // 等待线程结束
+    for (int i = 0; i < 4; i++) {
+        if (g_workerThreads[i]) {
+            WaitForSingleObject(g_workerThreads[i], 1000);
+            CloseHandle(g_workerThreads[i]);
+            g_workerThreads[i] = nullptr;
+        }
+    }
+
+    // 清理NVML
+    if (g_nvmlAvailable && nvmlShutdown) {
+        nvmlShutdown();
+    }
+    if (g_nvmlDll) {
+        FreeLibrary(g_nvmlDll);
+        g_nvmlDll = nullptr;
+    }
+
+    // 清理ADL
+    if (g_adlAvailable && ADL_Main_Control_Destroy) {
+        ADL_Main_Control_Destroy();
+    }
+    if (g_adlDll) {
+        FreeLibrary(g_adlDll);
+        g_adlDll = nullptr;
+    }
+
+    // 清理COM
+    CoUninitialize();
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
@@ -4910,7 +6016,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     
     InitializeCriticalSection(&g_cs);
     g_startTime = GetTickCount();
-    
+
+    // 初始化异步性能监控
+    InitializePerfMonitoring();
+
     // 先初始化默认主题颜色，确保弹窗显示正确
     UpdateThemeColors();
     

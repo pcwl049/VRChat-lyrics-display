@@ -1,4 +1,5 @@
-// moekoe_ws.cpp - MoeKoeMusic WebSocket Client
+﻿// moekoe_ws.cpp - MoeKoeMusic WebSocket Client
+#define _CRT_SECURE_NO_WARNINGS
 
 #include "moekoe_ws.h"
 #include <sstream>
@@ -8,6 +9,15 @@
 #pragma comment(lib, "ws2_32.lib")
 
 namespace moekoe {
+
+// Helper function to get temp log file path
+static std::string GetDebugLogPath(const char* filename) {
+    char tempPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    strcat_s(tempPath, "\\");
+    strcat_s(tempPath, filename);
+    return std::string(tempPath);
+}
 
 static std::string base64Encode(const std::string& input) {
     static const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -81,7 +91,11 @@ MoeKoeWS::~MoeKoeWS() {
 bool MoeKoeWS::connect() {
     if (running_) return connected_;
     
-    FILE* f = fopen("C:\\temp\\debug_ws.txt", "a");
+    char tempPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    strcat_s(tempPath, "\\moekoe_debug.log");
+    
+    FILE* f = fopen(tempPath, "a");
     if (f) fprintf(f, "=== CONNECT START ===\n");
     
     WSADATA wsa;
@@ -179,13 +193,14 @@ void MoeKoeWS::run() {
     std::vector<char> buffer;
     char chunk[4096];
     
-    FILE* f = fopen("C:\\temp\\debug_ws.txt", "a");
+    std::string logPath = GetDebugLogPath("moekoe_debug.log");
+    FILE* f = fopen(logPath.c_str(), "a");
     if (f) { fprintf(f, "=== RUN THREAD STARTED ===\n"); fclose(f); }
     
     while (running_) {
         // Auto-reconnect if not connected
         if (!connected_) {
-            f = fopen("C:\\temp\\debug_ws.txt", "a");
+            f = fopen(logPath.c_str(), "a");
             if (f) { fprintf(f, "Connection lost, waiting 2s before reconnect...\n"); fclose(f); }
             
             // Wait before reconnecting
@@ -202,7 +217,7 @@ void MoeKoeWS::run() {
             }
             
             // Try to reconnect
-            f = fopen("C:\\temp\\debug_ws.txt", "a");
+            f = fopen(logPath.c_str(), "a");
             if (f) { fprintf(f, "Attempting reconnect...\n"); fclose(f); }
             
             // Reconnect logic (simplified - just create new socket)
@@ -246,7 +261,7 @@ void MoeKoeWS::run() {
                             // Don't overwrite song info on reconnect - keep existing data
                             // Just mark as connected, next message will update song info
                             if (callback_) callback_(songInfo_);
-                            f = fopen("C:\\temp\\debug_ws.txt", "a");
+                            f = fopen(logPath.c_str(), "a");
                             if (f) { fprintf(f, "Reconnect successful!\n"); fclose(f); }
                         }
                     }
@@ -254,7 +269,7 @@ void MoeKoeWS::run() {
             }
             
             if (!connected_) {
-                f = fopen("C:\\temp\\debug_ws.txt", "a");
+                f = fopen(logPath.c_str(), "a");
                 if (f) { fprintf(f, "Reconnect failed, will retry...\n"); fclose(f); }
                 continue;
             }
@@ -262,14 +277,14 @@ void MoeKoeWS::run() {
         
         int len = recv(sock_, chunk, sizeof(chunk), 0);
         if (len <= 0) {
-            f = fopen("C:\\temp\\debug_ws.txt", "a");
+            f = fopen(logPath.c_str(), "a");
             if (f) { fprintf(f, "recv failed or closed: %d\n", len); fclose(f); }
             connected_ = false;
             buffer.clear();
             continue;
         }
         
-        f = fopen("C:\\temp\\debug_ws.txt", "a");
+        f = fopen(logPath.c_str(), "a");
         if (f) { fprintf(f, "recv %d bytes\n", len); fclose(f); }
         
         buffer.insert(buffer.end(), chunk, chunk + len);
@@ -332,7 +347,8 @@ static std::string extractTag(const std::string& lyricsData, const std::string& 
 static std::vector<LyricLine> parseKRC(const std::string& krcData) {
     std::vector<LyricLine> lyrics;
     
-    FILE* f = fopen("C:\\temp\\debug_krc.txt", "a");
+    std::string krcLogPath = GetDebugLogPath("moekoe_krc.log");
+    FILE* f = fopen(krcLogPath.c_str(), "a");
     
     // Split by lines
     std::string line;
@@ -445,7 +461,8 @@ static bool jsonGetBool(const std::string& json, const std::string& key) {
 
 void MoeKoeWS::parseMessage(const std::string& msg) {
     // Debug: write received message to file
-    FILE* f = fopen("C:\\temp\\debug_ws.txt", "a");
+    std::string logPath = GetDebugLogPath("moekoe_debug.log");
+    FILE* f = fopen(logPath.c_str(), "a");
     if (f) {
         fprintf(f, "=== RECV ===\n%s\n", msg.c_str());
     }
@@ -565,27 +582,104 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                                 case '\\': unescaped += '\\'; i++; break;
                                 case '"': unescaped += '"'; i++; break;
                                 case 'u': {
-                                    // Handle \uXXXX Unicode escape
+                                    // Handle \uXXXX Unicode escape (including surrogate pairs)
+                                    // Need at least 6 characters: \uXXXX
                                     if (i + 5 < lyricsData.size()) {
-                                        std::string hex = lyricsData.substr(i + 2, 4);
-                                        try {
-                                            unsigned int codepoint = std::stoul(hex, nullptr, 16);
-                                            // Convert Unicode codepoint to UTF-8
-                                            if (codepoint < 0x80) {
-                                                unescaped += (char)codepoint;
-                                            } else if (codepoint < 0x800) {
-                                                unescaped += (char)(0xC0 | (codepoint >> 6));
-                                                unescaped += (char)(0x80 | (codepoint & 0x3F));
-                                            } else {
-                                                unescaped += (char)(0xE0 | (codepoint >> 12));
-                                                unescaped += (char)(0x80 | ((codepoint >> 6) & 0x3F));
-                                                unescaped += (char)(0x80 | (codepoint & 0x3F));
+                                        // Validate hex characters first
+                                        bool validHex = true;
+                                        for (int j = 0; j < 4; j++) {
+                                            char c = lyricsData[i + 2 + j];
+                                            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                                                validHex = false;
+                                                break;
                                             }
-                                            i += 5;  // Skip \uXXXX
-                                        } catch (...) {
-                                            unescaped += lyricsData[i];
+                                        }
+                                        
+                                        if (validHex) {
+                                            try {
+                                                std::string hex = lyricsData.substr(i + 2, 4);
+                                                unsigned int codepoint = std::stoul(hex, nullptr, 16);
+                                                
+                                                // Check for surrogate pair (high surrogate: D800-DBFF)
+                                                if (codepoint >= 0xD800 && codepoint <= 0xDBFF) {
+                                                    // Look for low surrogate (DC00-DFFF)
+                                                    // Need \uXXXX\uXXXX = 12 characters total
+                                                    if (i + 11 < lyricsData.size() && 
+                                                        lyricsData[i + 6] == '\\' && 
+                                                        lyricsData[i + 7] == 'u') {
+                                                        // Validate second hex sequence
+                                                        bool validHex2 = true;
+                                                        for (int j = 0; j < 4; j++) {
+                                                            char c = lyricsData[i + 8 + j];
+                                                            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                                                                validHex2 = false;
+                                                                break;
+                                                            }
+                                                        }
+                                                        
+                                                        if (validHex2) {
+                                                            std::string hex2 = lyricsData.substr(i + 8, 4);
+                                                            unsigned int lowSurrogate = std::stoul(hex2, nullptr, 16);
+                                                            if (lowSurrogate >= 0xDC00 && lowSurrogate <= 0xDFFF) {
+                                                                // Combine surrogate pair
+                                                                codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + (lowSurrogate - 0xDC00);
+                                                                i += 11;  // Skip both \uXXXX\uXXXX
+                                                            } else {
+                                                                // Invalid low surrogate, use replacement character for high surrogate
+                                                                codepoint = 0xFFFD;  // Unicode replacement character
+                                                                i += 5;
+                                                            }
+                                                        } else {
+                                                            // Invalid hex in low surrogate, use replacement character
+                                                            codepoint = 0xFFFD;
+                                                            i += 5;
+                                                        }
+                                                    } else {
+                                                        // No low surrogate found, use replacement character
+                                                        codepoint = 0xFFFD;
+                                                        i += 5;
+                                                    }
+                                                } else if (codepoint >= 0xDC00 && codepoint <= 0xDFFF) {
+                                                    // Unexpected low surrogate, use replacement character
+                                                    codepoint = 0xFFFD;
+                                                    i += 5;
+                                                } else {
+                                                    i += 5;  // Skip \uXXXX
+                                                }
+                                                
+                                                // Convert Unicode codepoint to UTF-8
+                                                if (codepoint < 0x80) {
+                                                    unescaped += (char)codepoint;
+                                                } else if (codepoint < 0x800) {
+                                                    unescaped += (char)(0xC0 | (codepoint >> 6));
+                                                    unescaped += (char)(0x80 | (codepoint & 0x3F));
+                                                } else if (codepoint < 0x10000) {
+                                                    unescaped += (char)(0xE0 | (codepoint >> 12));
+                                                    unescaped += (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                                                    unescaped += (char)(0x80 | (codepoint & 0x3F));
+                                                } else {
+                                                    // 4-byte UTF-8 for codepoints >= 0x10000
+                                                    unescaped += (char)(0xF0 | (codepoint >> 18));
+                                                    unescaped += (char)(0x80 | ((codepoint >> 12) & 0x3F));
+                                                    unescaped += (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                                                    unescaped += (char)(0x80 | (codepoint & 0x3F));
+                                                }
+                                            } catch (...) {
+                                                // On any error, use replacement character
+                                                unescaped += (char)0xEF;
+                                                unescaped += (char)0xBF;
+                                                unescaped += (char)0xBD;  // UTF-8 for U+FFFD
+                                                i += 5;
+                                            }
+                                        } else {
+                                            // Invalid hex characters, output replacement and skip
+                                            unescaped += (char)0xEF;
+                                            unescaped += (char)0xBF;
+                                            unescaped += (char)0xBD;  // UTF-8 for U+FFFD
+                                            i += 5;
                                         }
                                     } else {
+                                        // Not enough characters for \uXXXX, just output backslash
                                         unescaped += lyricsData[i];
                                     }
                                     break;
@@ -717,11 +811,13 @@ std::vector<uint8_t> OSCSender::buildOSCMessage(const std::string& address, cons
 }
 
 bool OSCSender::sendChatbox(const std::string& message) {
+    std::string oscLogPath = GetDebugLogPath("moekoe_osc.log");
+    
     if (sock_ == INVALID_SOCKET) {
         // Try to recreate socket
         sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (sock_ == INVALID_SOCKET) {
-            FILE* f = fopen("C:\\temp\\debug_osc.txt", "a");
+            FILE* f = fopen(oscLogPath.c_str(), "a");
             if (f) {
                 fprintf(f, "[OSC] Failed to create socket: %d\n", WSAGetLastError());
                 fclose(f);
@@ -753,7 +849,7 @@ bool OSCSender::sendChatbox(const std::string& message) {
                         (sockaddr*)&addr, sizeof(addr));
     
     // Debug output
-    FILE* f = fopen("C:\\temp\\debug_osc.txt", "a");
+    FILE* f = fopen(oscLogPath.c_str(), "a");
     if (f) {
         if (result == SOCKET_ERROR) {
             fprintf(f, "[OSC] sendto failed: %d\n", WSAGetLastError());

@@ -18,7 +18,7 @@ if not exist ..\bin mkdir ..\bin
 echo [Compiling...]
 cl /std:c++20 /EHsc /W3 /O2 /MD /utf-8 /await ^
     main_gui.cpp glass_window.cpp moekoe_ws.cpp netease_ws.cpp smtc_client.cpp ^
-    runtimeobject.lib windowsapp.lib dwmapi.lib ole32.lib user32.lib gdi32.lib gdiplus.lib shell32.lib ws2_32.lib msimg32.lib winhttp.lib ^
+    runtimeobject.lib windowsapp.lib dwmapi.lib ole32.lib user32.lib gdi32.lib gdiplus.lib shell32.lib ws2_32.lib msimg32.lib winhttp.lib dxgi.lib ^
     /Fe:..\bin\VRCLyricsDisplay.exe
 
 if %errorlevel% equ 0 (
