@@ -6070,14 +6070,16 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                 SECURITY_ATTRIBUTES sa = { sizeof(sa)};
                 HANDLE hReadPipe, hWritePipe;
                 
-                si.dwFlags = STARTF_USESTDHANDLES;
+                si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_HIDE;
                 CreatePipe(&hReadPipe, &hWritePipe, &sa, 0);
                 SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
                 si.hStdOutput = hWritePipe;
+                si.hStdError = hWritePipe;
                 
                 wchar_t cmd[] = L"nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits";
                 
-                if (CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+                if (CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
                     CloseHandle(hWritePipe);
                     
                     char buffer[512];
