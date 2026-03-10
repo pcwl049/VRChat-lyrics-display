@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.3.6"
-#define APP_VERSION_NUM 306  // 0.3.6 -> 0*10000 + 3*100 + 6 = 306
+#define APP_VERSION "0.4.0-beta"
+#define APP_VERSION_NUM 400  // 0.4.0-beta -> 0*10000 + 4*100 + 0 = 400
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
