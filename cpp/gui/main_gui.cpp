@@ -5831,7 +5831,54 @@ DWORD WINAPI WorkerThread3(LPVOID param) {
             }
         }
         
-        // 保底方案：使用LibreHardwareMonitor WMI
+        // 保底方案1: 使用nvidia-smi命令行工具（NVIDIA）
+        if (gpuUsage == 0 && g_gpuVendor == GPU_NVIDIA) {
+            STARTUPINFOW si = { sizeof(si)};
+            PROCESS_INFORMATION pi = {0};
+            SECURITY_ATTRIBUTES sa = { sizeof(sa)};
+            HANDLE hReadPipe, hWritePipe;
+            
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            
+            CreatePipe(&hReadPipe, &hWritePipe, &sa, 0);
+            SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            si.hStdOutput = hWritePipe;
+            
+            wchar_t cmd[] = L"nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits";
+            
+            if (CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+                CloseHandle(hWritePipe);
+                
+                char buffer[256];
+                DWORD bytesRead;
+                std::string output;
+                
+                while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
+                    buffer[bytesRead] = '\0';
+                    output += buffer;
+                }
+                
+                CloseHandle(hReadPipe);
+                WaitForSingleObject(pi.hProcess, 5000);  // 等待最多5秒
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                
+                // 解析输出
+                if (!output.empty()) {
+                    // nvidia-smi输出格式: "45"
+                    gpuUsage = atoi(output.c_str());
+                    if (gpuUsage < 0) gpuUsage = 0;
+                    if (gpuUsage > 100) gpuUsage = 100;
+                }
+            } else {
+                if (hReadPipe) CloseHandle(hReadPipe);
+                if (hWritePipe) CloseHandle(hWritePipe);
+            }
+        }
+        
+        // 保底方案2: 使用LibreHardwareMonitor WMI
         if (gpuUsage == 0 && lhmInitialized && pLHMServices) {
             IEnumWbemClassObject* pEnumerator = nullptr;
             HRESULT hr = pLHMServices->ExecQuery(BSTR(L"WQL"), 
