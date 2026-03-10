@@ -248,7 +248,7 @@ std::string WstringToUtf8(const std::wstring& wstr);
 std::wstring Utf8ToWstring(const std::string& str);
 int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length);
 std::wstring BuildProgressBar(double progress, int bars);
-std::string BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
+std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
 
 // 异步性能检测线程函数
 DWORD WINAPI WorkerThread1(LPVOID param);  // 原生API: CPU/RAM
@@ -1347,7 +1347,7 @@ int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
     return size.cx;
 }
 
-std::string BuildPerformanceOSCMessage(int type) {
+std::wstring BuildPerformanceOSCMessage(int type) {
     std::wstring name;
     std::wstring icon;
     double value1 = 0.0;  // 主要参数（占用率）
@@ -1488,7 +1488,7 @@ std::string BuildPerformanceOSCMessage(int type) {
         msg += L"]";
     }
 
-    return WstringToUtf8(msg);
+    return msg;
 }
 
 std::vector<std::wstring> LoadNoLyricMessages(const wchar_t* configPath) {
@@ -2120,7 +2120,19 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         DWORD now = GetTickCount();
         DWORD minInterval = g_playStateChanged ? 500 : (!info.isPlaying ? OSC_PAUSE_INTERVAL : OSC_MIN_INTERVAL);
         if (now - g_lastOscSendTime >= minInterval) {
-            std::wstring oscMsg = FormatOSCMessage(info);
+            std::wstring oscMsg;
+            
+            // 根据显示模式选择消息类型
+            if (g_performanceMode == 1) {
+                // 性能模式：循环发送CPU、RAM、GPU
+                static int perfType = 0;  // 0=CPU, 1=RAM, 2=GPU
+                oscMsg = BuildPerformanceOSCMessage(perfType);
+                perfType = (perfType + 1) % 3;  // 循环切换
+            } else {
+                // 音乐模式：发送歌曲信息
+                oscMsg = FormatOSCMessage(info);
+            }
+            
             if (oscMsg != g_lastOscMessage || g_playStateChanged) {
                 g_osc->sendChatbox(oscMsg);
                 g_lastOscMessage = oscMsg;
@@ -5642,7 +5654,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             
                             DWORD now = GetTickCount();
                             if (now - g_lastOscSendTime >= OSC_MIN_INTERVAL) {
-                                std::wstring oscMsg = FormatOSCMessage(info);
+                                std::wstring oscMsg;
+                                
+                                // 根据显示模式选择消息类型
+                                if (g_performanceMode == 1) {
+                                    // 性能模式：循环发送CPU、RAM、GPU
+                                    static int perfType = 0;  // 0=CPU, 1=RAM, 2=GPU
+                                    oscMsg = BuildPerformanceOSCMessage(perfType);
+                                    perfType = (perfType + 1) % 3;  // 循环切换
+                                } else {
+                                    // 音乐模式：发送歌曲信息
+                                    oscMsg = FormatOSCMessage(info);
+                                }
+                                
                                 if (oscMsg != g_lastOscMessage) {
                                     g_osc->sendChatbox(oscMsg);
                                     g_lastOscMessage = oscMsg;
