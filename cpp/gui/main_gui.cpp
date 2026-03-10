@@ -1474,14 +1474,14 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     
     // CPU进度条（双标记：占用率+温度）
     {
-        int cpuFilled = (int)(g_cpuUsage / 100.0 * 20);  // 20格进度条
+        int cpuFilled = (int)(g_cpuUsage / 100.0 * 7);  // 7格进度条
         int tempPos = -1;
         if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
-            tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 20);  // 温度按100°C上限
-            if (tempPos > 20) tempPos = 20;
+            tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 7);  // 温度按100°C上限
+            if (tempPos > 7) tempPos = 7;
         }
         msg += L"[";
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 7; i++) {
             if (i == tempPos && tempPos >= 0) {
                 msg += L"│";  // 温度标记
             } else if (i < cpuFilled) {
@@ -1516,9 +1516,9 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     
     // RAM进度条（单标记）
     {
-        int ramFilled = (int)(g_ramUsage / 100.0 * 20);
+        int ramFilled = (int)(g_ramUsage / 100.0 * 7);
         msg += L"[";
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 7; i++) {
             msg += (i < ramFilled) ? L"█" : L"░";
         }
         msg += L"] ";
@@ -1550,15 +1550,15 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     
     // GPU进度条（双标记：占用率+显存）
     if (g_latestPerfData.gpuUsageValid) {
-        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 20);
+        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 7);
         int vramPos = -1;
         if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
             double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
-            vramPos = (int)(vramPercent / 100.0 * 20);
-            if (vramPos > 20) vramPos = 20;
+            vramPos = (int)(vramPercent / 100.0 * 7);
+            if (vramPos > 7) vramPos = 7;
         }
         msg += L"[";
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 7; i++) {
             if (i == vramPos && vramPos >= 0) {
                 msg += L"│";  // 显存标记
             } else if (i < gpuFilled) {
@@ -1577,7 +1577,7 @@ std::wstring BuildPerformanceOSCMessage(int type) {
         }
         msg += labelBuf;
     } else {
-        msg += L"[░░░░░░░░░░░░░░░░░░░░] N/A";
+        msg += L"[░░░░░░░] N/A";
     }
     
     return msg;
