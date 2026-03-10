@@ -1371,15 +1371,12 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     
     // RAM信息
     msg += L"💾" + g_ramDisplayName + L" ";
-    wchar_t ramBuf[32];
-    swprintf_s(ramBuf, L"%.0f%%", g_ramUsage);
-    msg += ramBuf;
-    if (g_latestPerfData.ramTotal > 0) {
-        wchar_t ramDetailBuf[32];
-        swprintf_s(ramDetailBuf, L" 📊%.1fG/%.1fG", 
-            (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0,
-            (double)g_latestPerfData.ramTotal / 1024.0 / 1024.0 / 1024.0);
-        msg += ramDetailBuf;
+    if (g_latestPerfData.ramUsed > 0) {
+        wchar_t ramBuf[32];
+        swprintf_s(ramBuf, L"%.1fG", (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0);
+        msg += ramBuf;
+    } else {
+        msg += L"N/A";
     }
     msg += L"\n";
     
