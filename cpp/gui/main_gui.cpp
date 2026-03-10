@@ -1247,9 +1247,37 @@ bool g_adlAvailable = false;
 bool g_lhmAvailable = false;
 
 // NVML函数指针（NVIDIA）
+// NVML返回值枚举
+enum nvmlReturn_t {
+    NVML_SUCCESS = 0,
+    NVML_ERROR_UNINITIALIZED = 1,
+    NVML_ERROR_INVALID_ARGUMENT = 2,
+    NVML_ERROR_NOT_SUPPORTED = 3,
+    NVML_ERROR_NO_PERMISSION = 4,
+    NVML_ERROR_ALREADY_INITIALIZED = 5,
+    NVML_ERROR_NOT_FOUND = 6,
+    NVML_ERROR_INSUFFICIENT_SIZE = 7,
+    NVML_ERROR_INSUFFICIENT_POWER = 8,
+    NVML_ERROR_DRIVER_NOT_LOADED = 9,
+    NVML_ERROR_TIMEOUT = 10,
+    NVML_ERROR_IRQ_ISSUE = 11,
+    NVML_ERROR_LIBRARY_NOT_FOUND = 12,
+    NVML_ERROR_FUNCTION_NOT_FOUND = 13,
+    NVML_ERROR_CORRUPTED_INFOROM = 14,
+    NVML_ERROR_GPU_IS_LOST = 15,
+    NVML_ERROR_RESET_REQUIRED = 16,
+    NVML_ERROR_OPERATING_SYSTEM = 17,
+    NVML_ERROR_LIB_RM_VERSION_MISMATCH = 18,
+    NVML_ERROR_IN_USE = 19,
+    NVML_ERROR_MEMORY = 20,
+    NVML_ERROR_NO_DATA = 21,
+    NVML_ERROR_VGPU_ECC_NOT_READY = 22,
+    NVML_ERROR_UNKNOWN = 999
+};
+
 typedef int (*nvmlInit_t)();
 typedef int (*nvmlShutdown_t)();
-typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int, void*);
+typedef int (*nvmlDeviceGetHandleByIndex_t)(unsigned int, void**);
 
 // NVML Utilization结构体
 typedef struct nvmlUtilization_st {
@@ -1483,12 +1511,21 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     }
     msg += L"\n";
     
-    // GPU进度条
+    // GPU进度条（使用率)
     if (g_latestPerfData.gpuUsageValid) {
         int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 7);
         msg += L"[";
         for (int i = 0; i < 7; i++) msg += (i < gpuFilled) ? L"█" : L"░";
-        msg += L"]";
+        msg += L"]\n";
+
+        // 显存进度条（使用竖线）
+        if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
+            double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
+            int vramFilled = (int)(vramPercent / 100.0 * 7);
+            msg += L"[";
+            for (int i = 0; i < 7; i++) msg += (i < vramFilled) ? L"│" : L" ";
+            msg += L"]";
+        }
     } else {
         msg += L"[░░░░░░░]";
     }
@@ -5938,26 +5975,33 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
             DWORD64 gpuVramTotal = 0;
             
             // 优先级1: NVIDIA NVML（同时获取占用率和显存）
-            if (g_gpuVendor == GPU_NVIDIA && g_nvmlAvailable && nvmlInit && nvmlDeviceGetUtilizationRates) {
-                void* device = nullptr;
-                if (nvmlDeviceGetHandleByIndex(0, &device) == 0) {
-                    // 获取GPU占用率
-                    nvmlUtilization_t utilization;
-                    if (nvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
-                        gpuUsage = (int)utilization.gpu;
-                    }
-                    
-                    // 获取显存信息（如果函数可用）
-                    if (nvmlDeviceGetMemoryInfo) {
-                        nvmlMemory_t memory;
-                        if (nvmlDeviceGetMemoryInfo(device, &memory) == 0) {
-                            gpuVramTotal = memory.total;
-                            gpuVramUsed = memory.used;
-                            char msg[128];
-                            sprintf_s(msg, "[PerfMonitor] NVML: GPU=%d%%, VRAM=%llu/%llu MB", 
-                                     gpuUsage, memory.used/1024/1024, memory.total/1024/1024);
-                            LOG_DEBUG(msg);
-                        }
+            if (g_gpuVendor == GPU_NVIDIA && g_nvmlAvailable && g_nvmlDevice && nvmlDeviceGetUtilizationRates) {
+                // 获取GPU占用率
+                nvmlUtilization_t utilization = {0, 0};
+                int utilResult = nvmlDeviceGetUtilizationRates(g_nvmlDevice, &utilization);
+                if (utilResult == NVML_SUCCESS) {
+                    gpuUsage = (int)utilization.gpu;
+                } else {
+                    char errMsg[64];
+                    sprintf_s(errMsg, "[PerfMonitor] NVML GetUtilizationRates failed: %d", utilResult);
+                    LOG_DEBUG(errMsg);
+                }
+                
+                // 获取显存信息（如果函数可用）
+                if (nvmlDeviceGetMemoryInfo) {
+                    nvmlMemory_t memory = {0, 0, 0};
+                    int memResult = nvmlDeviceGetMemoryInfo(g_nvmlDevice, &memory);
+                    if (memResult == NVML_SUCCESS) {
+                        gpuVramTotal = memory.total;
+                        gpuVramUsed = memory.used;
+                        char msg[128];
+                        sprintf_s(msg, "[PerfMonitor] NVML: GPU=%d%%, VRAM=%llu/%llu MB", 
+                                 gpuUsage, memory.used/1024/1024, memory.total/1024/1024);
+                        LOG_DEBUG(msg);
+                    } else {
+                        char errMsg[64];
+                        sprintf_s(errMsg, "[PerfMonitor] NVML GetMemoryInfo failed: %d", memResult);
+                        LOG_DEBUG(errMsg);
                     }
                 }
             }
@@ -6117,6 +6161,9 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                             int tempC = tempK - 273;
                             if (tempC > 0 && tempC < 150) {
                                 cpuTemp = tempC;
+                                char tempMsg[64];
+                                sprintf_s(tempMsg, "[PerfMonitor] ACPI Temperature: %d°C", cpuTemp);
+                                LOG_DEBUG(tempMsg);
                                 break;
                             }
                         }
@@ -6142,13 +6189,64 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                         VariantInit(&vt);
                         if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
                             cpuTemp = (int)vt.fltVal;
-                            if (cpuTemp > 0 && cpuTemp < 150) break;
+                            if (cpuTemp > 0 && cpuTemp < 150) {
+                                char tempMsg[64];
+                                sprintf_s(tempMsg, "[PerfMonitor] LHM CPU Temperature: %d°C", cpuTemp);
+                                LOG_DEBUG(tempMsg);
+                                break;
+                            }
                         }
                         VariantClear(&vt);
                         pObj->Release();
                     }
                     pEnum->Release();
                 }
+            }
+            
+            // 如果没有获取到温度，尝试其他方法
+            if (cpuTemp == 0 && lhmInitialized && pLhmServices) {
+                // 尝试获取任何CPU相关温度传感器
+                IEnumWbemClassObject* pEnum = nullptr;
+                HRESULT hr = pLhmServices->ExecQuery(BSTR(L"WQL"), 
+                    BSTR(L"SELECT Name, Value FROM Sensor WHERE SensorType='Temperature'"), 
+                    WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &pEnum);
+                
+                if (SUCCEEDED(hr) && pEnum) {
+                    IWbemClassObject* pObj = nullptr;
+                    ULONG uReturn = 0;
+                    while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                        VARIANT vtName, vtValue;
+                        VariantInit(&vtName);
+                        VariantInit(&vtValue);
+                        bool found = false;
+                        if (SUCCEEDED(pObj->Get(L"Name", 0, &vtName, 0, 0)) && vtName.vt == VT_BSTR &&
+                            SUCCEEDED(pObj->Get(L"Value", 0, &vtValue, 0, 0)) && vtValue.vt == VT_R4) {
+                            std::wstring name = vtName.bstrVal;
+                            // 检查是否是CPU相关传感器
+                            if (name.find(L"CPU") != std::wstring::npos || 
+                                name.find(L"Core") != std::wstring::npos ||
+                                name.find(L"Package") != std::wstring::npos) {
+                                int temp = (int)vtValue.fltVal;
+                                if (temp > 0 && temp < 150) {
+                                    cpuTemp = temp;
+                                    char tempMsg[128];
+                                    sprintf_s(tempMsg, "[PerfMonitor] LHM Temperature Sensor '%ls': %d°C", name.c_str(), cpuTemp);
+                                    LOG_DEBUG(tempMsg);
+                                    found = true;
+                                }
+                            }
+                        }
+                        VariantClear(&vtName);
+                        VariantClear(&vtValue);
+                        pObj->Release();
+                        if (found) break;
+                    }
+                    pEnum->Release();
+                }
+            }
+            
+            if (cpuTemp == 0) {
+                LOG_DEBUG("[PerfMonitor] CPU temperature not available (requires LibreHardwareMonitor)");
             }
             
             // 更新共享数据
@@ -6204,31 +6302,75 @@ void InitializePerfMonitoring() {
     if (g_gpuVendor == GPU_NVIDIA) {
         g_nvmlDll = LoadLibraryW(L"nvml.dll");
         if (g_nvmlDll) {
-            nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
+            LOG_INFO("[NVML] nvml.dll loaded successfully");
+            
+            // 尝试加载 _v2 版本的函数，失败则回退到旧版本
+            nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit_v2");
+            if (!nvmlInit) {
+                nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
+                LOG_INFO("[NVML] Using legacy nvmlInit");
+            } else {
+                LOG_INFO("[NVML] Using nvmlInit_v2");
+            }
+            
             nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
-            nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
+            
+            nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex_v2");
+            if (!nvmlDeviceGetHandleByIndex) {
+                nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
+                LOG_INFO("[NVML] Using legacy nvmlDeviceGetHandleByIndex");
+            } else {
+                LOG_INFO("[NVML] Using nvmlDeviceGetHandleByIndex_v2");
+            }
+            
             nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
             nvmlDeviceGetMemoryInfo = (nvmlDeviceGetMemoryInfo_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetMemoryInfo");
             nvmlDeviceGetName = (nvmlDeviceGetName_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetName");
 
             if (nvmlInit && nvmlDeviceGetHandleByIndex && nvmlDeviceGetUtilizationRates) {
                 int initResult = nvmlInit();
-                if (initResult == 0) {
-                    g_nvmlAvailable = true;
+                char initMsg[64];
+                sprintf_s(initMsg, "[NVML] nvmlInit returned: %d", initResult);
+                LOG_INFO(initMsg);
+                
+                if (initResult == NVML_SUCCESS) {
                     int handleResult = nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice);
-                    if (handleResult != 0) {
+                    char handleMsg[64];
+                    sprintf_s(handleMsg, "[NVML] GetHandleByIndex(0) returned: %d", handleResult);
+                    LOG_INFO(handleMsg);
+                    
+                    if (handleResult == NVML_SUCCESS) {
+                        g_nvmlAvailable = true;
+                        LOG_INFO("[NVML] NVML initialized successfully");
+                        
+                        // 测试获取GPU名称
+                        if (nvmlDeviceGetName) {
+                            char gpuName[256] = {0};
+                            if (nvmlDeviceGetName(g_nvmlDevice, gpuName, sizeof(gpuName)) == NVML_SUCCESS) {
+                                char nameMsg[300];
+                                sprintf_s(nameMsg, "[NVML] GPU Name: %s", gpuName);
+                                LOG_INFO(nameMsg);
+                            }
+                        }
+                    } else {
                         g_nvmlDevice = nullptr;
-                        g_nvmlAvailable = false;
                         nvmlShutdown();
+                        LOG_ERROR("[NVML] Failed to get device handle");
                     }
                 } else {
-                    g_nvmlAvailable = false;
+                    LOG_ERROR("[NVML] nvmlInit failed");
                 }
+            } else {
+                LOG_ERROR("[NVML] Required functions not found in nvml.dll");
             }
+            
             if (!g_nvmlAvailable) {
                 FreeLibrary(g_nvmlDll);
                 g_nvmlDll = nullptr;
+                LOG_ERROR("[NVML] NVML initialization failed, falling back to nvidia-smi");
             }
+        } else {
+            LOG_ERROR("[NVML] Failed to load nvml.dll");
         }
     }
 
