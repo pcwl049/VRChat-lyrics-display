@@ -970,55 +970,81 @@ void NeteaseWS::parseLrcLyrics(const std::string& lrc, const std::string& tLrc) 
                 double seconds = std::stod(timeStr.substr(colonPos + 1));
                 double timeMs = (minutes * 60 + seconds) * 1000;
                 
-                size_t textStart = endBracket + 1;
-                size_t textEnd = text.find('\n', textStart);
-                if (textEnd == std::string::npos) textEnd = text.length();
-                std::string lyricText = text.substr(textStart, textEnd - textStart);
-                
-                // Trim
-                while (!lyricText.empty() && (lyricText[0] == ' ' || lyricText[0] == '\r')) {
-                    lyricText = lyricText.substr(1);
-                }
-                while (!lyricText.empty() && (lyricText.back() == ' ' || lyricText.back() == '\r')) {
-                    lyricText.pop_back();
-                }
-                
-                // Remove any remaining time tags from lyric text
-                // Format: [mm:ss.xx] or [mm:ss:xx] or [mm:ss]
-                size_t tagPos = 0;
-                while ((tagPos = lyricText.find('[', tagPos)) != std::string::npos) {
-                    size_t tagEnd = lyricText.find(']', tagPos);
-                    if (tagEnd == std::string::npos) break;
+                // Find all consecutive time tags
+                std::vector<size_t> tagPositions;
+                size_t searchPos = pos;
+                while (true) {
+                    size_t nextTag = text.find('[', searchPos);
+                    if (nextTag == std::string::npos) break;
                     
-                    std::string tagContent = lyricText.substr(tagPos + 1, tagEnd - tagPos - 1);
-                    size_t tagColonPos = tagContent.find(':');
+                    size_t nextEnd = text.find(']', nextTag);
+                    if (nextEnd == std::string::npos) break;
                     
-                    // Check if this looks like a time tag
-                    bool isTimeTag = false;
-                    if (tagColonPos != std::string::npos) {
-                        isTimeTag = true;
-                        // Check if content before and after colon are numeric
-                        for (size_t i = 0; i < tagContent.size(); i++) {
-                            char c = tagContent[i];
-                            if (i == tagColonPos) continue;
-                            if (!isdigit(c) && c != '.' && c != '-' && c != ' ') {
-                                isTimeTag = false;
+                    std::string nextTimeStr = text.substr(nextTag + 1, nextEnd - nextTag - 1);
+                    size_t nextColon = nextTimeStr.find(':');
+                    if (nextColon == std::string::npos) break;
+                    
+                    // Check if this is a valid time tag (not metadata)
+                    bool isValidTime = true;
+                    std::string nextPrefix = nextTimeStr.substr(0, nextColon);
+                    for (char& c : nextPrefix) c = tolower(c);
+                    if (isMetadataTag(nextPrefix)) {
+                        isValidTime = false;
+                    } else {
+                        for (char c : nextPrefix) {
+                            if (!isdigit(c) && c != '.') {
+                                isValidTime = false;
                                 break;
                             }
                         }
                     }
                     
-                    if (isTimeTag) {
-                        // Remove the time tag
-                        lyricText.erase(tagPos, tagEnd - tagPos + 1);
-                        // Remove leading space after tag removal
-                        while (tagPos < lyricText.size() && lyricText[tagPos] == ' ') {
-                            lyricText.erase(tagPos, 1);
-                        }
-                        // Continue checking from same position
+                    if (isValidTime) {
+                        tagPositions.push_back(nextTag);
+                        searchPos = nextEnd + 1;
                     } else {
-                        tagPos = tagEnd + 1;
+                        break;
                     }
+                }
+                
+                // If there are multiple consecutive time tags, find the shared lyric text
+                // The lyric text is after the last time tag until the next newline or next non-time tag
+                size_t lastTagEnd = tagPositions.empty() ? endBracket : text.find(']', tagPositions.back()) + 1;
+                size_t textStart = lastTagEnd;
+                
+                // Find the next newline or next non-time tag
+                size_t textEnd = text.find('\n', textStart);
+                size_t nextTagStart = text.find('[', textStart);
+                
+                // If there's another tag before newline, check if it's a time tag
+                if (nextTagStart != std::string::npos && (textEnd == std::string::npos || nextTagStart < textEnd)) {
+                    std::string nextTag = text.substr(nextTagStart + 1, text.find(']', nextTagStart) - nextTagStart - 1);
+                    size_t nextColon = nextTag.find(':');
+                    if (nextColon != std::string::npos) {
+                        std::string nextPrefix = nextTag.substr(0, nextColon);
+                        bool isTime = true;
+                        for (char c : nextPrefix) {
+                            if (!isdigit(c) && c != '.') {
+                                isTime = false;
+                                break;
+                            }
+                        }
+                        if (isTime) {
+                            // This is a time tag, so lyric text ends here
+                            textEnd = nextTagStart;
+                        }
+                    }
+                }
+                
+                if (textEnd == std::string::npos) textEnd = text.length();
+                std::string lyricText = text.substr(textStart, textEnd - textStart);
+                
+                // Trim
+                while (!lyricText.empty() && (lyricText[0] == ' ' || lyricText[0] == '\r' || lyricText[0] == '\t')) {
+                    lyricText = lyricText.substr(1);
+                }
+                while (!lyricText.empty() && (lyricText.back() == ' ' || lyricText.back() == '\r')) {
+                    lyricText.pop_back();
                 }
                 
                 if (!lyricText.empty()) {
@@ -1028,7 +1054,9 @@ void NeteaseWS::parseLrcLyrics(const std::string& lrc, const std::string& tLrc) 
                         wtext.resize(len - 1);
                         MultiByteToWideChar(CP_UTF8, 0, lyricText.c_str(), -1, &wtext[0], len);
                     }
-                    lines.push_back({timeMs, wtext});
+                    if (!wtext.empty()) {
+                        lines.push_back({timeMs, wtext});
+                    }
                 }
             } catch (...) {}
             pos = endBracket + 1;
