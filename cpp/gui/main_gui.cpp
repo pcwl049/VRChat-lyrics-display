@@ -1446,6 +1446,262 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     return lyrics;
 }
 
+// Search lyrics from Qishui Music (汽水音乐) API
+// API: 搜索 -> https://api.qishui.com/luna/pc/search/track?q=keyword
+//      歌词 -> https://music.douyin.com/qishui/share/track?track_id=xxx
+std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& title, const std::wstring& artist) {
+    std::vector<moekoe::LyricLine> lyrics;
+    if (title.empty()) return lyrics;
+    
+    std::string dbgMsg = "[Qishui] Searching lyrics for: " + WstringToUtf8(title) + " - " + WstringToUtf8(artist);
+    LOG_INFO("Qishui Music", "%s", dbgMsg.c_str());
+    
+    // Build search query
+    std::string query = WstringToUtf8(title);
+    if (!artist.empty()) {
+        query += " ";
+        query += WstringToUtf8(artist);
+    }
+    
+    // URL encode
+    std::string encodedQuery;
+    for (char c : query) {
+        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            encodedQuery += c;
+        } else {
+            char buf[4];
+            sprintf_s(buf, "%%%02X", (unsigned char)c);
+            encodedQuery += buf;
+        }
+    }
+    
+    // === Step 1: Search Qishui Music API ===
+    // Build search URL with required parameters
+    std::string searchPath = "/luna/pc/search/track?";
+    searchPath += "aid=386088&app_name=luna_pc&region=cn&geo_region=cn&os_region=cn";
+    searchPath += "&device_id=1088932190113307&iid=2332504177791808";
+    searchPath += "&version_name=3.0.0&version_code=30000000&channel=official";
+    searchPath += "&ac=wifi&device_platform=windows&device_type=Windows";
+    searchPath += "&q=" + encodedQuery;
+    searchPath += "&cursor=0&search_method=input&search_scene=";
+    
+    LOG_INFO("Qishui Music", "Search path: %s", searchPath.c_str());
+    
+    HINTERNET hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return lyrics;
+    
+    HINTERNET hConnect = WinHttpConnect(hSession, L"api.qishui.com", INTERNET_DEFAULT_HTTP_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
+    
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", Utf8ToWstring(searchPath).c_str(), 
+                                             NULL, L"https://www.douyin.com", WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
+    
+    std::wstring headers = L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n";
+    headers += L"Referer: https://www.douyin.com/qishui/\r\n";
+    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    WinHttpReceiveResponse(hRequest, NULL);
+    
+    std::string searchResp;
+    DWORD dwSize = 0;
+    do {
+        dwSize = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
+        if (dwSize == 0) break;
+        char* buffer = new char[dwSize + 1];
+        ZeroMemory(buffer, dwSize + 1);
+        DWORD dwDownloaded = 0;
+        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
+            searchResp += buffer;
+        }
+        delete[] buffer;
+    } while (dwSize > 0);
+    
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    
+    // Debug: log search response (first 500 chars)
+    std::string respDbg = "[Qishui] Search response: " + searchResp.substr(0, (std::min)((size_t)500, searchResp.length()));
+    LOG_INFO("Qishui Music", "%s", respDbg.c_str());
+    
+    // Extract track_id from search result
+    // Format: "result_groups":[{"data":[{"entity":{"track":{"id":123456,...}}}]}]
+    size_t dataPos = searchResp.find("\"data\":[");
+    if (dataPos == std::string::npos) {
+        LOG_INFO("Qishui Music", "No data found in search response");
+        return lyrics;
+    }
+    
+    // Find first track id
+    size_t trackIdPos = searchResp.find("\"id\":", dataPos);
+    if (trackIdPos == std::string::npos) {
+        LOG_INFO("Qishui Music", "No track id found");
+        return lyrics;
+    }
+    
+    // Parse track_id (number after "id":)
+    size_t idStart = trackIdPos + 5;  // skip "id":
+    // Skip whitespace
+    while (idStart < searchResp.length() && (searchResp[idStart] == ' ' || searchResp[idStart] == '\t')) {
+        idStart++;
+    }
+    
+    // Find end of number
+    size_t idEnd = idStart;
+    while (idEnd < searchResp.length() && isdigit((unsigned char)searchResp[idEnd])) {
+        idEnd++;
+    }
+    
+    if (idEnd <= idStart) {
+        LOG_INFO("Qishui Music", "Failed to parse track id");
+        return lyrics;
+    }
+    
+    std::string trackId = searchResp.substr(idStart, idEnd - idStart);
+    LOG_INFO("Qishui Music", "Found track_id: %s", trackId.c_str());
+    
+    // === Step 2: Fetch Lyrics ===
+    // API: https://music.douyin.com/qishui/share/track?track_id=xxx
+    std::wstring lyricPath = L"/qishui/share/track?track_id=" + Utf8ToWstring(trackId);
+    
+    hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return lyrics;
+    
+    hConnect = WinHttpConnect(hSession, L"music.douyin.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
+    
+    hRequest = WinHttpOpenRequest(hConnect, L"GET", lyricPath.c_str(), NULL, 
+                                   L"https://music.douyin.com", WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
+    
+    headers = L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n";
+    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    WinHttpReceiveResponse(hRequest, NULL);
+    
+    std::string lyricsResp;
+    do {
+        dwSize = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
+        if (dwSize == 0) break;
+        char* buffer = new char[dwSize + 1];
+        ZeroMemory(buffer, dwSize + 1);
+        DWORD dwDownloaded = 0;
+        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
+            lyricsResp += buffer;
+        }
+        delete[] buffer;
+    } while (dwSize > 0);
+    
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    
+    // Debug: log lyrics response (first 500 chars)
+    std::string lrcDbg = "[Qishui] Lyrics response: " + lyricsResp.substr(0, (std::min)((size_t)500, lyricsResp.length()));
+    LOG_INFO("Qishui Music", "%s", lrcDbg.c_str());
+    
+    // Parse lyrics from HTML/JSON response
+    // Format: "sentences":[{"startMs":0,"endMs":5000,"words":[{"text":"xxx","startMs":0}]}]
+    // Also look for _ROUTER_DATA = {...}
+    size_t sentencesPos = lyricsResp.find("\"sentences\":[");
+    if (sentencesPos == std::string::npos) {
+        // Try alternative format: audioWithLyricsOption
+        sentencesPos = lyricsResp.find("\"audioWithLyricsOption\"");
+        if (sentencesPos != std::string::npos) {
+            sentencesPos = lyricsResp.find("\"sentences\":[", sentencesPos);
+        }
+    }
+    
+    if (sentencesPos == std::string::npos) {
+        LOG_INFO("Qishui Music", "No sentences found in lyrics response");
+        return lyrics;
+    }
+    
+    // Parse each sentence
+    size_t pos = sentencesPos + 13;  // skip "sentences":[
+    int bracketCount = 1;
+    size_t sentenceStart = pos;
+    
+    while (pos < lyricsResp.length() && bracketCount > 0) {
+        if (lyricsResp[pos] == '{') {
+            // Find startMs and text in this sentence object
+            size_t objStart = pos;
+            size_t objEnd = lyricsResp.find("},", pos);
+            if (objEnd == std::string::npos) {
+                objEnd = lyricsResp.find("}]", pos);
+            }
+            if (objEnd == std::string::npos) break;
+            
+            std::string sentenceObj = lyricsResp.substr(objStart, objEnd - objStart + 1);
+            
+            // Extract startMs
+            int startMs = 0;
+            size_t startMsPos = sentenceObj.find("\"startMs\":");
+            if (startMsPos != std::string::npos) {
+                size_t msStart = startMsPos + 10;
+                startMs = atoi(sentenceObj.c_str() + msStart);
+            }
+            
+            // Extract words text
+            std::string sentenceText;
+            size_t wordsPos = sentenceObj.find("\"words\":[");
+            if (wordsPos != std::string::npos) {
+                // Parse each word
+                size_t wordPos = wordsPos + 9;
+                while (wordPos < sentenceObj.length()) {
+                    size_t textPos = sentenceObj.find("\"text\":\"", wordPos);
+                    if (textPos == std::string::npos) break;
+                    
+                    size_t textStart = textPos + 8;
+                    size_t textEnd = sentenceObj.find("\"", textStart);
+                    if (textEnd == std::string::npos) break;
+                    
+                    sentenceText += sentenceObj.substr(textStart, textEnd - textStart);
+                    wordPos = textEnd + 1;
+                    
+                    // Move to next word
+                    size_t nextWord = sentenceObj.find("{", wordPos);
+                    if (nextWord == std::string::npos) break;
+                    wordPos = nextWord;
+                }
+            } else {
+                // Try direct "text" field
+                size_t textPos = sentenceObj.find("\"text\":\"");
+                if (textPos != std::string::npos) {
+                    size_t textStart = textPos + 8;
+                    size_t textEnd = sentenceObj.find("\"", textStart);
+                    if (textEnd != std::string::npos) {
+                        sentenceText = sentenceObj.substr(textStart, textEnd - textStart);
+                    }
+                }
+            }
+            
+            if (!sentenceText.empty() && startMs >= 0) {
+                moekoe::LyricLine line;
+                line.startTime = startMs;
+                line.text = Utf8ToWstring(sentenceText);
+                lyrics.push_back(line);
+            }
+            
+            pos = objEnd + 1;
+        } else {
+            if (lyricsResp[pos] == '[') bracketCount++;
+            else if (lyricsResp[pos] == ']') bracketCount--;
+            pos++;
+        }
+    }
+    
+    // Sort by time
+    std::sort(lyrics.begin(), lyrics.end(), [](const moekoe::LyricLine& a, const moekoe::LyricLine& b) {
+        return a.startTime < b.startTime;
+    });
+    
+    LOG_INFO("Qishui Music", "Parsed %zu lyric lines", lyrics.size());
+    
+    return lyrics;
+}
+
 // Check for updates from GitHub
 bool CheckForUpdate(bool manualCheck = false) {
     if (g_checkingUpdate) return false;
@@ -9444,14 +9700,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             lastSMTCArtist = smtcInfo.artist;
                             g_pendingLyrics.clear();  // Clear old lyrics
                             
-                            // Search lyrics in background thread (use same logic as QQ Music)
+                            // Search lyrics in background thread
+                            // 根据平台选择不同的搜索 API
                             if (g_lyricsSearchThread.joinable()) {
                                 g_lyricsSearchRunning = false;
                                 g_lyricsSearchThread.join();
                             }
                             g_lyricsSearchRunning = true;
-                            g_lyricsSearchThread = std::thread([title = smtcInfo.title, artist = smtcInfo.artist, hwnd]() {
-                                auto lyrics = SearchLyricsForQQMusic(title, artist);
+                            g_lyricsSearchThread = std::thread([title = smtcInfo.title, artist = smtcInfo.artist, platform = smtcPlatform, hwnd]() {
+                                std::vector<moekoe::LyricLine> lyrics;
+                                if (platform == 3) {
+                                    // 汽水音乐 - 使用官方 API
+                                    lyrics = SearchLyricsForQishuiMusic(title, artist);
+                                } else {
+                                    // QQ 音乐或其他平台 - 使用 QQ 音乐 API
+                                    lyrics = SearchLyricsForQQMusic(title, artist);
+                                }
                                 if (g_lyricsSearchRunning && !lyrics.empty()) {
                                     g_pendingLyrics = lyrics;
                                     InvalidateRect(hwnd, nullptr, FALSE);
