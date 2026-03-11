@@ -422,7 +422,7 @@ std::vector<PlatformInfo> g_platforms = {
 #define g_neteaseLastPlayTime g_platforms[1].lastPlayTime
 #define g_smtcLastPlayTime g_platforms[2].lastPlayTime
 
-const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐" };
+const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91", L"QQ音乐" };
 int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
 bool g_autoPlatformSwitch = false; // Auto switch platforms when playing (disabled by default)
@@ -1430,6 +1430,95 @@ std::vector<SandParticle> g_sandParticles;
 std::wstring g_lastDisplayTitle, g_lastDisplayArtist, g_lastDisplayLyric;
 double g_lastDisplayProgress = -1;
 
+// 计算字符串的UTF-8字节数
+size_t Utf8ByteLength(const std::wstring& s) {
+    int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    return (len > 0) ? (len - 1) : 0;  // len包含null终止符
+}
+
+// 截断字符串到指定UTF-8字节数
+std::wstring TruncateToBytes(const std::wstring& s, size_t maxBytes) {
+    size_t currentBytes = Utf8ByteLength(s);
+    if (currentBytes <= maxBytes) return s;
+    
+    // 二分查找截断位置
+    size_t left = 0, right = s.length();
+    while (left < right) {
+        size_t mid = (left + right + 1) / 2;
+        size_t bytes = Utf8ByteLength(s.substr(0, mid));
+        if (bytes <= maxBytes - 2) {  // 留出".."的空间
+            left = mid;
+        } else {
+            right = mid - 1;
+        }
+    }
+    return s.substr(0, left) + L"..";
+}
+
+// 智能截断歌名（处理括号）
+// 返回: pair<mainTitle, bracketContent>
+std::pair<std::wstring, std::wstring> SmartTruncateTitle(const std::wstring& title, size_t maxMainBytes, size_t maxBracketBytes) {
+    std::wstring mainTitle = title;
+    std::wstring bracketContent;
+    
+    // 提取括号内容
+    size_t bracketStart = title.find_first_of(L"([({");
+    size_t bracketEnd = title.find_last_of(L")]})");
+    
+    if (bracketStart != std::wstring::npos && bracketEnd != std::wstring::npos && bracketEnd > bracketStart) {
+        mainTitle = title.substr(0, bracketStart);
+        // 去除末尾空格
+        while (!mainTitle.empty() && (mainTitle.back() == L' ' || mainTitle.back() == L'\t')) {
+            mainTitle.pop_back();
+        }
+        bracketContent = title.substr(bracketStart + 1, bracketEnd - bracketStart - 1);
+    }
+    
+    size_t mainBytes = Utf8ByteLength(mainTitle);
+    size_t bracketBytes = Utf8ByteLength(bracketContent);
+    
+    // 如果主标题很短但括号内容很长，去除括号
+    if (!bracketContent.empty() && mainBytes < 12 && bracketBytes > maxBracketBytes) {
+        bracketContent.clear();
+    }
+    // 如果有足够空间，保留括号内容
+    else if (!bracketContent.empty() && bracketBytes <= maxBracketBytes) {
+        // 保留括号内容
+    }
+    else {
+        bracketContent.clear();
+    }
+    
+    // 截断主标题
+    if (mainBytes > maxMainBytes) {
+        mainTitle = TruncateToBytes(mainTitle, maxMainBytes);
+    }
+    
+    // 截断括号内容
+    if (!bracketContent.empty() && Utf8ByteLength(bracketContent) > maxBracketBytes) {
+        bracketContent = TruncateToBytes(bracketContent, maxBracketBytes);
+    }
+    
+    return {mainTitle, bracketContent};
+}
+
+// 提取第一个歌手名（处理多歌手情况）
+std::wstring GetFirstArtist(const std::wstring& artist) {
+    if (artist.empty()) return L"";
+    
+    // 常见分隔符: , / & 、 ,
+    size_t pos = artist.find_first_of(L",/&、,;");
+    if (pos != std::wstring::npos) {
+        std::wstring first = artist.substr(0, pos);
+        // 去除末尾空格
+        while (!first.empty() && (first.back() == L' ' || first.back() == L'\t')) {
+            first.pop_back();
+        }
+        return first;
+    }
+    return artist;
+}
+
 std::wstring TruncateStr(const std::wstring& s, size_t maxLen) {
     if (s.length() <= maxLen) return s;
     if (maxLen <= 2) return s.substr(0, maxLen);
@@ -2187,6 +2276,9 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     }
     
     const size_t MAX_MSG_LEN = 144;
+    const size_t MAX_TITLE_ARTIST_BYTES = 16;  // 第一行歌名+歌手最大字节数
+    const size_t MAX_ARTIST_BYTES = 6;         // 歌手最大字节数（用于判断是否单独显示）
+    const size_t MAX_ARTIST_TRUNCATE = 9;      // 歌手截断字节数
     
     int currentLyricIdx = -1;
     if (!info.lyrics.empty()) {
@@ -2195,32 +2287,63 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
         }
     }
     
+    // 获取平台名称
+    std::wstring platformName = g_showPlatform ? 
+        (std::wstring)L"[" + g_oscPlatformNames[g_activePlatform >= 0 ? g_activePlatform : g_currentPlatform] + L"]" : L"";
+    
     if (info.isPlaying) {
-        // Line 1: Song title
-        msg = L"\x266B " + info.title;
+        // 智能处理歌名（处理括号）
+        auto [mainTitle, bracketContent] = SmartTruncateTitle(info.title, 30, 16);
         
-        // Line 2: Artist + Platform
-        msg += L"\n";
-        if (!info.artist.empty()) {
-            msg += info.artist;
-        }
-        if (g_showPlatform) {
-            msg += L" [" + (std::wstring)g_oscPlatformNames[g_activePlatform >= 0 ? g_activePlatform : g_currentPlatform] + L"]";
+        // 提取第一个歌手
+        std::wstring artist = GetFirstArtist(info.artist);
+        
+        // 截断歌手
+        if (!artist.empty() && Utf8ByteLength(artist) > MAX_ARTIST_TRUNCATE) {
+            artist = TruncateToBytes(artist, MAX_ARTIST_TRUNCATE);
         }
         
-        // Line 3: Progress bar
+        // 计算歌名+歌手字节数
+        std::wstring titleArtist = artist.empty() ? mainTitle : (mainTitle + L" - " + artist);
+        size_t titleArtistBytes = Utf8ByteLength(titleArtist);
+        size_t artistBytes = artist.empty() ? 0 : Utf8ByteLength(artist);
+        
+        // 构建显示
+        if (titleArtistBytes <= MAX_TITLE_ARTIST_BYTES) {
+            // 情况1：歌名+歌手 ≤ 16字节，第一行显示
+            msg = L"\x266B " + titleArtist;
+            if (!bracketContent.empty()) {
+                msg += L" (" + bracketContent + L")";
+            }
+            msg += L"\n" + platformName;
+        } else if (artistBytes <= MAX_ARTIST_BYTES && !artist.empty()) {
+            // 情况2：歌名+歌手 > 16字节 且 歌手 ≤ 6字节
+            msg = L"\x266B " + mainTitle;
+            if (!bracketContent.empty()) {
+                msg += L" (" + bracketContent + L")";
+            }
+            msg += L"\n" + artist + L" " + platformName;
+        } else {
+            // 情况3：歌名+歌手 > 16字节 且 歌手 > 6字节（或无歌手）
+            msg = L"\x266B " + mainTitle;
+            if (!bracketContent.empty()) {
+                msg += L" (" + bracketContent + L")";
+            }
+            msg += L"\n" + platformName;
+        }
+        
+        // 进度条单独一行
         if (info.duration > 0) {
-            msg += L"\n";
-            msg += BuildProgressBar(info.currentTime / info.duration, 8);
+            msg += L"\n" + BuildProgressBar(info.currentTime / info.duration, 8);
             msg += L" " + FormatTime(info.currentTime) + L"/" + FormatTime(info.duration);
         }
         
-        // Line 4: Lyrics
+        // 歌词
         if (currentLyricIdx >= 0 && currentLyricIdx < (int)info.lyrics.size()) {
             std::wstring lyric = info.lyrics[currentLyricIdx].text;
-            size_t remaining = MAX_MSG_LEN - msg.length() - 3;
-            if (remaining < lyric.length()) {
-                lyric = TruncateStr(lyric, (int)remaining);
+            size_t remaining = MAX_MSG_LEN - Utf8ByteLength(msg) - 3;
+            if (Utf8ByteLength(lyric) > remaining) {
+                lyric = TruncateToBytes(lyric, remaining);
             }
             msg += L"\n\x25B6 " + lyric;
         } else if (info.hasData && !g_noLyricMsgs.empty()) {
