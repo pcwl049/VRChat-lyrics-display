@@ -322,6 +322,7 @@ std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
 void CreateOverlayWindow();    // OSC暂停覆盖层
 void DestroyOverlayWindow();   // 销毁OSC暂停覆盖层
 void CreateDisplayOrderDialog();  // 显示顺序配置弹窗
+void SyncDisplayModuleNames();    // 同步系统名称到显示模块
 void MainDebugLog(const char* msg, int level);  // 调试日志
 
 // 统一性能监控线程（合并原4个线程）
@@ -1320,6 +1321,9 @@ std::wstring g_cachedPreviewMsg;
 DWORD g_lastPreviewUpdate = 0;
 const DWORD PREVIEW_UPDATE_INTERVAL = 500;  // Update preview every 500ms
 
+// Display config changed flag (force OSC resend)
+bool g_displayConfigChanged = false;
+
 // Redraw optimization
 bool g_needsRedraw = true;         // Dirty flag for redraw
 DWORD g_lastContentChange = 0;     // Last time content actually changed
@@ -1368,6 +1372,10 @@ struct PerfData {
 PerfData g_latestPerfData;
 std::mutex g_perfDataMutex;
 
+// GPU监控库可用性标志（需要在使用前声明）
+bool g_nvmlAvailable = false;
+bool g_adlAvailable = false;
+
 // 更新模块可用性（根据实际检测结果）
 void UpdateDisplayModuleAvailability() {
     // CPU温度
@@ -1383,12 +1391,13 @@ void UpdateDisplayModuleAvailability() {
         }
     }
     
-    // GPU使用率和温度
-    if (g_latestPerfData.gpuUsageValid) {
+    // GPU使用率和温度 - 基于NVML/ADL可用性
+    bool hasGpuMonitoring = g_nvmlAvailable || g_adlAvailable;
+    if (hasGpuMonitoring) {
         for (auto& mod : g_displayModules) {
             if (mod.key == L"gpu") {
                 for (auto& sub : mod.subModules) {
-                    if (sub.type == SUBMOD_USAGE) {
+                    if (sub.type == SUBMOD_USAGE || sub.type == SUBMOD_TEMP) {
                         sub.available = true;
                     }
                 }
@@ -1397,13 +1406,23 @@ void UpdateDisplayModuleAvailability() {
     }
 }
 
+// 同步系统信息名称到显示模块配置
+void SyncDisplayModuleNames() {
+    for (auto& mod : g_displayModules) {
+        if (mod.key == L"cpu") mod.name = g_cpuDisplayName;
+        else if (mod.key == L"gpu") mod.name = g_gpuDisplayName;
+        else if (mod.key == L"ram") mod.name = g_ramDisplayName;
+    }
+    g_cachedPreviewMsg.clear();
+}
+
 // 线程同步
 std::atomic<bool> g_threadRunning[4] = {false, false, false, false};
 HANDLE g_workerThreads[4] = {nullptr, nullptr, nullptr, nullptr};
 
-// 库可用性标志
-bool g_nvmlAvailable = false;
-bool g_adlAvailable = false;
+// 库可用性标志（已在前方定义）
+extern bool g_nvmlAvailable;
+extern bool g_adlAvailable;
 bool g_lhmAvailable = false;
 
 // NVML函数指针（NVIDIA）
@@ -1802,107 +1821,151 @@ int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
 }
 
 std::wstring BuildPerformanceOSCMessage(int type) {
-    // 一次性显示所有硬件信息（新格式）
+    // 一次性显示所有硬件信息（新格式）- 使用 g_displayModules 顺序
     std::wstring msg;
     
-    // === CPU信息 ===
-    msg += L"⚡" + g_cpuDisplayName + L" ";
-    wchar_t cpuBuf[32];
-    swprintf_s(cpuBuf, L"%.0f%%", g_cpuUsage);
-    msg += cpuBuf;
-    if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
-        wchar_t tempBuf[16];
-        swprintf_s(tempBuf, L" 🌡️%d°C", g_latestPerfData.cpuTemp);
-        msg += tempBuf;
+    // 确保 g_displayModules 不为空
+    if (g_displayModules.empty()) {
+        return L"⚡CPU N/A\n[░░░░░]\n💾RAM N/A\n[░░░░░]\n🎮GPU N/A\n[░░░░░]\n";
     }
-    msg += L"\n";
     
-    // CPU进度条（双标记：占用率+温度）- 5格
-    {
-        int cpuFilled = (int)(g_cpuUsage / 100.0 * 5);
-        int tempPos = -1;
-        if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
-            tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 5);
-            if (tempPos > 5) tempPos = 5;
-        }
-        msg += L"[";
-        for (int i = 0; i < 5; i++) {
-            if (i == tempPos && tempPos >= 0) {
-                msg += L"│";
-            } else if (i < cpuFilled) {
-                msg += L"█";
+    for (const auto& mod : g_displayModules) {
+        if (!mod.enabled) continue;
+        
+        // 根据模块类型生成信息
+        if (mod.key == L"cpu") {
+            msg += L"⚡" + mod.name + L" ";
+            
+            bool hasUsage = false, hasTemp = false;
+            for (const auto& sub : mod.subModules) {
+                if (sub.enabled && sub.available) {
+                    if (sub.type == SUBMOD_USAGE) hasUsage = true;
+                    if (sub.type == SUBMOD_TEMP) hasTemp = true;
+                }
+            }
+            
+            if (hasUsage) {
+                wchar_t cpuBuf[32];
+                swprintf_s(cpuBuf, L"%.0f%%", g_cpuUsage);
+                msg += cpuBuf;
+            }
+            if (hasTemp && g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
+                wchar_t tempBuf[16];
+                swprintf_s(tempBuf, L" 🌡️%d°C", g_latestPerfData.cpuTemp);
+                msg += tempBuf;
+            }
+            msg += L"\n";
+            
+            // CPU进度条（双标记：占用率+温度）- 5格
+            if (hasUsage) {
+                int cpuFilled = (int)(g_cpuUsage / 100.0 * 5);
+                int tempPos = -1;
+                if (hasTemp && g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
+                    tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 5);
+                    if (tempPos > 5) tempPos = 5;
+                }
+                msg += L"[";
+                for (int i = 0; i < 5; i++) {
+                    if (i == tempPos && tempPos >= 0) {
+                        msg += L"│";
+                    } else if (i < cpuFilled) {
+                        msg += L"█";
+                    } else {
+                        msg += L"░";
+                    }
+                }
+                msg += L"]\n";
+            }
+        } else if (mod.key == L"ram") {
+            double ramUsedGB = (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0;
+            
+            msg += L"💾" + mod.name + L" 📊";
+            bool hasUsage = false;
+            for (const auto& sub : mod.subModules) {
+                if (sub.enabled && sub.available && sub.type == SUBMOD_USAGE) {
+                    hasUsage = true;
+                    break;
+                }
+            }
+            if (hasUsage && g_latestPerfData.ramUsed > 0) {
+                wchar_t ramBuf[32];
+                swprintf_s(ramBuf, L"%.1fG", ramUsedGB);
+                msg += ramBuf;
             } else {
-                msg += L"░";
+                msg += L"N/A";
+            }
+            msg += L"\n";
+            
+            // RAM进度条（单标记）- 5格
+            if (hasUsage) {
+                int ramFilled = (int)(g_ramUsage / 100.0 * 5);
+                msg += L"[";
+                for (int i = 0; i < 5; i++) {
+                    msg += (i < ramFilled) ? L"█" : L"░";
+                }
+                msg += L"]\n";
+            }
+        } else if (mod.key == L"gpu") {
+            msg += L"🎮" + mod.name + L" ";
+            
+            bool hasUsage = false, hasVram = false;
+            for (const auto& sub : mod.subModules) {
+                if (sub.enabled && sub.available) {
+                    if (sub.type == SUBMOD_USAGE) hasUsage = true;
+                    if (sub.type == SUBMOD_VRAM) hasVram = true;
+                }
+            }
+            
+            if (hasUsage && g_latestPerfData.gpuUsageValid) {
+                wchar_t gpuBuf[32];
+                swprintf_s(gpuBuf, L"%d%%", g_latestPerfData.gpuUsage);
+                msg += gpuBuf;
+            } else if (hasUsage) {
+                msg += L"N/A";
+            }
+            
+            if (hasVram) {
+                msg += L" 🎞️";
+                double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
+                if (g_gpuMemUsed > 0) {
+                    wchar_t gpuMemBuf[32];
+                    swprintf_s(gpuMemBuf, L"%.1fG", vramUsedGB);
+                    msg += gpuMemBuf;
+                } else {
+                    msg += L"N/A";
+                }
+            }
+            msg += L"\n";
+            
+            // GPU进度条（双标记：占用率+显存）- 5格
+            if (hasUsage && g_latestPerfData.gpuUsageValid) {
+                int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 5);
+                int vramPos = -1;
+                if (hasVram && g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
+                    double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
+                    vramPos = (int)(vramPercent / 100.0 * 5);
+                    if (vramPos > 5) vramPos = 5;
+                }
+                msg += L"[";
+                for (int i = 0; i < 5; i++) {
+                    if (i == vramPos && vramPos >= 0) {
+                        msg += L"│";
+                    } else if (i < gpuFilled) {
+                        msg += L"█";
+                    } else {
+                        msg += L"░";
+                    }
+                }
+                msg += L"]\n";
+            } else if (hasUsage) {
+                msg += L"[░░░░░]\n";
             }
         }
-        msg += L"]\n";
     }
     
-    // === RAM信息 ===
-    double ramUsedGB = (double)g_latestPerfData.ramUsed / 1024.0 / 1024.0 / 1024.0;
-    
-    msg += L"💾RAM 📊";
-    if (g_latestPerfData.ramUsed > 0) {
-        wchar_t ramBuf[32];
-        swprintf_s(ramBuf, L"%.1fG", ramUsedGB);
-        msg += ramBuf;
-    } else {
-        msg += L"N/A";
-    }
-    msg += L"\n";
-    
-    // RAM进度条（单标记）- 5格
-    {
-        int ramFilled = (int)(g_ramUsage / 100.0 * 5);
-        msg += L"[";
-        for (int i = 0; i < 5; i++) {
-            msg += (i < ramFilled) ? L"█" : L"░";
-        }
-        msg += L"]\n";
-    }
-    
-    // === GPU信息 ===
-    msg += L"🎮" + g_gpuDisplayName + L" ";
-    if (g_latestPerfData.gpuUsageValid) {
-        wchar_t gpuBuf[32];
-        swprintf_s(gpuBuf, L"%d%%", g_latestPerfData.gpuUsage);
-        msg += gpuBuf;
-    } else {
-        msg += L"N/A";
-    }
-    msg += L" 🎞️";
-    double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
-    if (g_gpuMemUsed > 0) {
-        wchar_t gpuMemBuf[32];
-        swprintf_s(gpuMemBuf, L"%.1fG", vramUsedGB);
-        msg += gpuMemBuf;
-    } else {
-        msg += L"N/A";
-    }
-    msg += L"\n";
-    
-    // GPU进度条（双标记：占用率+显存）- 5格
-    if (g_latestPerfData.gpuUsageValid) {
-        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 5);
-        int vramPos = -1;
-        if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
-            double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
-            vramPos = (int)(vramPercent / 100.0 * 5);
-            if (vramPos > 5) vramPos = 5;
-        }
-        msg += L"[";
-        for (int i = 0; i < 5; i++) {
-            if (i == vramPos && vramPos >= 0) {
-                msg += L"│";
-            } else if (i < gpuFilled) {
-                msg += L"█";
-            } else {
-                msg += L"░";
-            }
-        }
-        msg += L"]\n";
-    } else {
-        msg += L"[░░░░░]\n";
+    // 如果没有任何内容，返回默认消息
+    if (msg.empty()) {
+        return L"⚡CPU N/A\n[░░░░░]\n💾RAM N/A\n[░░░░░]\n🎮GPU N/A\n[░░░░░]\n";
     }
     
     return msg;
@@ -2402,7 +2465,22 @@ void LoadConfig(const wchar_t* path) {
         if (mod.key == L"cpu") mod.name = g_cpuDisplayName;
         else if (mod.key == L"gpu") mod.name = g_gpuDisplayName;
         else if (mod.key == L"ram") mod.name = g_ramDisplayName;
+        
+        // 设置子项默认可用性（配置文件不保存 available 字段）
+        for (auto& sub : mod.subModules) {
+            // 根据类型设置默认可用性
+            if (mod.key == L"cpu") {
+                sub.available = (sub.type == SUBMOD_USAGE);  // CPU使用率始终可用
+            } else if (mod.key == L"gpu") {
+                sub.available = (sub.type == SUBMOD_VRAM);   // 显存始终可用（DXGI）
+            } else if (mod.key == L"ram") {
+                sub.available = (sub.type == SUBMOD_USAGE);  // RAM使用量始终可用
+            }
+        }
     }
+    
+    // 异步更新温度等传感器的可用性
+    UpdateDisplayModuleAvailability();
     
     // Initialize system info expand animation based on performance mode
     if (g_performanceMode == 1) {
@@ -2816,7 +2894,12 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     if (!info.hasData || info.title.empty()) {
         // 根据连接状态显示不同提示
         if (!g_isConnected) {
-            return L"\x672A\x8FDE\x63A5 - \x70B9\x51FB\x5DE6\x4FA7\"\x8FDE\x63A5\"\x6309\x94AE";  // 未连接 - 点击左侧"连接"按钮
+            // 检查各平台连接状态，给出更具体的提示
+            if (g_currentPlatform == 1 && g_neteaseConnected == false) {
+                // 网易云模式但未连接 - 可能是调试端口未开启
+                return L"\x7F51\x6613\x4E91\x672A\x8FDE\x63A5\n\x8BF7\x786E\x8BA4\x5F00\x542F\x8C03\x8BD5\x7AEF\x53E3\n--remote-debugging-port=9222";  // 网易云未连接\n请确认开启调试端口
+            }
+            return L"\x97F3\x4E50\x5E73\x53F0\x672A\x8FDE\x63A5\n\x70B9\x51FB\x5DE6\x4FA7\"\x8FDE\x63A5\"\x6309\x94AE";  // 音乐平台未连接\n点击左侧"连接"按钮
         } else {
             return L"\x7B49\x5F85\x97F3\x4E50\x64AD\x653E...";  // 等待音乐播放...
         }
@@ -2923,7 +3006,7 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
                 msg += tbuf;
             }
             
-            // Line 3: System info using display_modules configuration
+            // Line 3: System info - 使用默认简短名称，不跟随系统信息设置
             std::wstring perfLine = L"\n";
             bool firstModule = true;
             
@@ -2933,14 +3016,9 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
                 if (!firstModule) perfLine += L" | ";
                 firstModule = false;
                 
-                // 获取模块名称
-                std::wstring modName = mod.name;
-                if (modName.empty()) {
-                    modName = mod.key == L"cpu" ? L"C" : (mod.key == L"gpu" ? L"G" : L"R");
-                } else if (modName.length() > 4) {
-                    // 名称过长时截断
-                    modName = modName.substr(0, 4);
-                }
+                // 使用默认简短名称（C/G/R），不跟随系统信息名称
+                std::wstring modName = (mod.key == L"cpu") ? L"C" : 
+                                       (mod.key == L"gpu") ? L"G" : L"R";
                 
                 perfLine += modName + L":";
                 
@@ -3160,7 +3238,11 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
                 oscMsg = FormatOSCMessage(info);
             }
             
-            if (oscMsg != g_lastOscMessage || g_playStateChanged) {
+            // 强制发送如果配置改变
+            bool forceSend = g_displayConfigChanged;
+            g_displayConfigChanged = false;  // 发送后立即清除
+            
+            if (forceSend || oscMsg != g_lastOscMessage || g_playStateChanged) {
                 g_osc->sendChatbox(oscMsg);
                 g_lastOscMessage = oscMsg;
                 g_lastOscSendTime = now;
@@ -4879,7 +4961,12 @@ void OnPaint(HWND hwnd) {
 
                 // Draw cursor if editing and visible
                 if (cpuEditing && g_cursorVisible) {
-                    int cursorX = infoX + 60 + GetTextWidth(memDC, g_cpuDisplayName.c_str(), g_fontNormal, g_cursorPos);
+                    // Use GDI+ MeasureString for consistent text width with DrawString
+                    std::wstring textBeforeCursor = g_cpuDisplayName.substr(0, g_cursorPos);
+                    RectF measureRect;
+                    Font cursorFont(memDC, g_fontNormal);
+                    graphics.MeasureString(textBeforeCursor.c_str(), -1, &cursorFont, PointF(0, 0), &measureRect);
+                    int cursorX = infoX + 60 + (int)measureRect.Width;
                     HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
                     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
                     MoveToEx(memDC, cursorX, inputY + 10, nullptr);
@@ -4925,7 +5012,12 @@ void OnPaint(HWND hwnd) {
 
                 // Draw cursor if editing and visible
                 if (ramEditing && g_cursorVisible) {
-                    int cursorX = infoX + 60 + GetTextWidth(memDC, g_ramDisplayName.c_str(), g_fontNormal, g_cursorPos);
+                    // Use GDI+ MeasureString for consistent text width with DrawString
+                    std::wstring textBeforeCursor = g_ramDisplayName.substr(0, g_cursorPos);
+                    RectF measureRect;
+                    Font cursorFont(memDC, g_fontNormal);
+                    graphics.MeasureString(textBeforeCursor.c_str(), -1, &cursorFont, PointF(0, 0), &measureRect);
+                    int cursorX = infoX + 60 + (int)measureRect.Width;
                     HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
                     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
                     MoveToEx(memDC, cursorX, inputY + 10, nullptr);
@@ -4971,7 +5063,12 @@ void OnPaint(HWND hwnd) {
 
                 // Draw cursor if editing and visible
                 if (gpuEditing && g_cursorVisible) {
-                    int cursorX = infoX + 60 + GetTextWidth(memDC, g_gpuDisplayName.c_str(), g_fontNormal, g_cursorPos);
+                    // Use GDI+ MeasureString for consistent text width with DrawString
+                    std::wstring textBeforeCursor = g_gpuDisplayName.substr(0, g_cursorPos);
+                    RectF measureRect;
+                    Font cursorFont(memDC, g_fontNormal);
+                    graphics.MeasureString(textBeforeCursor.c_str(), -1, &cursorFont, PointF(0, 0), &measureRect);
+                    int cursorX = infoX + 60 + (int)measureRect.Width;
                     HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
                     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
                     MoveToEx(memDC, cursorX, inputY + 10, nullptr);
@@ -6592,12 +6689,12 @@ void DrawDisplayOrderContent(HDC hdc, int w, int h) {
                         graphics.DrawLine(&subTickPen, subCbX + 9, subCbY + 15, subCbX + 16, subCbY + 6);
                     }
                     
-                    // 子项名称 - 使用透明度渐隐，垂直居中
+                    // 子项名称 - 使用固定高度 subItemH 避免动画时文字换行
                     SolidBrush subNameBrush(Color(subAlpha, sub.available ? GetRValue(COLOR_TEXT) : 120, 
                                                          sub.available ? GetGValue(COLOR_TEXT) : 120, 
                                                          sub.available ? GetBValue(COLOR_TEXT) : 120));
                     Font subNameFont(L"Microsoft YaHei UI", 13);
-                    RectF subNameRect((REAL)(subCbX + 30), (REAL)subY, (REAL)(w - subCbX - 160), (REAL)subH);
+                    RectF subNameRect((REAL)(subCbX + 30), (REAL)subY, (REAL)(w - subCbX - 160), (REAL)subItemH);
                     StringFormat subNameFormat;
                     subNameFormat.SetLineAlignment(StringAlignmentCenter);
                     graphics.DrawString(sub.name.c_str(), -1, &subNameFont, subNameRect, &subNameFormat, &subNameBrush);
@@ -6606,8 +6703,7 @@ void DrawDisplayOrderContent(HDC hdc, int w, int h) {
                     if (!sub.available) {
                         SolidBrush naBrush(Color(subAlpha, 110, 110, 120));
                         Font naFont(L"Microsoft YaHei UI", 11);
-                        // 位置调整到子项名称右侧，不超出边框
-                        RectF naRect((REAL)(w - padding - 90), (REAL)subY, (REAL)70, (REAL)subH);
+                        RectF naRect((REAL)(w - padding - 90), (REAL)subY, (REAL)70, (REAL)subItemH);
                         StringFormat naFormat;
                         naFormat.SetLineAlignment(StringAlignmentCenter);
                         naFormat.SetAlignment(StringAlignmentFar);
@@ -6718,12 +6814,13 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             int w = rc.right - rc.left;
             int h = rc.bottom - rc.top;
             
-            const int moduleItemH = 50;
-            const int subItemH = 36;
-            const int padding = 20;
-            const int btnW = 90;
-            const int btnH = 36;
-            int btnY = h - 55;
+            const int moduleItemH = 56;
+            const int subItemH = 40;
+            const int padding = 24;
+            const int moduleGap = 8;
+            const int btnW = 100;
+            const int btnH = 40;
+            int btnY = h - 60;
             
             // 处理窗口拖动
             if (g_displayOrderIsDraggingWindow) {
@@ -6738,7 +6835,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             
             // 处理模块拖拽
             if (g_isDraggingModule && g_draggingModuleIdx >= 0) {
-                int moduleY = 60;
+                int moduleY = 68;
                 for (size_t i = 0; i < g_displayModules.size(); i++) {
                     int itemH = moduleItemH;
                     if (i < g_moduleExpandAnims.size() && g_moduleExpandAnims[i].value > 0.01) {
@@ -6759,7 +6856,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         }
                         break;
                     }
-                    moduleY += itemH;
+                    moduleY += itemH + moduleGap;
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
@@ -6784,7 +6881,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             g_displayOrderCancelBtnHover = false;
             
             // 检查关闭按钮悬停
-            if (x >= w - 42 && x <= w - 12 && y >= 10 && y <= 40) {
+            if (x >= w - 46 && x <= w - 14 && y >= 12 && y <= 44) {
                 g_displayOrderCloseBtnHover = true;
             }
             
@@ -6800,7 +6897,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
             
             // 检查模块悬停
-            int moduleY = 60;
+            int moduleY = 68;
             for (size_t modIdx = 0; modIdx < g_displayModules.size(); modIdx++) {
                 auto& mod = g_displayModules[modIdx];
                 
@@ -6836,6 +6933,8 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         moduleY += (int)(mod.subModules.size() * subItemH * expandAnim);
                     }
                 }
+                // 添加模块间距
+                moduleY += moduleGap;
             }
             
             // 检查是否有变化需要重绘
@@ -6862,17 +6961,18 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             int w = rc.right - rc.left;
             int h = rc.bottom - rc.top;
             
-            const int moduleItemH = 50;
-            const int subItemH = 36;
-            const int padding = 20;
-            const int btnW = 90;
-            const int btnH = 36;
-            int btnY = h - 55;
+            const int moduleItemH = 56;
+            const int subItemH = 40;
+            const int padding = 24;
+            const int moduleGap = 8;
+            const int btnW = 100;
+            const int btnH = 40;
+            int btnY = h - 60;
             
-            // 检查标题栏拖动区域 (y < 50)
-            if (y < 50) {
+            // 检查标题栏拖动区域 (y < 55)
+            if (y < 55) {
                 // 检查关闭按钮
-                if (x >= w - 42 && x <= w - 12 && y >= 10 && y <= 40) {
+                if (x >= w - 46 && x <= w - 14 && y >= 12 && y <= 44) {
                     DestroyWindow(hwnd);
                     return 0;
                 }
@@ -6900,12 +7000,17 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         anim.target = 0.0;
                     }
                     UpdateDisplayModuleAvailability();
+                    g_cachedPreviewMsg.clear();  // 清除缓存
+                    g_displayConfigChanged = true;  // 标记配置改变
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
                 // 确定
                 if (x >= w - padding - btnW * 2 - 12 && x <= w - padding - btnW - 12) {
                     SaveConfig(g_configPath);
+                    g_cachedPreviewMsg.clear();  // 清除缓存，让性能消息使用新顺序
+                    g_displayConfigChanged = true;  // 标记配置改变
+                    InvalidateRect(g_hwnd, nullptr, FALSE);  // 刷新主窗口预览
                     DestroyWindow(hwnd);
                     return 0;
                 }
@@ -6918,7 +7023,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
             
             // 检查模块点击
-            int moduleY = 60;
+            int moduleY = 68;
             for (size_t modIdx = 0; modIdx < g_displayModules.size(); modIdx++) {
                 auto& mod = g_displayModules[modIdx];
                 
@@ -6932,6 +7037,8 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     // 检查是否点击复选框
                     else if (x >= w - padding - 130 && x <= w - padding - 108) {
                         mod.enabled = !mod.enabled;
+                        g_cachedPreviewMsg.clear();  // 清除缓存
+                        g_displayConfigChanged = true;  // 标记配置改变
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                     // 检查是否点击展开箭头
@@ -6965,8 +7072,8 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                             
                             if (y >= subY && y < subY + subItemH) {
                                 // 检查是否点击子项复选框
-                                int subCbX = padding + 40;
-                                if (x >= subCbX && x <= subCbX + 18 && sub.available) {
+                                int subCbX = padding + 48;  // 与绘制代码一致
+                                if (x >= subCbX && x <= subCbX + 20 && sub.available) {
                                     // 计算当前已启用的数量
                                     int enabledCount = 0;
                                     for (const auto& s : mod.subModules) {
@@ -6978,6 +7085,8 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                         // 已达上限，不允许再启用
                                     } else {
                                         sub.enabled = !sub.enabled;
+                                        g_cachedPreviewMsg.clear();  // 清除缓存
+                                        g_displayConfigChanged = true;  // 标记配置改变
                                         InvalidateRect(hwnd, nullptr, FALSE);
                                     }
                                 }
@@ -6987,6 +7096,8 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         moduleY += (int)(mod.subModules.size() * subItemH);
                     }
                 }
+                // 添加模块间距
+                moduleY += moduleGap;
             }
             
             return 0;
@@ -6998,6 +7109,8 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 g_draggingModuleIdx = -1;
                 g_dragOverIdx = -1;
                 ReleaseCapture();
+                g_cachedPreviewMsg.clear();  // 清除缓存
+                g_displayConfigChanged = true;  // 标记配置改变（拖拽排序）
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (g_displayOrderIsDraggingWindow) {
@@ -7033,7 +7146,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 // 窗口高度跟随动画变化
                 if (animating) {
                     int newH = CalculateDisplayOrderContentHeight();
-                    SetWindowPos(hwnd, nullptr, 0, 0, 420, newH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    SetWindowPos(hwnd, nullptr, 0, 0, 480, newH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
                 } else if (needsRepaint) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
@@ -8149,6 +8262,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
+                    SyncDisplayModuleNames();
 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
@@ -8226,6 +8340,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
+                    SyncDisplayModuleNames();
 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (wParam == VK_DELETE) {
@@ -8250,6 +8365,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
+                    SyncDisplayModuleNames();
 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (wParam == VK_LEFT) {
@@ -8292,6 +8408,109 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
                     g_editingField = EDIT_NONE;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wParam == 'V' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                    // Ctrl+V: Paste from clipboard
+                    if (OpenClipboard(hwnd)) {
+                        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                        if (hData) {
+                            wchar_t* clipText = (wchar_t*)GlobalLock(hData);
+                            if (clipText) {
+                                std::wstring pasteText = clipText;
+                                GlobalUnlock(hData);
+                                
+                                // Delete selected text if any
+                                if (g_selectStart != g_selectEnd) {
+                                    int start = min(g_selectStart, g_selectEnd);
+                                    int end = max(g_selectStart, g_selectEnd);
+                                    g_editingText.erase(start, end - start);
+                                    g_cursorPos = start;
+                                    g_selectStart = g_selectEnd = g_cursorPos;
+                                }
+                                
+                                // Insert pasted text at cursor position
+                                g_editingText.insert(g_cursorPos, pasteText);
+                                g_cursorPos += (int)pasteText.length();
+                                g_selectStart = g_selectEnd = g_cursorPos;
+                                g_lastCursorBlink = GetTickCount();
+                                
+                                // Update corresponding display name
+                                switch (g_editingField) {
+                                    case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
+                                    case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
+                                    case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                                }
+                                SyncDisplayModuleNames();
+                                
+                                InvalidateRect(hwnd, nullptr, FALSE);
+                            }
+                        }
+                        CloseClipboard();
+                    }
+                } else if (wParam == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                    // Ctrl+C: Copy to clipboard
+                    if (g_selectStart != g_selectEnd) {
+                        int start = min(g_selectStart, g_selectEnd);
+                        int end = max(g_selectStart, g_selectEnd);
+                        std::wstring selectedText = g_editingText.substr(start, end - start);
+                        
+                        if (OpenClipboard(hwnd)) {
+                            EmptyClipboard();
+                            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (selectedText.length() + 1) * sizeof(wchar_t));
+                            if (hMem) {
+                                wchar_t* pMem = (wchar_t*)GlobalLock(hMem);
+                                if (pMem) {
+                                    wcscpy_s(pMem, selectedText.length() + 1, selectedText.c_str());
+                                    GlobalUnlock(hMem);
+                                    SetClipboardData(CF_UNICODETEXT, hMem);
+                                }
+                            }
+                            CloseClipboard();
+                        }
+                    }
+                } else if (wParam == 'X' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                    // Ctrl+X: Cut to clipboard
+                    if (g_selectStart != g_selectEnd) {
+                        int start = min(g_selectStart, g_selectEnd);
+                        int end = max(g_selectStart, g_selectEnd);
+                        std::wstring selectedText = g_editingText.substr(start, end - start);
+                        
+                        if (OpenClipboard(hwnd)) {
+                            EmptyClipboard();
+                            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (selectedText.length() + 1) * sizeof(wchar_t));
+                            if (hMem) {
+                                wchar_t* pMem = (wchar_t*)GlobalLock(hMem);
+                                if (pMem) {
+                                    wcscpy_s(pMem, selectedText.length() + 1, selectedText.c_str());
+                                    GlobalUnlock(hMem);
+                                    SetClipboardData(CF_UNICODETEXT, hMem);
+                                }
+                            }
+                            CloseClipboard();
+                        }
+                        
+                        // Delete selected text
+                        g_editingText.erase(start, end - start);
+                        g_cursorPos = start;
+                        g_selectStart = g_selectEnd = g_cursorPos;
+                        g_lastCursorBlink = GetTickCount();
+                        
+                        // Update corresponding display name
+                        switch (g_editingField) {
+                            case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
+                            case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
+                            case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                        }
+                        SyncDisplayModuleNames();
+                        
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                } else if (wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                    // Ctrl+A: Select all
+                    g_selectStart = 0;
+                    g_selectEnd = (int)g_editingText.length();
+                    g_cursorPos = g_selectEnd;
+                    g_lastCursorBlink = GetTickCount();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
@@ -9081,6 +9300,11 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                 g_latestPerfData.cpuTemp = cpuTemp;
                 g_latestPerfData.cpuTempValid = (cpuTemp > 0);
             }
+            
+            // CPU温度可用时更新模块可用性
+            if (cpuTemp > 0) {
+                UpdateDisplayModuleAvailability();
+            }
         }
         
         Sleep(1000);  // 统一频率：每1秒更新
@@ -9220,6 +9444,9 @@ void InitializePerfMonitoring() {
 
     // 初始化COM（用于WMI）
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    
+    // 更新模块可用性（NVML/ADL 初始化完成后）
+    UpdateDisplayModuleAvailability();
 
     // 启动工作线程
     g_threadRunning[0] = true;
@@ -9277,6 +9504,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     
     MainDebugLog("[WinMain] Application starting");
     InitCommonControls();
+    
+    // 先初始化默认主题颜色，确保多开提示弹窗显示正确
+    UpdateThemeColors();
     
     g_mutex = CreateMutexW(nullptr, TRUE, L"VRCLyricsDisplay_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
