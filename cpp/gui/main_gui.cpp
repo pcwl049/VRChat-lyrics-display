@@ -30,90 +30,137 @@
 #pragma comment(lib, "gdiplus.lib")
 using namespace Gdiplus;
 
-// Log levels
-enum LogLevel {
-    LOG_DEBUG,
-    LOG_INFO,
-    LOG_WARNING,
-    LOG_ERROR
-};
+#include <fstream>
+#include <cstdarg>
 
-static const char* LOG_LEVEL_STR[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
-
-// Log rotation settings
-static const long long MAX_LOG_SIZE = 10 * 1024 * 1024;  // 10MB
-static const int MAX_LOG_FILES = 5;
-
-// Rotate log files if current log exceeds MAX_LOG_SIZE
-static void RotateLogFile(const char* basePath) {
-    HANDLE hFile = CreateFileA(basePath, 
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+// Logger singleton class for unified logging
+class Logger {
+public:
+    enum Level { LOG_LVL_DEBUG, LOG_LVL_INFO, LOG_LVL_WARNING, LOG_LVL_ERROR };
     
-    if (hFile != INVALID_HANDLE_VALUE) {
-        LARGE_INTEGER fileSize;
-        if (GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart >= MAX_LOG_SIZE) {
-            CloseHandle(hFile);
-            
-            // Delete oldest log file (_5)
-            char oldPath[MAX_PATH];
-            sprintf_s(oldPath, "%s_5", basePath);
-            DeleteFileA(oldPath);
-            
-            // Rotate log files: _4 -> _5, _3 -> _4, _2 -> _3, _1 -> _2
-            for (int i = 4; i >= 1; i--) {
-                char srcPath[MAX_PATH];
-                char dstPath[MAX_PATH];
-                sprintf_s(srcPath, "%s_%d", basePath, i);
-                sprintf_s(dstPath, "%s_%d", basePath, i + 1);
-                MoveFileA(srcPath, dstPath);
+    static Logger& instance() {
+        static Logger logger;
+        return logger;
+    }
+    
+    void setLevel(Level level) { m_level = level; }
+    
+    void setFile(const std::string& path) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_file.is_open()) m_file.close();
+        m_file.open(path, std::ios::app);
+        m_filePath = path;
+    }
+    
+    // Core logging method with format support
+    void log(Level level, const char* module, const char* fmt, ...) {
+        if (level < m_level) return;  // Level filtering first
+        
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        // Timestamp
+        time_t now = time(nullptr);
+        struct tm t;
+        localtime_s(&t, &now);
+        char timestamp[32];
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &t);
+        
+        // Format message
+        char msg[4096];
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf_s(msg, sizeof(msg), _TRUNCATE, fmt, args);
+        va_end(args);
+        
+        // Output format: [timestamp] [LEVEL] [module] message
+        char line[8192];
+        const char* levelStr[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
+        sprintf_s(line, "[%s] [%s] [%s] %s", timestamp, levelStr[level], module, msg);
+        
+        // Write to file
+        if (m_file.is_open()) {
+            m_file << line << std::endl;
+            m_file.flush();
+        }
+        OutputDebugStringA(line);
+    }
+    
+    // Simple log without module (for compatibility)
+    void logSimple(Level level, const char* msg) {
+        log(level, "Main", "%s", msg);
+    }
+    
+    // Check and rotate log (called once at startup)
+    void checkRotate() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        rotateLogFile();
+    }
+    
+private:
+    Logger() {
+        // Default output to %TEMP%\vrclayrics_debug.log
+        char tempPath[MAX_PATH];
+        GetTempPathA(MAX_PATH, tempPath);
+        strcat_s(tempPath, "\\vrclayrics_debug.log");
+        m_filePath = tempPath;
+        m_file.open(m_filePath, std::ios::app);
+        rotateLogFile();
+    }
+    ~Logger() { if (m_file.is_open()) m_file.close(); }
+    
+    // Log rotation implementation
+    void rotateLogFile() {
+        static const long long MAX_LOG_SIZE = 10 * 1024 * 1024;  // 10MB
+        static const int MAX_LOG_FILES = 5;
+        
+        HANDLE hFile = CreateFileA(m_filePath.c_str(), 
+            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        
+        if (hFile != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER fileSize;
+            if (GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart >= MAX_LOG_SIZE) {
+                CloseHandle(hFile);
+                if (m_file.is_open()) m_file.close();
+                
+                // Delete oldest log file (_5)
+                char oldPath[MAX_PATH];
+                sprintf_s(oldPath, "%s_5", m_filePath.c_str());
+                DeleteFileA(oldPath);
+                
+                // Rotate log files: _4 -> _5, _3 -> _4, _2 -> _3, _1 -> _2
+                for (int i = 4; i >= 1; i--) {
+                    char srcPath[MAX_PATH];
+                    char dstPath[MAX_PATH];
+                    sprintf_s(srcPath, "%s_%d", m_filePath.c_str(), i);
+                    sprintf_s(dstPath, "%s_%d", m_filePath.c_str(), i + 1);
+                    MoveFileA(srcPath, dstPath);
+                }
+                
+                // Move current log to _1
+                char rotatedPath[MAX_PATH];
+                sprintf_s(rotatedPath, "%s_1", m_filePath.c_str());
+                MoveFileA(m_filePath.c_str(), rotatedPath);
+                
+                // Reopen file
+                m_file.open(m_filePath, std::ios::app);
+            } else {
+                CloseHandle(hFile);
             }
-            
-            // Move current log to _1
-            char rotatedPath[MAX_PATH];
-            sprintf_s(rotatedPath, "%s_1", basePath);
-            MoveFileA(basePath, rotatedPath);
-        } else {
-            CloseHandle(hFile);
         }
     }
-}
-
-// Debug log using Windows API - write to user temp directory with timestamp and level
-static void MainDebugLog(const char* msg, LogLevel level = LOG_INFO) {
-    char tempPath[MAX_PATH];
-    GetTempPathA(MAX_PATH, tempPath);
-    strcat_s(tempPath, "\\vrclayrics_debug.log");
     
-    // Check and rotate log file if needed
-    RotateLogFile(tempPath);
-    
-    // Get current timestamp
-    time_t now = time(nullptr);
-    struct tm t;
-    localtime_s(&t, &now);
-    char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &t);
-    
-    // Format: [2026-03-10 15:30:45] [INFO] message
-    char formattedMsg[4096];
-    sprintf_s(formattedMsg, "[%s] [%s] %s", timestamp, LOG_LEVEL_STR[level], msg);
-    
-    HANDLE hFile = CreateFileA(tempPath, 
-        FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile != INVALID_HANDLE_VALUE) {
-        DWORD written;
-        WriteFile(hFile, formattedMsg, (DWORD)strlen(formattedMsg), &written, NULL);
-        WriteFile(hFile, "\r\n", 2, &written, NULL);
-        CloseHandle(hFile);
-    }
-    OutputDebugStringA(formattedMsg);
-}
+    std::mutex m_mutex;
+    std::ofstream m_file;
+    std::string m_filePath;
+    Level m_level = LOG_LVL_INFO;
+};
 
 // Convenience macros for logging
-#define LOG_DEBUG(msg) MainDebugLog(msg, LOG_DEBUG)
-#define LOG_INFO(msg) MainDebugLog(msg, LOG_INFO)
-#define LOG_WARNING(msg) MainDebugLog(msg, LOG_WARNING)
-#define LOG_ERROR(msg) MainDebugLog(msg, LOG_ERROR)
+#define LOG_DEBUG(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_DEBUG, module, fmt, ##__VA_ARGS__)
+#define LOG_INFO(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_INFO, module, fmt, ##__VA_ARGS__)
+#define LOG_WARNING(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_WARNING, module, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_ERROR, module, fmt, ##__VA_ARGS__)
+
 #include <shellapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
@@ -137,6 +184,466 @@ static void MainDebugLog(const char* msg, LogLevel level = LOG_INFO) {
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
+
+// ============================================================================
+// 常量定义
+// ============================================================================
+const DWORD OSC_MIN_INTERVAL = 2000;    // 2s when playing (avoid VRChat rate limit)
+
+// ============================================================================
+// OSCManager - 统一 OSC 消息发送管理
+// ============================================================================
+class OSCManager {
+public:
+    static OSCManager& instance() {
+        static OSCManager mgr;
+        return mgr;
+    }
+    
+    // 连接管理
+    void connect(const std::string& ip, int port) {
+        disconnect();
+        m_sender = new moekoe::OSCSender(ip, port);
+        m_ip = ip;
+        m_port = port;
+        char msg[128];
+        sprintf_s(msg, "Connected to %s:%d", ip.c_str(), port);
+        LOG_INFO("OSCManager", "%s", msg);
+    }
+    
+    void disconnect() {
+        if (m_sender) {
+            delete m_sender;
+            m_sender = nullptr;
+            LOG_INFO("OSCManager", "Disconnected");
+        }
+    }
+    
+    bool isConnected() const { return m_sender != nullptr; }
+    
+    // 状态控制
+    void pause(int seconds = 30) {
+        m_paused = true;
+        m_pauseEndTime = GetTickCount() + seconds * 1000;
+        m_overlayClosing = false;
+        char msg[64];
+        sprintf_s(msg, "[OSCManager] Paused for %d seconds", seconds);
+        LOG_INFO("OSCManager", "%s", msg);
+    }
+    
+    void resume() {
+        m_paused = false;
+        m_pauseEndTime = 0;
+        LOG_INFO("OSCManager", "Resumed");
+    }
+    
+    bool isPaused() {
+        // 自动处理暂停过期
+        if (m_paused && m_pauseEndTime > 0) {
+            if (GetTickCount() >= m_pauseEndTime) {
+                m_paused = false;
+                m_pauseEndTime = 0;
+                // 开始关闭动画
+                m_overlayClosing = true;
+                return false;
+            }
+        }
+        return m_paused && !m_overlayClosing;
+    }
+    
+    // 获取剩余暂停时间（秒）
+    int getRemainingPauseTime() {
+        if (!m_paused || m_pauseEndTime == 0) return 0;
+        DWORD remaining = m_pauseEndTime - GetTickCount();
+        return remaining > 0 ? (int)(remaining / 1000) : 0;
+    }
+    
+    // 获取暂停进度（1.0 = 刚开始，0.0 = 结束）
+    float getPauseProgress() {
+        if (!m_paused || m_pauseEndTime == 0) return 0.0f;
+        DWORD now = GetTickCount();
+        if (now >= m_pauseEndTime) return 0.0f;
+        return (float)(m_pauseEndTime - now) / (30.0f * 1000.0f);  // 30秒总时长
+    }
+    
+    // Overlay 控制
+    void setOverlayClosing(bool closing) { m_overlayClosing = closing; }
+    bool isOverlayClosing() const { return m_overlayClosing; }
+    
+    // 消息发送（统一入口）- 普通消息（有速率限制）
+    bool sendMessage(const std::wstring& msg) {
+        if (!canSend()) return false;
+        
+        DWORD now = GetTickCount();
+        
+        // 系统恢复后的额外等待
+        if (m_systemResumeTime > 0) {
+            DWORD timeSinceResume = now - m_systemResumeTime;
+            if (timeSinceResume < 3000) {
+                if (timeSinceResume < 100) {
+                    m_lastSendTime = now;
+                }
+                return false;
+            } else {
+                m_systemResumeTime = 0;
+            }
+        }
+        
+        // 速率限制
+        if (now - m_lastSendTime < OSC_MIN_INTERVAL) {
+            return false;
+        }
+        
+        // 去重
+        if (msg == m_lastMessage) {
+            return false;
+        }
+        
+        doSend(msg);
+        m_lastMessage = msg;
+        m_lastSendTime = now;
+        return true;
+    }
+    
+    // 强制发送（跳过去重检查）
+    bool sendMessageForce(const std::wstring& msg) {
+        if (!canSend()) return false;
+        
+        DWORD now = GetTickCount();
+        if (now - m_lastSendTime < OSC_MIN_INTERVAL) {
+            return false;
+        }
+        
+        doSend(msg);
+        m_lastMessage = msg;
+        m_lastSendTime = now;
+        return true;
+    }
+    
+    // 系统消息（通过队列串行发送，避免限流）
+    bool sendSystemMessage(const std::wstring& msg, bool clearQueue = true);
+    
+    // 告别消息（同步发送）
+    void sendGoodbye() {
+        if (!m_sender || !m_enabled) return;
+        
+        DWORD now = GetTickCount();
+        DWORD timeSinceLastSend = now - m_lastSendTime;
+        if (timeSinceLastSend < OSC_MIN_INTERVAL) {
+            Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
+        }
+        m_sender->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
+        m_lastSendTime = GetTickCount();
+        LOG_INFO("OSCManager", "Goodbye message sent");
+    }
+    
+    // 配置
+    void setEnabled(bool enabled) { m_enabled = enabled; }
+    bool isEnabled() const { return m_enabled; }
+    
+    void setSystemResumeTime(DWORD time) { m_systemResumeTime = time; }
+    
+    // 兼容性访问
+    moekoe::OSCSender* getSender() { return m_sender; }
+    const std::string& getIp() const { return m_ip; }
+    int getPort() const { return m_port; }
+    
+private:
+    OSCManager() = default;
+    ~OSCManager() { disconnect(); }
+    
+    bool canSend() {
+        if (!m_sender || !m_enabled) return false;
+        if (isPaused()) return false;
+        return true;
+    }
+    
+    void doSend(const std::wstring& msg) {
+        if (m_sender) {
+            m_sender->sendChatbox(msg);
+        }
+    }
+    
+    moekoe::OSCSender* m_sender = nullptr;
+    std::string m_ip;
+    int m_port = 9000;
+    bool m_enabled = true;
+    bool m_paused = false;
+    bool m_overlayClosing = false;
+    DWORD m_pauseEndTime = 0;
+    DWORD m_lastSendTime = 0;
+    DWORD m_systemResumeTime = 0;
+    std::wstring m_lastMessage;
+};
+
+// 全局 OSC 暂停热键配置（保留在全局作用域以便 UI 访问）
+extern UINT g_oscPauseHotkey;
+extern UINT g_oscPauseHotkeyMods;
+
+// ============================================================================
+// PerfData - 性能数据结构（前置声明供 PerformanceMonitor 使用）
+// ============================================================================
+struct PerfData {
+    // CPU
+    int cpuUsage = 0;
+    int cpuTemp = 0;
+    bool cpuTempValid = false;
+
+    // RAM
+    int ramUsage = 0;
+    DWORD64 ramUsed = 0;
+    DWORD64 ramTotal = 0;
+
+    // GPU
+    int gpuUsage = 0;
+    bool gpuUsageValid = false;
+    DWORD64 gpuVramUsed = 0;
+    DWORD64 gpuVramTotal = 0;
+};
+
+// ============================================================================
+// PerformanceMonitor - 统一性能监控管理
+// ============================================================================
+class PerformanceMonitor {
+public:
+    static PerformanceMonitor& instance() {
+        static PerformanceMonitor pm;
+        return pm;
+    }
+    
+    // 生命周期
+    void start();
+    void stop();
+    
+    // 线程安全的数据获取
+    int getCpuUsage() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.cpuUsage;
+    }
+    
+    int getRamUsage() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.ramUsage;
+    }
+    
+    int getGpuUsage() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.gpuUsage;
+    }
+    
+    int getCpuTemp() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.cpuTemp;
+    }
+    
+    DWORD64 getRamUsed() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.ramUsed;
+    }
+    
+    DWORD64 getRamTotal() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.ramTotal;
+    }
+    
+    DWORD64 getGpuVramUsed() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.gpuVramUsed;
+    }
+    
+    DWORD64 getGpuVramTotal() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.gpuVramTotal;
+    }
+    
+    // 可用性查询
+    bool isCpuTempAvailable() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.cpuTempValid && m_data.cpuTemp > 0;
+    }
+    
+    bool isGpuUsageAvailable() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data.gpuUsageValid;
+    }
+    
+    // 获取完整数据快照（用于批量访问）
+    PerfData getSnapshot() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_data;
+    }
+    
+    // 更新数据（内部使用）
+    void updateCpuUsage(int usage) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_data.cpuUsage = usage;
+    }
+    
+    void updateRamData(DWORD64 used, DWORD64 total) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_data.ramUsed = used;
+        m_data.ramTotal = total;
+        m_data.ramUsage = total > 0 ? (int)((total - used) * 100 / total) : 0;
+    }
+    
+    void updateGpuData(int usage, bool valid, DWORD64 vramUsed = 0, DWORD64 vramTotal = 0) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_data.gpuUsage = usage;
+        m_data.gpuUsageValid = valid;
+        if (vramTotal > 0) m_data.gpuVramTotal = vramTotal;
+        if (vramUsed > 0) m_data.gpuVramUsed = vramUsed;
+    }
+    
+    void updateCpuTemp(int temp, bool valid) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_data.cpuTemp = temp;
+        m_data.cpuTempValid = valid;
+    }
+    
+    bool isRunning() const { return m_running; }
+    
+private:
+    PerformanceMonitor() = default;
+    ~PerformanceMonitor() { stop(); }
+    
+    void workerThread();  // 监控线程主函数
+    
+    std::thread m_thread;
+    std::mutex m_mutex;
+    std::atomic<bool> m_running{false};
+    
+    PerfData m_data;
+    
+    // DXGI 资源
+    IDXGIFactory1* m_pDXGIFactory = nullptr;
+    IDXGIAdapter3* m_pDXGIAdapter = nullptr;
+    bool m_dxgiInitialized = false;
+    
+    // WMI 资源
+    IWbemLocator* m_pWmiLocator = nullptr;
+    IWbemServices* m_pWmiServices = nullptr;
+    IWbemServices* m_pLhmServices = nullptr;
+    bool m_wmiInitialized = false;
+    bool m_lhmInitialized = false;
+};
+
+// ============================================================================
+// OSCManager 方法实现
+// ============================================================================
+
+// 系统消息队列（内部使用）
+static std::queue<std::wstring> s_systemMsgQueue;
+static std::mutex s_systemMsgMutex;
+static std::atomic<bool> s_systemMsgRunning{false};
+
+bool OSCManager::sendSystemMessage(const std::wstring& message, bool clearQueue) {
+    if (!m_sender || !m_enabled) {
+        return false;
+    }
+    
+    // 将消息加入队列
+    {
+        std::lock_guard<std::mutex> lock(s_systemMsgMutex);
+        if (clearQueue) {
+            while (!s_systemMsgQueue.empty()) {
+                s_systemMsgQueue.pop();
+            }
+        }
+        s_systemMsgQueue.push(message);
+    }
+    
+    // 如果线程未运行，启动新线程处理队列
+    if (!s_systemMsgRunning.exchange(true)) {
+        std::thread([this]() {
+            while (true) {
+                std::wstring msg;
+                {
+                    std::lock_guard<std::mutex> lock(s_systemMsgMutex);
+                    if (s_systemMsgQueue.empty()) {
+                        s_systemMsgRunning = false;
+                        break;
+                    }
+                    msg = s_systemMsgQueue.front();
+                    s_systemMsgQueue.pop();
+                }
+                
+                // 等待足够时间，确保不触发限流
+                DWORD now = GetTickCount();
+                DWORD timeSinceLastSend = now - m_lastSendTime;
+                if (timeSinceLastSend < OSC_MIN_INTERVAL) {
+                    Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
+                }
+                
+                // 发送消息
+                if (m_sender && m_enabled) {
+                    m_sender->sendChatbox(msg);
+                    m_lastSendTime = GetTickCount();
+                    LOG_INFO("OSCManager", "Sent system message");
+                }
+            }
+        }).detach();
+    }
+    
+    return true;
+}
+
+// ============================================================================
+// PerformanceMonitor 方法实现
+// ============================================================================
+
+// 全局退出标志（用于线程同步）
+extern std::atomic<bool> g_threadRunning[];
+
+void PerformanceMonitor::start() {
+    if (m_running.exchange(true)) {
+        return;  // 已经在运行
+    }
+    
+    m_thread = std::thread(&PerformanceMonitor::workerThread, this);
+    LOG_INFO("PerformanceMonitor", "Started");
+}
+
+void PerformanceMonitor::stop() {
+    if (!m_running.exchange(false)) {
+        return;  // 已经停止
+    }
+    
+    if (m_thread.joinable()) {
+        m_thread.join();
+    }
+    
+    // 清理资源
+    if (m_pDXGIAdapter) {
+        m_pDXGIAdapter->Release();
+        m_pDXGIAdapter = nullptr;
+    }
+    if (m_pDXGIFactory) {
+        m_pDXGIFactory->Release();
+        m_pDXGIFactory = nullptr;
+    }
+    if (m_pLhmServices) {
+        m_pLhmServices->Release();
+        m_pLhmServices = nullptr;
+    }
+    if (m_pWmiServices) {
+        m_pWmiServices->Release();
+        m_pWmiServices = nullptr;
+    }
+    if (m_pWmiLocator) {
+        m_pWmiLocator->Release();
+        m_pWmiLocator = nullptr;
+    }
+    
+    LOG_INFO("PerformanceMonitor", "Stopped");
+}
+
+// PerformanceMonitor 工作线程（未完成实现，使用全局 WorkerThread_PerfMonitor 代替）
+void PerformanceMonitor::workerThread() {
+    // 这个方法目前未实现，使用全局函数 WorkerThread_PerfMonitor 代替
+    while (m_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
 
 // 从Git配置自动检测仓库地址（变量定义）
 std::string g_autoDetectedRepo = "";
@@ -298,7 +805,6 @@ void UpdateThemeColors() {
 #define WM_TRAYICON (WM_USER + 200)
 
 // OSC rate limits - aligned with preview refresh rate
-const DWORD OSC_MIN_INTERVAL = 2000;    // 2s when playing (avoid VRChat rate limit)
 const DWORD OSC_PAUSE_INTERVAL = 2000;  // 2s when paused
 
 // Window size (scaled for high DPI)
@@ -323,7 +829,6 @@ void CreateOverlayWindow();    // OSC暂停覆盖层
 void DestroyOverlayWindow();   // 销毁OSC暂停覆盖层
 void CreateDisplayOrderDialog();  // 显示顺序配置弹窗
 void SyncDisplayModuleNames();    // 同步系统名称到显示模块
-void MainDebugLog(const char* msg, int level);  // 调试日志
 
 // 统一性能监控线程（合并原4个线程）
 DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param);
@@ -705,8 +1210,8 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     std::vector<moekoe::LyricLine> lyrics;
     if (title.empty()) return lyrics;
     
-    std::string dbgMsg = "[QQ Music] Searching lyrics for: " + WstringToUtf8(title) + " - " + WstringToUtf8(artist);
-    MainDebugLog(dbgMsg.c_str());
+    std::string dbgMsg = "Searching lyrics for: " + WstringToUtf8(title) + " - " + WstringToUtf8(artist);
+    LOG_INFO("QQ Music", "%s", dbgMsg.c_str());
     
     // Build search query
     std::string query = WstringToUtf8(title);
@@ -765,21 +1270,21 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     WinHttpCloseHandle(hSession);
     
     // Debug: log search response (first 500 chars)
-    std::string respDbg = "[QQ Music] QQ Search response: " + searchResp.substr(0, 500);
-    MainDebugLog(respDbg.c_str());
+    std::string respDbg = "QQ Search response: " + searchResp.substr(0, 500);
+    LOG_INFO("QQ Music", "%s", respDbg.c_str());
     
     // Extract songmid from search result
     // Format: "song":{"list":[{"songmid":"xxx",...}]}
     size_t listPos = searchResp.find("\"list\":[");
     if (listPos == std::string::npos) {
-        MainDebugLog("[QQ Music] No song list found");
+        LOG_INFO("QQ Music", "No song list found");
         return lyrics;
     }
     
     // Find first songmid
     size_t songmidPos = searchResp.find("\"songmid\":\"", listPos);
     if (songmidPos == std::string::npos) {
-        MainDebugLog("[QQ Music] No songmid found");
+        LOG_INFO("QQ Music", "No songmid found");
         return lyrics;
     }
     
@@ -788,7 +1293,7 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     if (midEnd == std::string::npos) return lyrics;
     
     std::string songmid = searchResp.substr(midStart, midEnd - midStart);
-    MainDebugLog(("[QQ Music] Found songmid: " + songmid).c_str());
+    LOG_INFO("QQ Music", "Found songmid: %s", songmid.c_str());
     
     // === Step 2: Fetch Lyrics ===
     // API: https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=xxx
@@ -826,13 +1331,13 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     WinHttpCloseHandle(hSession);
     
     // Debug: log lyrics response
-    std::string lrcDbg = "[QQ Music] QQ Lyrics response: " + lyricsResp.substr(0, 300);
-    MainDebugLog(lrcDbg.c_str());
+    std::string lrcDbg = "QQ Lyrics response: " + lyricsResp.substr(0, 300);
+    LOG_INFO("QQ Music", "%s", lrcDbg.c_str());
     
     // Extract lyric - format: {"lyric":"BASE64_ENCODED_LRC"}
     size_t lyricPos = lyricsResp.find("\"lyric\":\"");
     if (lyricPos == std::string::npos) {
-        MainDebugLog("[QQ Music] No lyric field found");
+        LOG_INFO("QQ Music", "No lyric field found");
         return lyrics;
     }
     
@@ -841,7 +1346,7 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     if (lrcEnd == std::string::npos) return lyrics;
     
     std::string lrcBase64 = lyricsResp.substr(lrcStart, lrcEnd - lrcStart);
-    MainDebugLog(("[QQ Music] Base64 length: " + std::to_string(lrcBase64.length())).c_str());
+    LOG_INFO("QQ Music", "Base64 length: %zu", lrcBase64.length());
     
     // Base64 decode
     static const std::string base64_chars = 
@@ -862,8 +1367,8 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
     }
     
     // Debug: log decoded content (first 200 chars)
-    std::string decodedDbg = "[QQ Music] Decoded lyric: " + unescaped.substr(0, 200);
-    MainDebugLog(decodedDbg.c_str());
+    std::string decodedDbg = "Decoded lyric: " + unescaped.substr(0, 200);
+    LOG_INFO("QQ Music", "%s", decodedDbg.c_str());
     
     // Parse LRC format
     size_t pos = 0;
@@ -919,8 +1424,7 @@ std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title,
         return a.startTime < b.startTime;
     });
     
-    std::string parsedDbg = "[QQ Music] Parsed " + std::to_string(lyrics.size()) + " lyric lines";
-    MainDebugLog(parsedDbg.c_str());
+    LOG_INFO("QQ Music", "Parsed %zu lyric lines", lyrics.size());
     
     return lyrics;
 }
@@ -1242,7 +1746,7 @@ bool DownloadAndInstallUpdate() {
         } else {
             // SHA256 URL was set but we couldn't download the checksum
             // Fail the update for safety
-            LOG_ERROR("[Update] SHA256 checksum file download failed, aborting update for safety");
+            LOG_ERROR("Update", "SHA256 checksum file download failed, aborting update for safety");
             DeleteFileW(tempFile);
             return false;
         }
@@ -1318,10 +1822,7 @@ std::wstring g_qqMusicLastArtist;
 std::thread g_lyricsSearchThread;
 std::atomic<bool> g_lyricsSearchRunning{false};
 
-// 系统消息队列（串行发送，避免限流）
-std::queue<std::wstring> g_systemMsgQueue;
-std::mutex g_systemMsgMutex;
-std::atomic<bool> g_systemMsgRunning{false};
+// 注：系统消息队列已移至 OSCManager 内部
 
 // Preview cache (to avoid rapid flickering)
 std::wstring g_cachedPreviewMsg;
@@ -1356,26 +1857,9 @@ int g_quoteIndex = 0;        // Current quote index
 
 // === 异步性能检测架构 ===
 
-// 性能数据结构
-struct PerfData {
-    // CPU
-    int cpuUsage = 0;         // 原生API (必有)
-    int cpuTemp = 0;          // LibreHardwareMonitor (可能没有)
-    bool cpuTempValid = false;
+// 性能数据结构已在前方定义 (struct PerfData)
 
-    // RAM
-    int ramUsage = 0;         // 原生API (必有)
-    DWORD64 ramUsed = 0;      // 原生API (必有)
-    DWORD64 ramTotal = 0;     // 原生API (必有)
-
-    // GPU
-    int gpuUsage = 0;         // NVML/ADL/LibreHardwareMonitor (可能没有)
-    bool gpuUsageValid = false;
-    DWORD64 gpuVramUsed = 0;  // DXGI (必有)
-    DWORD64 gpuVramTotal = 0; // DXGI (必有)
-};
-
-// 共享数据（线程安全）
+// 共享数据（线程安全）- 保留作为兼容层
 PerfData g_latestPerfData;
 std::mutex g_perfDataMutex;
 
@@ -1777,60 +2261,7 @@ void UpdatePerfStats() {
     }
 }
 
-// 发送系统消息（启动/暂停/关闭），确保不触发VRChat限流
-// 使用队列串行发送，避免多条消息同时发送触发限流
-// clearQueue参数：是否清空队列中旧消息（用于快速切换状态时避免堆积）
-bool SendSystemOSCMessage(const std::wstring& message, bool clearQueue = true) {
-    if (!g_osc || !g_oscEnabled) {
-        return false;
-    }
-    
-    // 将消息加入队列
-    {
-        std::lock_guard<std::mutex> lock(g_systemMsgMutex);
-        if (clearQueue) {
-            // 清空队列中所有旧消息，只保留最新的
-            while (!g_systemMsgQueue.empty()) {
-                g_systemMsgQueue.pop();
-            }
-        }
-        g_systemMsgQueue.push(message);
-    }
-    
-    // 如果线程未运行，启动新线程处理队列
-    if (!g_systemMsgRunning.exchange(true)) {
-        std::thread([]() {
-            while (true) {
-                std::wstring msg;
-                {
-                    std::lock_guard<std::mutex> lock(g_systemMsgMutex);
-                    if (g_systemMsgQueue.empty()) {
-                        g_systemMsgRunning = false;
-                        break;
-                    }
-                    msg = g_systemMsgQueue.front();
-                    g_systemMsgQueue.pop();
-                }
-                
-                // 等待足够时间，确保不触发限流
-                DWORD now = GetTickCount();
-                DWORD timeSinceLastSend = now - g_lastOscSendTime;
-                if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-                    Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
-                }
-                
-                // 发送消息
-                if (g_osc && g_oscEnabled) {
-                    g_osc->sendChatbox(msg);
-                    g_lastOscSendTime = GetTickCount();
-                    MainDebugLog("[SystemOSC] Sent system message");
-                }
-            }
-        }).detach();
-    }
-    
-    return true;
-}
+// 注：SendSystemOSCMessage 已被 OSCManager::sendSystemMessage 取代
 
 std::string WstringToUtf8(const std::wstring& wstr) {
     if (wstr.empty()) return "";
@@ -3315,62 +3746,43 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         }
     }
     
-    // 检查OSC暂停状态是否过期（在发送逻辑中的备份检查）
-    DWORD currentTime = GetTickCount();
-    if (g_oscPaused && g_oscPauseEndTime > 0 && currentTime >= g_oscPauseEndTime) {
-        g_oscPaused = false;
-        g_oscPauseEndTime = 0;
-        // 开始收缩动画而不是直接销毁
-        g_overlayClosing = true;
-        MainDebugLog("[OSC] Pause ended naturally in send logic, closing animation");
+    // 通过 OSCManager 检查暂停状态（自动处理过期）
+    // 同时同步全局变量用于 UI 显示
+    bool oscWasPaused = g_oscPaused;
+    g_oscPaused = OSCManager::instance().isPaused();
+    if (oscWasPaused && !g_oscPaused) {
+        // 暂停刚刚结束，开始关闭动画
+        g_overlayClosing = OSCManager::instance().isOverlayClosing();
+        LOG_INFO("OSC", "Pause ended naturally in send logic, closing animation");
     }
     
     // OSC发送条件：性能模式或有音乐数据时发送
-    bool shouldSendOSC = g_osc && g_oscEnabled && !g_oscPaused;
+    bool shouldSendOSC = !OSCManager::instance().isPaused();
     bool hasContentToSend = (g_performanceMode == 1) || info.hasData;  // 性能模式或有音乐数据
     
     if (shouldSendOSC && hasContentToSend) {
-        DWORD now = GetTickCount();
-        // 统一使用2秒间隔，避免VRChat限流
-        DWORD minInterval = OSC_MIN_INTERVAL;
+        std::wstring oscMsg;
         
-        // 如果系统刚从卡顿恢复，额外等待确保不会连续发送
-        if (g_systemResumeTime > 0) {
-            DWORD timeSinceResume = now - g_systemResumeTime;
-            if (timeSinceResume < 3000) {
-                // 卡顿恢复后3秒内，强制等待完整间隔
-                minInterval = OSC_MIN_INTERVAL;
-                // 同时重置最后发送时间
-                if (timeSinceResume < 100) {
-                    g_lastOscSendTime = now;
-                }
-            } else {
-                // 已经过去足够时间，清除恢复标记
-                g_systemResumeTime = 0;
-            }
+        // 根据显示模式选择消息类型
+        if (g_performanceMode == 1) {
+            // 性能模式：一次性发送所有硬件信息
+            oscMsg = BuildPerformanceOSCMessage(0);
+        } else {
+            // 音乐模式：发送歌曲信息
+            oscMsg = FormatOSCMessage(info);
         }
         
-        if (now - g_lastOscSendTime >= minInterval) {
-            std::wstring oscMsg;
-            
-            // 根据显示模式选择消息类型
-            if (g_performanceMode == 1) {
-                // 性能模式：一次性发送所有硬件信息
-                oscMsg = BuildPerformanceOSCMessage(0);
-            } else {
-                // 音乐模式：发送歌曲信息
-                oscMsg = FormatOSCMessage(info);
-            }
-            
-            // 强制发送如果配置改变
-            bool forceSend = g_displayConfigChanged;
-            g_displayConfigChanged = false;  // 发送后立即清除
-            
-            if (forceSend || oscMsg != g_lastOscMessage || g_playStateChanged) {
-                g_osc->sendChatbox(oscMsg);
+        // 强制发送如果配置改变
+        bool forceSend = g_displayConfigChanged;
+        g_displayConfigChanged = false;  // 发送后立即清除
+        
+        if (forceSend || g_playStateChanged) {
+            OSCManager::instance().sendMessageForce(oscMsg);
+            g_lastOscMessage = oscMsg;
+            g_playStateChanged = false;
+        } else {
+            if (OSCManager::instance().sendMessage(oscMsg)) {
                 g_lastOscMessage = oscMsg;
-                g_lastOscSendTime = now;
-                g_playStateChanged = false;
             }
         }
     }
@@ -5885,11 +6297,11 @@ void Disconnect() {
 void Connect() {
     // 防止重复连接
     if (g_isConnecting) {
-        MainDebugLog("[Main] Connect() already in progress, skipping");
+        LOG_INFO("Main", "Connect() already in progress, skipping");
         return;
     }
     
-    MainDebugLog("[Main] Connect() called");
+    LOG_INFO("Main", "Connect() called");
     g_isConnecting = true;
     Disconnect();  // Clean up any existing connections
     
@@ -5906,10 +6318,10 @@ void Connect() {
     
     // Run connection in background thread to avoid blocking UI
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        MainDebugLog("[Connect] Starting connection attempt...");
+        LOG_INFO("Connect", "Starting connection attempt...");
         
         // Try to connect MoeKoe
-        MainDebugLog("[Connect] Trying MoeKoe...");
+        LOG_INFO("Connect", "Trying MoeKoe...");
         moekoe::MoeKoeWS* moeKoeClient = new moekoe::MoeKoeWS("127.0.0.1", g_moekoePort);
         moeKoeClient->setCallback([](const moekoe::SongInfo& info) {
             QueueUpdate(info, 0);
@@ -5918,14 +6330,14 @@ void Connect() {
             g_moeKoeClient = moeKoeClient;
             g_moeKoeConnected = true;
             g_needsRedraw = true;
-            MainDebugLog("[Connect] MoeKoe connected!");
+            LOG_INFO("Connect", "MoeKoe connected!");
         } else {
-            MainDebugLog("[Connect] MoeKoe connection failed");
+            LOG_INFO("Connect", "MoeKoe connection failed");
             delete moeKoeClient;
         }
         
         // Try to connect Netease
-        MainDebugLog("[Connect] Trying Netease (port 9222)...");
+        LOG_INFO("Connect", "Trying Netease (port 9222)...");
         moekoe::NeteaseWS* neteaseClient = new moekoe::NeteaseWS(9222);
         neteaseClient->setCallback([](const moekoe::SongInfo& info) {
             QueueUpdate(info, 1);
@@ -5934,16 +6346,16 @@ void Connect() {
             g_neteaseClient = neteaseClient;
             g_neteaseConnected = true;
             g_needsRedraw = true;
-            MainDebugLog("[Connect] Netease connected!");
+            LOG_INFO("Connect", "Netease connected!");
         } else {
-            MainDebugLog("[Connect] Netease connection failed");
+            LOG_INFO("Connect", "Netease connection failed");
             delete neteaseClient;
         }
         
         // Update connection status
         g_isConnected = g_moeKoeConnected || g_neteaseConnected || g_smtcConnected;
         g_isConnecting = false;  // 连接完成
-        MainDebugLog(g_isConnected ? "[Connect] Overall: CONNECTED" : "[Connect] Overall: FAILED");
+        LOG_INFO("Connect", g_isConnected ? "Overall: CONNECTED" : "Overall: FAILED");
         if (!g_isConnected) {
             g_pendingTitle = L"\x8FDE\x63A5\x5931\x8D25";
             g_pendingArtist = L"\x8BF7\x542F\x52A8 MoeKoeMusic \x6216\x7F51\x6613\x4E91\x97F3\x4E50";
@@ -6140,52 +6552,49 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 
                 // Check if modifiers match
                 if (mods == g_oscPauseHotkeyMods) {
-                    // Toggle pause state
-                    DWORD now = GetTickCount();
-                    
-                    // 判断是否真的在暂停中（时间还没到，且不在关闭动画中）
-                    bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now && !g_overlayClosing;
+                    // Toggle pause state using OSCManager
+                    bool isReallyPaused = OSCManager::instance().isPaused();
                     
                     if (isReallyPaused) {
                         // 真正在暂停中 - 取消暂停，触发粒子爆发
-                        MainDebugLog("[Hotkey] Canceling OSC pause (low-level hook)");
+                        LOG_INFO("Hotkey", "Canceling OSC pause (low-level hook)");
                         
                         // 发送恢复消息提示
-                        if (g_osc && g_oscEnabled) {
-                            SendSystemOSCMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
-                        }
+                        OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                         
                         // 触发粒子爆炸（在进度条末端）
                         TriggerParticleBurstAtProgressEnd();
                         
+                        OSCManager::instance().resume();
                         g_oscPaused = false;
                         g_oscPauseEndTime = 0;
                         
                         // 开始关闭动画
-                        if (g_overlayHwnd && !g_overlayClosing) {
+                        if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
+                            OSCManager::instance().setOverlayClosing(true);
                             g_overlayClosing = true;
                         }
-                    } else if (g_overlayHwnd && g_overlayClosing) {
+                    } else if (g_overlayHwnd && OSCManager::instance().isOverlayClosing()) {
                         // 正在关闭动画中，加速关闭
-                        MainDebugLog("[Hotkey] Accelerating overlay close");
+                        LOG_INFO("Hotkey", "Accelerating overlay close");
                         DestroyWindow(g_overlayHwnd);
                         g_overlayHwnd = nullptr;
                         g_overlayActive = false;
                         g_overlayClosing = false;
+                        OSCManager::instance().setOverlayClosing(false);
                         g_overlayExpandAnim = 0.0f;
                         g_particles.clear();
                         g_sandParticles.clear();
                     } else {
                         // Start pause
+                        OSCManager::instance().pause(OSC_PAUSE_DURATION);
                         g_oscPaused = true;
-                        g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
-                        g_overlayClosing = false;  // 确保不是关闭状态
-                        MainDebugLog("[Hotkey] OSC paused for 30 seconds (low-level hook)");
+                        g_oscPauseEndTime = GetTickCount() + OSC_PAUSE_DURATION * 1000;
+                        g_overlayClosing = false;
+                        LOG_INFO("Hotkey", "OSC paused for 30 seconds (low-level hook)");
                         
                         // 发送暂停消息提示
-                        if (g_osc && g_oscEnabled) {
-                            SendSystemOSCMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
-                        }
+                        OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
                         
                         // Create overlay window
                         CreateOverlayWindow();
@@ -6510,7 +6919,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
                     g_overlayClosing = true;
-                    MainDebugLog("[Overlay] OSC pause ended naturally, closing");
+                    LOG_INFO("Overlay", "OSC pause ended naturally, closing");
                 }
                 
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -6527,7 +6936,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_particles.clear();
             g_sandParticles.clear();
             g_particleBurst = false;
-            MainDebugLog("[Overlay] Destroyed overlay window");
+            LOG_INFO("Overlay", "Destroyed overlay window");
             return 0;
             
         default:
@@ -6593,7 +7002,7 @@ void CreateOverlayWindow() {
     UpdateWindow(g_overlayHwnd);
     g_overlayActive = true;
     
-    MainDebugLog("[Overlay] Created overlay window at bottom center of screen");
+    LOG_INFO("Overlay", "Created overlay window at bottom center of screen");
 }
 
 // 销毁覆盖层窗口
@@ -6606,7 +7015,7 @@ void DestroyOverlayWindow() {
         g_particles.clear();
         g_sandParticles.clear();
         g_particleBurst = false;
-        MainDebugLog("[Overlay] Destroyed overlay window via DestroyOverlayWindow()");
+        LOG_INFO("Overlay", "Destroyed overlay window via DestroyOverlayWindow()");
     }
 }
 
@@ -7305,7 +7714,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             g_draggingModuleIdx = -1;
             g_displayOrderModuleHover = -1;
             g_displayOrderSubModHover = -1;
-            MainDebugLog("[DisplayOrder] Dialog closed");
+            LOG_INFO("DisplayOrder", "Dialog closed");
             return 0;
         
         default:
@@ -7397,18 +7806,17 @@ void CreateDisplayOrderDialog() {
     UpdateWindow(g_displayOrderHwnd);
     g_displayOrderVisible = true;
     
-    MainDebugLog("[DisplayOrder] Dialog created");
+    LOG_INFO("DisplayOrder", "Dialog created");
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            MainDebugLog("[Main] WM_CREATE - Application starting");
+            LOG_INFO("Main", "WM_CREATE - Application starting");
             
             // 从Git配置自动检测仓库地址
             g_autoDetectedRepo = GetRepoFromGitConfig();
-            std::string logMsg = "[Main] Auto-detected repo: " + g_autoDetectedRepo;
-            MainDebugLog(logMsg.c_str());
+            LOG_INFO("Main", "Auto-detected repo: %s", g_autoDetectedRepo.c_str());
             
             // Fonts - larger for high DPI
             g_fontTitle = CreateFontW(48, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
@@ -7446,7 +7854,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             CreateTrayIcon(hwnd);
             
             // Initialize SMTC client for QQ Music support
-            MainDebugLog("[Main] Initializing SMTC client for QQ Music");
+            LOG_INFO("Main", "Initializing SMTC client for QQ Music");
             g_smtcClient = new smtc::SMTCClient();
             if (g_smtcClient) {
                 g_smtcClient->setAppFilter(L"QQMusic");  // Only detect QQ Music
@@ -7455,9 +7863,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         // Post message to main thread for UI update
                         PostMessageW(hwnd, WM_USER + 101, 0, 0);
                     });
-                    MainDebugLog("[Main] SMTC client started successfully (QQ Music only)");
+                    LOG_INFO("Main", "SMTC client started successfully (QQ Music only)");
                 } else {
-                    MainDebugLog("[Main] SMTC client failed to start");
+                    LOG_WARNING("Main", "SMTC client failed to start");
                 }
             }
             
@@ -7467,9 +7875,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 设置低级键盘钩子（用于VRChat全屏模式）
             g_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
             if (g_keyboardHook) {
-                MainDebugLog("[Main] Low-level keyboard hook installed for VRChat fullscreen mode");
+                LOG_INFO("Main", "Low-level keyboard hook installed for VRChat fullscreen mode");
             } else {
-                MainDebugLog("[Main] Warning: Failed to install low-level keyboard hook");
+                LOG_WARNING("Main", "Failed to install low-level keyboard hook");
             }
             
             // 启动OSC接收器（用于接收VRChat手势触发的暂停命令）
@@ -7479,9 +7887,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 PostMessage(g_hwnd, WM_USER + 102, 0, 0);
             });
             if (g_oscReceiver->start()) {
-                MainDebugLog("[Main] OSC Receiver started on port 9001");
+                LOG_INFO("Main", "OSC Receiver started on port 9001");
             } else {
-                MainDebugLog("[Main] Warning: Failed to start OSC Receiver");
+                LOG_WARNING("Main", "Failed to start OSC Receiver");
             }
             
             return 0;
@@ -7492,49 +7900,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 切换暂停状态
                 DWORD now = GetTickCount();
                 
-                // 判断是否真的在暂停中（时间还没到，且不在关闭动画中）
-                bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now && !g_overlayClosing;
+                // 使用 OSCManager 判断暂停状态
+                bool isReallyPaused = OSCManager::instance().isPaused();
                 
                 if (isReallyPaused) {
                     // 真正在暂停中 - 取消暂停，触发粒子爆发
-                    MainDebugLog("[Hotkey] Canceling OSC pause (WM_HOTKEY)");
+                    LOG_INFO("Hotkey", "Canceling OSC pause (WM_HOTKEY)");
                     
                     // 发送恢复消息提示
-                    if (g_osc && g_oscEnabled) {
-                        SendSystemOSCMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
-                    }
+                    OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                     
                     // 触发粒子爆炸（在进度条末端）
                     TriggerParticleBurstAtProgressEnd();
                     
+                    OSCManager::instance().resume();
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
                     
                     // 开始关闭动画
-                    if (g_overlayHwnd && !g_overlayClosing) {
+                    if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
+                        OSCManager::instance().setOverlayClosing(true);
                         g_overlayClosing = true;
                     }
-                } else if (g_overlayHwnd && g_overlayClosing) {
+                } else if (g_overlayHwnd && OSCManager::instance().isOverlayClosing()) {
                     // 正在关闭动画中，加速关闭
-                    MainDebugLog("[Hotkey] Accelerating overlay close");
+                    LOG_INFO("Hotkey", "Accelerating overlay close");
                     DestroyWindow(g_overlayHwnd);
                     g_overlayHwnd = nullptr;
                     g_overlayActive = false;
                     g_overlayClosing = false;
+                    OSCManager::instance().setOverlayClosing(false);
                     g_overlayExpandAnim = 0.0f;
                     g_particles.clear();
                     g_sandParticles.clear();
                 } else {
                     // 开始新的暂停
+                    OSCManager::instance().pause(OSC_PAUSE_DURATION);
                     g_oscPaused = true;
                     g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
-                    g_overlayClosing = false;  // 确保不是关闭状态
-                    MainDebugLog("[OSC] Paused for 30 seconds");
+                    g_overlayClosing = false;
+                    LOG_INFO("OSC", "Paused for 30 seconds");
                     
                     // 发送暂停消息提示
-                    if (g_osc && g_oscEnabled) {
-                        SendSystemOSCMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
-                    }
+                    OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
                     
                     // 创建覆盖层窗口
                     CreateOverlayWindow();
@@ -8516,9 +8924,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // Save config
                     SaveConfig(g_configPath);
                     
-                    char debugBuf[128];
-                    sprintf_s(debugBuf, "[Hotkey] Changed to mods=%d, key=%d", g_oscPauseHotkeyMods, g_oscPauseHotkey);
-                    MainDebugLog(debugBuf);
+                    LOG_INFO("Hotkey", "Changed to mods=%d, key=%d", g_oscPauseHotkeyMods, g_oscPauseHotkey);
                 }
                 
                 g_editingHotkey = false;
@@ -8764,7 +9170,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // System just recovered from lag - reset OSC timer to prevent burst sends
                     g_lastOscSendTime = now;
                     g_systemResumeTime = now;  // Mark recovery time
-                    MainDebugLog("[Timer] System lag detected, resetting OSC timers");
+                    LOG_INFO("Timer", "System lag detected, resetting OSC timers");
                 }
                 g_lastTimerTick = now;
                 
@@ -8904,7 +9310,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // Auto switch to QQ Music if enabled
                     if (g_autoPlatformSwitch && g_activePlatform != 2) {
                         g_activePlatform = 2;
-                        MainDebugLog("[Main] Auto-switched to QQ Music platform");
+                        LOG_INFO("Main", "Auto-switched to QQ Music platform");
                     }
                     
                     // Update pending song info for OSC
@@ -8938,8 +9344,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             });
                         }
                         
-                        // Send OSC message for QQ Music
-                        if (g_osc && g_oscEnabled) {
+                        // Send OSC message for QQ Music (using OSCManager)
+                        if (!OSCManager::instance().isPaused()) {
                             // Build SongInfo from pending data
                             moekoe::SongInfo info;
                             info.title = g_pendingTitle;
@@ -8950,24 +9356,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             info.hasData = true;
                             info.lyrics = g_pendingLyrics;
                             
-                            DWORD now = GetTickCount();
-                            if (now - g_lastOscSendTime >= OSC_MIN_INTERVAL) {
-                                std::wstring oscMsg;
-                                
-                                // 根据显示模式选择消息类型
-                                if (g_performanceMode == 1) {
-                                    // 性能模式：一次性发送所有硬件信息
-                                    oscMsg = BuildPerformanceOSCMessage(0);
-                                } else {
-                                    // 音乐模式：发送歌曲信息
-                                    oscMsg = FormatOSCMessage(info);
-                                }
-                                
-                                if (oscMsg != g_lastOscMessage) {
-                                    g_osc->sendChatbox(oscMsg);
-                                    g_lastOscMessage = oscMsg;
-                                    g_lastOscSendTime = now;
-                                }
+                            std::wstring oscMsg;
+                            
+                            // 根据显示模式选择消息类型
+                            if (g_performanceMode == 1) {
+                                // 性能模式：一次性发送所有硬件信息
+                                oscMsg = BuildPerformanceOSCMessage(0);
+                            } else {
+                                // 音乐模式：发送歌曲信息
+                                oscMsg = FormatOSCMessage(info);
+                            }
+                            
+                            if (OSCManager::instance().sendMessage(oscMsg)) {
+                                g_lastOscMessage = oscMsg;
                             }
                         }
                     }
@@ -8979,20 +9380,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         
         case WM_CLOSE:
-            // 退出前发送关闭OSC消息（同步发送，确保消息能发出）
-            if (g_osc && g_oscEnabled) {
-                MainDebugLog("[Main] Sending goodbye OSC message...");
-                // 等待足够时间，确保不触发限流
-                DWORD now = GetTickCount();
-                DWORD timeSinceLastSend = now - g_lastOscSendTime;
-                if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-                    Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
-                }
-                g_osc->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
-                g_lastOscSendTime = GetTickCount();
-                MainDebugLog("[Main] Goodbye OSC message sent");
+            // 退出前发送关闭OSC消息（使用 OSCManager）
+            if (OSCManager::instance().isConnected() && OSCManager::instance().isEnabled()) {
+                LOG_INFO("Main", "Sending goodbye OSC message...");
+                OSCManager::instance().sendGoodbye();
+                LOG_INFO("Main", "Goodbye OSC message sent");
             } else {
-                MainDebugLog("[Main] OSC not enabled or not connected, skipping goodbye message");
+                LOG_INFO("Main", "OSC not enabled or not connected, skipping goodbye message");
             }
             // Save window position and size before closing
             {
@@ -9010,51 +9404,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         
         case WM_USER + 102: {
             // OSC接收器回调 - 切换暂停状态
-            DWORD now = GetTickCount();
-            
-            // 判断是否真的在暂停中（时间还没到，且不在关闭动画中）
-            bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now && !g_overlayClosing;
+            bool isReallyPaused = OSCManager::instance().isPaused();
             
             if (isReallyPaused) {
                 // 真正在暂停中 - 取消暂停，触发粒子爆发
-                MainDebugLog("[OSC Receiver] Canceling OSC pause");
+                LOG_INFO("OSC Receiver", "Canceling OSC pause");
                 
                 // 发送恢复消息提示
-                if (g_osc && g_oscEnabled) {
-                    SendSystemOSCMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
-                }
+                OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                 
                 // 触发粒子爆炸（在进度条末端）
                 TriggerParticleBurstAtProgressEnd();
                 
+                OSCManager::instance().resume();
                 g_oscPaused = false;
                 g_oscPauseEndTime = 0;
                 
                 // 开始关闭动画
-                if (g_overlayHwnd && !g_overlayClosing) {
+                if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
+                    OSCManager::instance().setOverlayClosing(true);
                     g_overlayClosing = true;
                 }
-            } else if (g_overlayHwnd && g_overlayClosing) {
+            } else if (g_overlayHwnd && OSCManager::instance().isOverlayClosing()) {
                 // 正在关闭动画中，加速关闭
-                MainDebugLog("[OSC Receiver] Accelerating overlay close");
+                LOG_INFO("OSC Receiver", "Accelerating overlay close");
                 DestroyWindow(g_overlayHwnd);
                 g_overlayHwnd = nullptr;
                 g_overlayActive = false;
                 g_overlayClosing = false;
+                OSCManager::instance().setOverlayClosing(false);
                 g_overlayExpandAnim = 0.0f;
                 g_particles.clear();
                 g_sandParticles.clear();
             } else {
                 // 开始新的暂停
+                OSCManager::instance().pause(OSC_PAUSE_DURATION);
                 g_oscPaused = true;
-                g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
-                g_overlayClosing = false;  // 确保不是关闭状态
-                MainDebugLog("[OSC Receiver] OSC paused for 30 seconds");
+                g_oscPauseEndTime = GetTickCount() + OSC_PAUSE_DURATION * 1000;
+                g_overlayClosing = false;
+                LOG_INFO("OSC Receiver", "OSC paused for 30 seconds");
                 
                 // 发送暂停消息提示
-                if (g_osc && g_oscEnabled) {
-                    SendSystemOSCMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
-                }
+                OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
                 
                 // 创建覆盖层窗口
                 CreateOverlayWindow();
@@ -9117,7 +9508,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 // 统一性能监控线程（合并原4个线程，优化性能和资源使用）
 DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
-    LOG_INFO("[PerfMonitor] Unified performance monitoring thread started");
+    LOG_INFO("PerfMonitor", "Unified performance monitoring thread started");
     
     // === 初始化所有监控资源（只初始化一次）===
     
@@ -9138,8 +9529,8 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                     if (SUCCEEDED(pAdapter1->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&pDXGIAdapter))) {
                         dxgiInitialized = true;
                         char msg[128];
-                        sprintf_s(msg, "[PerfMonitor] DXGI Adapter3 initialized (Vendor: 0x%04X)", desc.VendorId);
-                        LOG_INFO(msg);
+                        sprintf_s(msg, "DXGI Adapter3 initialized (Vendor: 0x%04X)", desc.VendorId);
+                        LOG_INFO("PerfMonitor", "%s", msg);
                     }
                     pAdapter1->Release();
                     break;  // 使用第一个有效GPU
@@ -9162,7 +9553,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
             CoSetProxyBlanket(pWmiServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, 
                              RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
             wmiInitialized = true;
-            LOG_INFO("[PerfMonitor] WMI ROOT\\CIMV2 initialized");
+            LOG_INFO("PerfMonitor", "WMI ROOT\\CIMV2 initialized");
         }
         
         // ROOT\LibreHardwareMonitor（需要安装LHM）
@@ -9170,17 +9561,17 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
             CoSetProxyBlanket(pLhmServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr, 
                              RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_NONE);
             lhmInitialized = true;
-            LOG_INFO("[PerfMonitor] LibreHardwareMonitor WMI initialized");
+            LOG_INFO("PerfMonitor", "LibreHardwareMonitor WMI initialized");
         }
     }
     
     {
         char initMsg[256];
-        sprintf_s(initMsg, "[PerfMonitor] Initialization complete. DXGI: %s, WMI: %s, LHM: %s",
+        sprintf_s(initMsg, "Initialization complete. DXGI: %s, WMI: %s, LHM: %s",
                  dxgiInitialized ? "OK" : "N/A",
                  wmiInitialized ? "OK" : "N/A",
                  lhmInitialized ? "OK" : "N/A");
-        LOG_INFO(initMsg);
+        LOG_INFO("PerfMonitor", "%s", initMsg);
     }
     
     // === 主监控循环（统一频率：每1秒）===
@@ -9244,8 +9635,8 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                     gpuUsage = (int)utilization.gpu;
                 } else {
                     char errMsg[64];
-                    sprintf_s(errMsg, "[PerfMonitor] NVML GetUtilizationRates failed: %d", utilResult);
-                    LOG_DEBUG(errMsg);
+                    sprintf_s(errMsg, "NVML GetUtilizationRates failed: %d", utilResult);
+                    LOG_DEBUG("PerfMonitor", "%s", errMsg);
                 }
                 
                 // 获取显存信息（如果函数可用）
@@ -9256,13 +9647,13 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                         gpuVramTotal = memory.total;
                         gpuVramUsed = memory.used;
                         char msg[128];
-                        sprintf_s(msg, "[PerfMonitor] NVML: GPU=%d%%, VRAM=%llu/%llu MB", 
+                        sprintf_s(msg, "NVML: GPU=%d%%, VRAM=%llu/%llu MB",
                                  gpuUsage, memory.used/1024/1024, memory.total/1024/1024);
-                        LOG_DEBUG(msg);
+                        LOG_DEBUG("PerfMonitor", "%s", msg);
                     } else {
                         char errMsg[64];
-                        sprintf_s(errMsg, "[PerfMonitor] NVML GetMemoryInfo failed: %d", memResult);
-                        LOG_DEBUG(errMsg);
+                        sprintf_s(errMsg, "NVML GetMemoryInfo failed: %d", memResult);
+                        LOG_DEBUG("PerfMonitor", "%s", errMsg);
                     }
                 }
             }
@@ -9279,9 +9670,9 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                         gpuVramTotal = info.Budget;  // 预算值作为总量
                         gpuVramUsed = info.CurrentUsage;
                         char dxgiMsg[128];
-                        sprintf_s(dxgiMsg, "[PerfMonitor] DXGI QueryVideoMemoryInfo: VRAM=%llu/%llu MB", 
+                        sprintf_s(dxgiMsg, "DXGI QueryVideoMemoryInfo: VRAM=%llu/%llu MB",
                                  gpuVramUsed/1024/1024, gpuVramTotal/1024/1024);
-                        LOG_DEBUG(dxgiMsg);
+                        LOG_DEBUG("PerfMonitor", "%s", dxgiMsg);
                     }
                 }
                 
@@ -9336,8 +9727,8 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                                 gpuVramTotal = (DWORD64)memTotal * 1024 * 1024;
                             }
                             char smiMsg[128];
-                            sprintf_s(smiMsg, "[PerfMonitor] nvidia-smi: GPU=%d%%, VRAM=%d/%d MB", gpuUsage, memUsed, memTotal);
-                            LOG_DEBUG(smiMsg);
+                            sprintf_s(smiMsg, "nvidia-smi: GPU=%d%%, VRAM=%d/%d MB", gpuUsage, memUsed, memTotal);
+                            LOG_DEBUG("PerfMonitor", "%s", smiMsg);
                         }
                     }
                 }
@@ -9425,8 +9816,8 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                             if (tempC > 0 && tempC < 150) {
                                 cpuTemp = tempC;
                                 char tempMsg[64];
-                                sprintf_s(tempMsg, "[PerfMonitor] ACPI Temperature: %d°C", cpuTemp);
-                                LOG_DEBUG(tempMsg);
+                                sprintf_s(tempMsg, "ACPI Temperature: %d°C", cpuTemp);
+                                LOG_DEBUG("PerfMonitor", "%s", tempMsg);
                                 break;
                             }
                         }
@@ -9454,8 +9845,8 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                             cpuTemp = (int)vt.fltVal;
                             if (cpuTemp > 0 && cpuTemp < 150) {
                                 char tempMsg[64];
-                                sprintf_s(tempMsg, "[PerfMonitor] LHM CPU Temperature: %d°C", cpuTemp);
-                                LOG_DEBUG(tempMsg);
+                                sprintf_s(tempMsg, "LHM CPU Temperature: %d°C", cpuTemp);
+                                LOG_DEBUG("PerfMonitor", "%s", tempMsg);
                                 break;
                             }
                         }
@@ -9493,8 +9884,8 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                                 if (temp > 0 && temp < 150) {
                                     cpuTemp = temp;
                                     char tempMsg[128];
-                                    sprintf_s(tempMsg, "[PerfMonitor] LHM Temperature Sensor '%ls': %d°C", name.c_str(), cpuTemp);
-                                    LOG_DEBUG(tempMsg);
+                                    sprintf_s(tempMsg, "LHM Temperature Sensor '%ls': %d°C", name.c_str(), cpuTemp);
+                                    LOG_DEBUG("PerfMonitor", "%s", tempMsg);
                                     found = true;
                                 }
                             }
@@ -9509,7 +9900,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
             }
             
             if (cpuTemp == 0) {
-                LOG_DEBUG("[PerfMonitor] CPU temperature not available (requires LibreHardwareMonitor)");
+                LOG_DEBUG("PerfMonitor", "CPU temperature not available (requires LibreHardwareMonitor)");
             }
             
             // 更新共享数据
@@ -9535,7 +9926,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
     if (pWmiServices) pWmiServices->Release();
     if (pWmiLocator) pWmiLocator->Release();
     
-    LOG_INFO("[PerfMonitor] Unified performance monitoring thread stopped");
+    LOG_INFO("PerfMonitor", "Unified performance monitoring thread stopped");
     return 0;
 }
 
@@ -9570,15 +9961,15 @@ void InitializePerfMonitoring() {
     if (g_gpuVendor == GPU_NVIDIA) {
         g_nvmlDll = LoadLibraryW(L"nvml.dll");
         if (g_nvmlDll) {
-            LOG_INFO("[NVML] nvml.dll loaded successfully");
+            LOG_INFO("NVML", "nvml.dll loaded successfully");
             
             // 尝试加载 _v2 版本的函数，失败则回退到旧版本
             nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit_v2");
             if (!nvmlInit) {
                 nvmlInit = (nvmlInit_t)GetProcAddress(g_nvmlDll, "nvmlInit");
-                LOG_INFO("[NVML] Using legacy nvmlInit");
+                LOG_INFO("NVML", "Using legacy nvmlInit");
             } else {
-                LOG_INFO("[NVML] Using nvmlInit_v2");
+                LOG_INFO("NVML", "Using nvmlInit_v2");
             }
             
             nvmlShutdown = (nvmlShutdown_t)GetProcAddress(g_nvmlDll, "nvmlShutdown");
@@ -9586,9 +9977,9 @@ void InitializePerfMonitoring() {
             nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex_v2");
             if (!nvmlDeviceGetHandleByIndex) {
                 nvmlDeviceGetHandleByIndex = (nvmlDeviceGetHandleByIndex_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetHandleByIndex");
-                LOG_INFO("[NVML] Using legacy nvmlDeviceGetHandleByIndex");
+                LOG_INFO("NVML", "Using legacy nvmlDeviceGetHandleByIndex");
             } else {
-                LOG_INFO("[NVML] Using nvmlDeviceGetHandleByIndex_v2");
+                LOG_INFO("NVML", "Using nvmlDeviceGetHandleByIndex_v2");
             }
             
             nvmlDeviceGetUtilizationRates = (nvmlDeviceGetUtilizationRates_t)GetProcAddress(g_nvmlDll, "nvmlDeviceGetUtilizationRates");
@@ -9599,17 +9990,17 @@ void InitializePerfMonitoring() {
                 int initResult = nvmlInit();
                 char initMsg[64];
                 sprintf_s(initMsg, "[NVML] nvmlInit returned: %d", initResult);
-                LOG_INFO(initMsg);
+                LOG_INFO("NVML", "%s", initMsg);
                 
                 if (initResult == NVML_SUCCESS) {
                     int handleResult = nvmlDeviceGetHandleByIndex(0, &g_nvmlDevice);
                     char handleMsg[64];
                     sprintf_s(handleMsg, "[NVML] GetHandleByIndex(0) returned: %d", handleResult);
-                    LOG_INFO(handleMsg);
+                    LOG_INFO("NVML", "%s", handleMsg);
                     
                     if (handleResult == NVML_SUCCESS) {
                         g_nvmlAvailable = true;
-                        LOG_INFO("[NVML] NVML initialized successfully");
+                        LOG_INFO("NVML", "NVML initialized successfully");
                         
                         // 测试获取GPU名称
                         if (nvmlDeviceGetName) {
@@ -9617,28 +10008,28 @@ void InitializePerfMonitoring() {
                             if (nvmlDeviceGetName(g_nvmlDevice, gpuName, sizeof(gpuName)) == NVML_SUCCESS) {
                                 char nameMsg[300];
                                 sprintf_s(nameMsg, "[NVML] GPU Name: %s", gpuName);
-                                LOG_INFO(nameMsg);
+                                LOG_INFO("NVML", "%s", nameMsg);
                             }
                         }
                     } else {
                         g_nvmlDevice = nullptr;
                         nvmlShutdown();
-                        LOG_ERROR("[NVML] Failed to get device handle");
+                        LOG_ERROR("NVML", "Failed to get device handle");
                     }
                 } else {
-                    LOG_ERROR("[NVML] nvmlInit failed");
+                    LOG_ERROR("NVML", "nvmlInit failed");
                 }
             } else {
-                LOG_ERROR("[NVML] Required functions not found in nvml.dll");
+                LOG_ERROR("NVML", "Required functions not found in nvml.dll");
             }
             
             if (!g_nvmlAvailable) {
                 FreeLibrary(g_nvmlDll);
                 g_nvmlDll = nullptr;
-                LOG_ERROR("[NVML] NVML initialization failed, falling back to nvidia-smi");
+                LOG_ERROR("NVML", "NVML initialization failed, falling back to nvidia-smi");
             }
         } else {
-            LOG_ERROR("[NVML] Failed to load nvml.dll");
+            LOG_ERROR("NVML", "Failed to load nvml.dll");
         }
     }
 
@@ -9720,7 +10111,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         FreeLibrary(hUser32);
     }
     
-    MainDebugLog("[WinMain] Application starting");
+    LOG_INFO("WinMain", "Application starting");
     InitCommonControls();
     
     // 先初始化默认主题颜色，确保多开提示弹窗显示正确
@@ -9763,16 +10154,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     if (isFirstRun) {
         g_cpuDisplayName = DetectCpuName();
         g_gpuDisplayName = DetectGpuName();
-        MainDebugLog("[WinMain] Auto-detected CPU name:");
-        MainDebugLog(WstringToUtf8(g_cpuDisplayName).c_str());
-        MainDebugLog("[WinMain] Auto-detected GPU name:");
-        MainDebugLog(WstringToUtf8(g_gpuDisplayName).c_str());
+        LOG_INFO("WinMain", "Auto-detected CPU name: %s", WstringToUtf8(g_cpuDisplayName).c_str());
+        LOG_INFO("WinMain", "Auto-detected GPU name: %s", WstringToUtf8(g_gpuDisplayName).c_str());
         SaveConfig(g_configPath);  // 保存检测到的名称
     }
     
     // 检查是否需要以管理员身份重启
     if (g_runAsAdmin && !IsRunningAsAdmin()) {
-        MainDebugLog("[WinMain] Configured to run as admin, restarting...");
+        LOG_INFO("WinMain", "Configured to run as admin, restarting...");
         wchar_t exePath[MAX_PATH];
         GetModuleFileNameW(nullptr, exePath, MAX_PATH);
         SHELLEXECUTEINFOW sei = { sizeof(sei) };
@@ -9786,7 +10175,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
             return 0;
         }
         // 如果用户取消了UAC提示，继续以普通权限运行
-        MainDebugLog("[WinMain] Admin restart cancelled by user, continuing with normal privileges");
+        LOG_INFO("WinMain", "Admin restart cancelled by user, continuing with normal privileges");
     }
     
     g_noLyricMsgs = LoadNoLyricMessages(g_noLyricConfigPath);
@@ -9903,9 +10292,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     SetTimer(g_hwnd, 1, 16, nullptr);
     
     // 启动时发送测试消息，确保OSC连接正常
-    if (g_osc && g_oscEnabled) {
-        SendSystemOSCMessage(L"VRCLyricsDisplay\n\x5DF2\x542F\x52A8\x5E76\x8FDE\x63A5\x6210\x529F");
-        MainDebugLog("[Main] Startup test message sent");
+    if (OSCManager::instance().isConnected() && OSCManager::instance().isEnabled()) {
+        OSCManager::instance().sendSystemMessage(L"VRCLyricsDisplay\n\x5DF2\x542F\x52A8\x5E76\x8FDE\x63A5\x6210\x529F");
+        LOG_INFO("Main", "Startup test message sent");
     }
     
     // Auto-check for updates on startup if enabled (in background thread)
