@@ -3325,7 +3325,11 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         MainDebugLog("[OSC] Pause ended naturally in send logic, closing animation");
     }
     
-    if (g_osc && info.hasData && g_oscEnabled && !g_oscPaused) {
+    // OSC发送条件：性能模式或有音乐数据时发送
+    bool shouldSendOSC = g_osc && g_oscEnabled && !g_oscPaused;
+    bool hasContentToSend = (g_performanceMode == 1) || info.hasData;  // 性能模式或有音乐数据
+    
+    if (shouldSendOSC && hasContentToSend) {
         DWORD now = GetTickCount();
         // 统一使用2秒间隔，避免VRChat限流
         DWORD minInterval = OSC_MIN_INTERVAL;
@@ -5220,12 +5224,30 @@ void OnPaint(HWND hwnd) {
     } else {
         // === SETTINGS TAB: IP, Port, Checkboxes ===
         DrawTextLeft(memDC, L"OSC IP:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontSmall);
-        DrawRoundRect(memDC, CARD_PADDING + 18, rowY + 24, leftColW - 36, 36, 6, COLOR_EDIT_BG);
+        // 只绘制边框，不填充背景
+        {
+            HPEN pen = CreatePen(PS_SOLID, 1, COLOR_BOX_BORDER);
+            HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+            HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+            RoundRect(memDC, CARD_PADDING + 18, rowY + 24, CARD_PADDING + 18 + leftColW - 36, rowY + 24 + 36, 12, 12);
+            SelectObject(memDC, oldBrush);
+            SelectObject(memDC, oldPen);
+            DeleteObject(pen);
+        }
         DrawTextLeft(memDC, g_oscIp.c_str(), CARD_PADDING + 30, rowY + 30, COLOR_TEXT, g_fontNormal);
         
         rowY += 75;
         DrawTextLeft(memDC, L"OSC \x7AEF\x53E3:", CARD_PADDING + 18, rowY, COLOR_TEXT_DIM, g_fontSmall);
-        DrawRoundRect(memDC, CARD_PADDING + 18, rowY + 24, leftColW - 36, 36, 6, COLOR_EDIT_BG);
+        // 只绘制边框，不填充背景
+        {
+            HPEN pen = CreatePen(PS_SOLID, 1, COLOR_BOX_BORDER);
+            HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+            HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+            RoundRect(memDC, CARD_PADDING + 18, rowY + 24, CARD_PADDING + 18 + leftColW - 36, rowY + 24 + 36, 12, 12);
+            SelectObject(memDC, oldBrush);
+            SelectObject(memDC, oldPen);
+            DeleteObject(pen);
+        }
         wchar_t portStr[16];
         swprintf_s(portStr, L"%d", g_oscPort);
         DrawTextLeft(memDC, portStr, CARD_PADDING + 30, rowY + 30, COLOR_TEXT, g_fontNormal);
