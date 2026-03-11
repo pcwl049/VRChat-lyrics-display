@@ -1423,6 +1423,40 @@ void SyncDisplayModuleNames() {
     g_cachedPreviewMsg.clear();
 }
 
+// 根据鼠标X坐标获取字符位置（用于文字选择）
+int GetCharPosFromX(HDC hdc, const std::wstring& text, int startX, int mouseX) {
+    if (text.empty()) return 0;
+    
+    HFONT oldFont = (HFONT)SelectObject(hdc, g_fontNormal);
+    
+    // 二分查找字符位置
+    int lo = 0, hi = (int)text.length();
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        SIZE size;
+        GetTextExtentPoint32W(hdc, text.c_str(), mid, &size);
+        int charRight = startX + size.cx;
+        if (charRight <= mouseX) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    
+    // 判断鼠标在字符左半边还是右半边
+    if (lo < (int)text.length()) {
+        SIZE size;
+        GetTextExtentPoint32W(hdc, text.c_str(), lo + 1, &size);
+        int charCenter = startX + size.cx - size.cx / 2;
+        if (mouseX > charCenter) {
+            lo++;
+        }
+    }
+    
+    SelectObject(hdc, oldFont);
+    return lo;
+}
+
 // 线程同步
 std::atomic<bool> g_threadRunning[4] = {false, false, false, false};
 HANDLE g_workerThreads[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -7506,6 +7540,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             
+            // 处理文字选择拖拽
+            if (g_mouseDragging && g_editingField != EDIT_NONE) {
+                int leftColW = 260;
+                int contentY = TITLEBAR_H + 20;
+                int tabH = 32;
+                int tabY = contentY + 10;
+                int rowY = contentY + 55;
+                int modeBtnW = 70;
+                int modeBtnH = 32;
+                int modeBtnSpacing = 6;
+                int totalModeBtnW = 2 * modeBtnW + modeBtnSpacing;
+                int modeBtnStartX = CARD_PADDING + 18 + (leftColW - 36 - totalModeBtnW) / 2;
+                int modeBtnY = rowY + 30;
+                
+                int infoX = CARD_PADDING + 18;
+                int infoY = modeBtnY + modeBtnH + 20;
+                int infoW = leftColW - 36;
+                
+                HDC hdc = GetDC(hwnd);
+                int newPos = GetCharPosFromX(hdc, g_editingText, infoX + 60, x);
+                ReleaseDC(hwnd, hdc);
+                
+                g_cursorPos = newPos;
+                g_selectEnd = newPos;  // 拖拽选择
+                g_lastCursorBlink = GetTickCount();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            
             // Layout positions
             int leftColW = 260;
             int contentY = TITLEBAR_H + 20;
@@ -8158,8 +8221,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_editingField = EDIT_CPU_NAME;
                     g_editingText = g_cpuDisplayName;
                     g_editingOriginalText = g_cpuDisplayName;  // 保存原始值
-                    g_cursorPos = (int)g_editingText.length();
-                    g_selectStart = g_selectEnd = g_cursorPos;
+                    // 根据点击位置计算光标位置
+                    HDC hdc = GetDC(hwnd);
+                    g_cursorPos = GetCharPosFromX(hdc, g_editingText, infoX + 60, x);
+                    ReleaseDC(hwnd, hdc);
+                    g_selectStart = g_cursorPos;  // 开始拖拽选择
+                    g_selectEnd = g_cursorPos;
+                    g_mouseDragging = true;  // 开始拖拽
+                    SetCapture(hwnd);
                     g_lastCursorBlink = GetTickCount();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
@@ -8171,8 +8240,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_editingField = EDIT_RAM_NAME;
                     g_editingText = g_ramDisplayName;
                     g_editingOriginalText = g_ramDisplayName;  // 保存原始值
-                    g_cursorPos = (int)g_editingText.length();
-                    g_selectStart = g_selectEnd = g_cursorPos;
+                    // 根据点击位置计算光标位置
+                    HDC hdc = GetDC(hwnd);
+                    g_cursorPos = GetCharPosFromX(hdc, g_editingText, infoX + 60, x);
+                    ReleaseDC(hwnd, hdc);
+                    g_selectStart = g_cursorPos;  // 开始拖拽选择
+                    g_selectEnd = g_cursorPos;
+                    g_mouseDragging = true;  // 开始拖拽
+                    SetCapture(hwnd);
                     g_lastCursorBlink = GetTickCount();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
@@ -8184,8 +8259,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_editingField = EDIT_GPU_NAME;
                     g_editingText = g_gpuDisplayName;
                     g_editingOriginalText = g_gpuDisplayName;  // 保存原始值
-                    g_cursorPos = (int)g_editingText.length();
-                    g_selectStart = g_selectEnd = g_cursorPos;
+                    // 根据点击位置计算光标位置
+                    HDC hdc = GetDC(hwnd);
+                    g_cursorPos = GetCharPosFromX(hdc, g_editingText, infoX + 60, x);
+                    ReleaseDC(hwnd, hdc);
+                    g_selectStart = g_cursorPos;  // 开始拖拽选择
+                    g_selectEnd = g_cursorPos;
+                    g_mouseDragging = true;  // 开始拖拽
+                    SetCapture(hwnd);
                     g_lastCursorBlink = GetTickCount();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
@@ -8325,7 +8406,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     
-    case WM_LBUTTONUP: if (g_dragging) { g_dragging = false; ReleaseCapture(); } return 0;
+    case WM_LBUTTONUP:
+        if (g_dragging) {
+            g_dragging = false;
+            ReleaseCapture();
+        }
+        if (g_mouseDragging) {
+            g_mouseDragging = false;
+            ReleaseCapture();
+        }
+        return 0;
 
         case WM_CHAR: {
             // Handle character input for editing fields
