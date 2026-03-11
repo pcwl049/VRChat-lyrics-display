@@ -273,7 +273,6 @@ public:
     // 消息发送（统一入口）- 普通消息（有速率限制）
     bool sendMessage(const std::wstring& msg) {
         if (!canSend()) {
-            LOG_DEBUG("OSCManager", "sendMessage blocked: canSend() returned false");
             return false;
         }
         
@@ -286,7 +285,6 @@ public:
                 if (timeSinceResume < 100) {
                     m_lastSendTime = now;
                 }
-                LOG_DEBUG("OSCManager", "sendMessage blocked: system resume wait");
                 return false;
             } else {
                 m_systemResumeTime = 0;
@@ -296,20 +294,18 @@ public:
         // 速率限制
         DWORD timeSinceLastSend = now - m_lastSendTime;
         if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-            LOG_DEBUG("OSCManager", "sendMessage blocked: rate limit (%dms < %dms)", (int)timeSinceLastSend, (int)OSC_MIN_INTERVAL);
             return false;
         }
         
         // 去重
         if (msg == m_lastMessage) {
-            LOG_DEBUG("OSCManager", "sendMessage blocked: duplicate message");
             return false;
         }
         
         doSend(msg);
         m_lastMessage = msg;
         m_lastSendTime = now;
-        LOG_DEBUG("OSCManager", "sendMessage success: sent new message");
+        LOG_INFO("OSCManager", "Message sent successfully");
         return true;
     }
     
@@ -3769,9 +3765,8 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
     
     // OSC发送条件：性能模式或有音乐数据时发送
     bool shouldSendOSC = !OSCManager::instance().isPaused();
-    bool hasContentToSend = (g_performanceMode == 1) || info.hasData;  // 性能模式或有音乐数据
     
-    if (shouldSendOSC && hasContentToSend) {
+    if (shouldSendOSC) {
         std::wstring oscMsg;
         
         // 根据显示模式选择消息类型
@@ -3779,8 +3774,13 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
             // 性能模式：一次性发送所有硬件信息
             oscMsg = BuildPerformanceOSCMessage(0);
         } else {
-            // 音乐模式：发送歌曲信息
-            oscMsg = FormatOSCMessage(info);
+            // 音乐模式
+            if (info.hasData) {
+                oscMsg = FormatOSCMessage(info);
+            } else {
+                // 无音乐时显示等待消息
+                oscMsg = L"🎵 等待音乐中...\n\n暂无播放信息";
+            }
         }
         
         // 强制发送如果配置改变
@@ -8622,8 +8622,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_displayModeSlideAnim.setTarget(1.0);
                         g_displayModeSlideAnim.value = 0.0;
                         
-                        // 清除OSC消息缓存，避免切换模式后立即发送
+                        // 清除OSC消息缓存，确保切换模式后发送新消息
                         g_lastOscMessage.clear();
+                        OSCManager::instance().clearLastMessage();
+                        g_displayConfigChanged = true;  // 强制发送新消息
 
                         // 触发系统信息展开/收缩动画
                         // 使用当前value作为起点，避免突然跳变
@@ -9194,6 +9196,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     LOG_INFO("Timer", "System lag detected, resetting OSC timers");
                 }
                 g_lastTimerTick = now;
+                
+                // 定期发送 OSC 消息（性能模式 或 音乐模式无音乐时）
+                static DWORD lastOscTimerSend = 0;
+                if (!OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
+                    bool needSend = false;
+                    std::wstring oscMsg;
+                    
+                    if (g_performanceMode == 1) {
+                        // 性能模式：发送性能信息
+                        oscMsg = BuildPerformanceOSCMessage(0);
+                        needSend = true;
+                    } else if (!g_isConnected || g_pendingTitle.empty()) {
+                        // 音乐模式无音乐：发送等待消息
+                        oscMsg = L"🎵 等待音乐中...\n请播放歌曲";
+                        needSend = true;
+                        LOG_INFO("Timer", "Music mode, no song - sending wait message");
+                    }
+                    
+                    if (needSend) {
+                        if (OSCManager::instance().sendMessage(oscMsg)) {
+                            g_lastOscMessage = oscMsg;
+                            lastOscTimerSend = now;
+                        }
+                    }
+                }
                 
                 // After system recovery, wait at least 2 seconds before allowing OSC sends
                 // This prevents burst sends from accumulated callbacks
