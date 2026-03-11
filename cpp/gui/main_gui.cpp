@@ -6738,11 +6738,10 @@ void TriggerParticleBurstAtProgressEnd() {
     int h = rc.bottom;
     
     // 计算进度条参数（与绘制代码一致）
-    int barPadding = 20;
+    int barW = 260;  // 固定宽度
     int barH = 10;
+    int barX = (w - barW) / 2;  // 水平居中
     int barY = h - barH - 22;
-    int barX = barPadding + 12;
-    int barW = w - barPadding * 2 - 12;
     
     // 计算当前进度
     float progress = 0;
@@ -6820,12 +6819,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 HRGN clipRgn = CreateRectRgn(clipX, 0, clipX + clipW, h);
                 SelectClipRgn(memDC, clipRgn);
                 
-                // 进度条参数
-                int barPadding = 20;
+                // 进度条参数（固定宽度，居中显示）
+                int barW = 260;  // 固定宽度
                 int barH = 10;
+                int barX = (w - barW) / 2;  // 水平居中
                 int barY = h - barH - 22;
-                int barX = barPadding;
-                int barW = w - barPadding * 2;
                 
                 // 计算进度
                 DWORD now = GetTickCount();
@@ -6891,7 +6889,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     
                     SIZE textSize;
                     GetTextExtentPoint32W(memDC, timeText, (int)wcslen(timeText), &textSize);
-                    int textX = w - barPadding - textSize.cx;
+                    int textX = barX + barW - textSize.cx;  // 进度条右端对齐
                     int textY = barY - textSize.cy - 5;  // 进度条上方
                     TextOutW(memDC, textX, textY, timeText, (int)wcslen(timeText));
                     
