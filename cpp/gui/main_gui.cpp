@@ -6877,7 +6877,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     DeleteObject(sandBrush);
                 }
                 
-                // 绘制倒计时文本（右侧）
+                // 绘制倒计时文本（进度条上方）
                 if (g_oscPaused && g_oscPauseEndTime > now) {
                     int remaining = (int)((g_oscPauseEndTime - now) / 1000);
                     wchar_t timeText[32];
@@ -6892,7 +6892,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     SIZE textSize;
                     GetTextExtentPoint32W(memDC, timeText, (int)wcslen(timeText), &textSize);
                     int textX = w - barPadding - textSize.cx;
-                    int textY = 12;
+                    int textY = barY - textSize.cy - 5;  // 进度条上方
                     TextOutW(memDC, textX, textY, timeText, (int)wcslen(timeText));
                     
                     SelectObject(memDC, oldFont);
@@ -7005,11 +7005,11 @@ void CreateOverlayWindow() {
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     int screenH = GetSystemMetrics(SM_CYSCREEN);
     
-    // 进度条窗口尺寸（屏幕底部居中）
-    int winW = 300;
-    int winH = 60;
+    // 进度条窗口尺寸（扩大以显示粒子效果）
+    int winW = 500;   // 扩大宽度
+    int winH = 200;   // 扩大高度以显示粒子
     int winX = (screenW - winW) / 2;  // 水平居中
-    int winY = screenH - winH - 20;   // 距离底部20像素
+    int winY = screenH - winH - 10;   // 距离底部10像素，让粒子有空间向上飞
     
     // 注册窗口类（只注册一次）
     static bool registered = false;
