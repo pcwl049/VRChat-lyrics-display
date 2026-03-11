@@ -950,7 +950,7 @@ bool IsNeteaseRunning();  // 前向声明
 const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91", L"QQ音乐", L"\x6C7D\x6C34" };  // 酷狗, 网易云, QQ音乐, 汽水
 int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
-bool g_autoPlatformSwitch = false; // Auto switch platforms when playing (disabled by default)
+bool g_autoPlatformSwitch = true; // Auto switch platforms when playing (enabled by default for startup detection)
 const DWORD PLATFORM_SWITCH_DELAY = 2000; // Wait 2s before switching platforms
 int g_currentTab = 0;        // 0=Main, 1=Performance, 2=Settings
 bool g_tabHover[3] = {false, false, false};
@@ -1504,7 +1504,19 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     headers += L"Referer: https://www.douyin.com/\r\n";
     headers += L"Origin: https://www.douyin.com\r\n";
     WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    WinHttpReceiveResponse(hRequest, NULL);
+    
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    BOOL received = WinHttpReceiveResponse(hRequest, NULL);
+    
+    if (received) {
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, 
+                           WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
+        LOG_INFO("Qishui Music", "Search HTTP status: %d", statusCode);
+    } else {
+        DWORD err = GetLastError();
+        LOG_INFO("Qishui Music", "WinHttpReceiveResponse failed: %d", err);
+    }
     
     std::string searchResp;
     DWORD dwSize = 0;
@@ -1526,6 +1538,10 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     WinHttpCloseHandle(hSession);
     
     // Debug: log search response (first 500 chars)
+    if (searchResp.empty()) {
+        LOG_INFO("Qishui Music", "Search response is empty");
+        return lyrics;
+    }
     std::string respDbg = "[Qishui] Search response: " + searchResp.substr(0, (std::min)((size_t)500, searchResp.length()));
     LOG_INFO("Qishui Music", "%s", respDbg.c_str());
     
@@ -6643,8 +6659,14 @@ void Connect() {
             g_needsRedraw = true;
         } else {
             // Set active platform to the one that's connected
+            // 优先级：MoeKoe > Netease > SMTC
             if (g_moeKoeConnected) g_activePlatform = 0;
             else if (g_neteaseConnected) g_activePlatform = 1;
+            else if (g_smtcConnected) {
+                // 如果有 SMTC 连接，检测是 QQ 音乐还是汽水音乐
+                if (g_platforms[2].connected) g_activePlatform = 2;  // QQ 音乐
+                else if (g_platforms[3].connected) g_activePlatform = 3;  // 汽水音乐
+            }
             g_pendingTitle.clear();
             g_pendingArtist.clear();
             g_neteaseRunningNoDebug = false;  // 连接成功，清除标记
