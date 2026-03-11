@@ -6683,20 +6683,20 @@ void UpdateParticles() {
 void TriggerParticleBurst(int centerX, int centerY) {
     g_particleBurst = true;
     
-    // 主爆发粒子（大粒子，向外扩散）- 增加数量和范围
-    for (int i = 0; i < 60; i++) {
+    // 主爆发粒子（大粒子，向外扩散）- 扩大显示范围
+    for (int i = 0; i < 80; i++) {  // 增加数量
         Particle p;
         p.x = (float)centerX;
         p.y = (float)centerY;
         
-        // 放射状速度 - 扩大范围
+        // 放射状速度 - 大幅扩大范围
         float angle = (rand() % 360) * 3.14159f / 180.0f;
-        float speed = 3.0f + (rand() % 200) / 10.0f;  // 3 to 23
+        float speed = 5.0f + (rand() % 350) / 10.0f;  // 5 to 40 (更快更远)
         p.vx = cosf(angle) * speed;
-        p.vy = sinf(angle) * speed - 4.0f;  // 向上偏移更多
-        p.life = 2.5f + (rand() % 100) / 100.0f;  // 2.5 to 3.5 (更长，配合更慢衰减)
+        p.vy = sinf(angle) * speed - 6.0f;  // 向上偏移更多
+        p.life = 2.5f + (rand() % 100) / 100.0f;  // 2.5 to 3.5
         p.maxLife = p.life;
-        p.size = rand() % 8 + 4;  // 4 to 11 (更大)
+        p.size = rand() % 10 + 4;  // 4 to 13 (更大)
         
         // 蓝色系渐变颜色
         int colorType = rand() % 5;
@@ -6710,16 +6710,16 @@ void TriggerParticleBurst(int centerX, int centerY) {
         g_particles.push_back(p);
     }
     
-    // 小粒子火花（快速消失）- 增加数量
-    for (int i = 0; i < 50; i++) {
+    // 小粒子火花 - 扩大显示范围
+    for (int i = 0; i < 60; i++) {  // 增加数量
         Particle p;
-        p.x = (float)centerX + (rand() % 40 - 20);  // 更大范围
-        p.y = (float)centerY + (rand() % 40 - 20);
-        p.vx = ((rand() % 300) - 150) / 10.0f;  // -15 to 15
-        p.vy = ((rand() % 300) - 200) / 10.0f;  // -20 to 10 (向上)
-        p.life = 1.2f + (rand() % 80) / 100.0f;  // 1.2 to 2.0 (更长)
+        p.x = (float)centerX + (rand() % 80 - 40);  // 扩大生成范围 ±40
+        p.y = (float)centerY + (rand() % 80 - 40);
+        p.vx = ((rand() % 500) - 250) / 10.0f;  // -25 to 25 (更快)
+        p.vy = ((rand() % 400) - 300) / 10.0f;  // -30 to 10 (向上更快)
+        p.life = 1.2f + (rand() % 80) / 100.0f;  // 1.2 to 2.0
         p.maxLife = p.life;
-        p.size = rand() % 3 + 1;  // 1 to 3
+        p.size = rand() % 4 + 2;  // 2 to 5 (稍大)
         
         // 白色/亮色火花
         int brightness = 200 + rand() % 55;
