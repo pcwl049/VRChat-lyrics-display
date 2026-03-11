@@ -13,6 +13,14 @@ GlassWindow::GlassWindow(HWND hwnd, const Config& config)
     CreateFonts();
 }
 
+GlassWindow::~GlassWindow() {
+    // 释放字体资源
+    if (titleFont_) { DeleteObject(titleFont_); titleFont_ = nullptr; }
+    if (artistFont_) { DeleteObject(artistFont_); artistFont_ = nullptr; }
+    if (timeFont_) { DeleteObject(timeFont_); timeFont_ = nullptr; }
+    if (lyricFont_) { DeleteObject(lyricFont_); lyricFont_ = nullptr; }
+}
+
 void GlassWindow::CreateFonts() {
     titleFont_ = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,

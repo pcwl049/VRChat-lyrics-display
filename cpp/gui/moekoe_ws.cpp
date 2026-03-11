@@ -517,16 +517,33 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
     
     if (type == "welcome") {
         // Only show "Connected" if we don't have song data yet
-        if (!songInfo_.hasData || songInfo_.title.empty()) {
-            songInfo_.hasData = true;
-            songInfo_.title = L"Connected";
-            songInfo_.artist = L"Ready";
+        {
+            std::lock_guard<std::mutex> lock(songInfoMutex_);
+            if (!songInfo_.hasData || songInfo_.title.empty()) {
+                songInfo_.hasData = true;
+                songInfo_.title = L"Connected";
+                songInfo_.artist = L"Ready";
+            }
         }
-        if (callback_) callback_(songInfo_);
+        if (callback_) {
+            SongInfo info;
+            {
+                std::lock_guard<std::mutex> lock(songInfoMutex_);
+                info = songInfo_;
+            }
+            callback_(info);
+        }
     }
     else if (type == "lyrics") {
+        // 使用局部变量收集解析结果，减少锁持有时间
+        SongInfo localInfo;
+        {
+            std::lock_guard<std::mutex> lock(songInfoMutex_);
+            localInfo = songInfo_;  // 复制当前状态
+        }
+        
         // Extract currentTime
-        songInfo_.currentTime = jsonGetDouble(msg, "currentTime");
+        localInfo.currentTime = jsonGetDouble(msg, "currentTime");
         
         // Try to extract from currentSong first (more reliable)
         size_t csPos = msg.find("\"currentSong\"");
@@ -540,7 +557,7 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                     size_t nameEnd = msg.find("\"", nameStart);
                     if (nameEnd != std::string::npos) {
                         std::string name = msg.substr(nameStart, nameEnd - nameStart);
-                        songInfo_.title = utf8ToWstring(name);
+                        localInfo.title = utf8ToWstring(name);
                     }
                 }
             }
@@ -553,7 +570,7 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                     size_t authorEnd = msg.find("\"", authorStart);
                     if (authorEnd != std::string::npos) {
                         std::string author = msg.substr(authorStart, authorEnd - authorStart);
-                        songInfo_.artist = utf8ToWstring(author);
+                        localInfo.artist = utf8ToWstring(author);
                     }
                 }
             }
@@ -570,12 +587,12 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                     while (endPos < msg.size() && (msg[endPos] >= '0' && msg[endPos] <= '9' || msg[endPos] == '.')) endPos++;
                     if (endPos > colonPos) {
                         std::string val = msg.substr(colonPos, endPos - colonPos);
-                        try { songInfo_.duration = std::stod(val); } catch (...) {}
+                        try { localInfo.duration = std::stod(val); } catch (...) {}
                     }
                 }
             }
-            if (f) fprintf(f, "[DEBUG] timeLength from currentSong: %.2f\n", songInfo_.duration);
-            songInfo_.hasData = true;
+            if (f) fprintf(f, "[DEBUG] timeLength from currentSong: %.2f\n", localInfo.duration);
+            localInfo.hasData = true;
         }
         
         // Also check duration field (might be more accurate)
@@ -590,8 +607,8 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                 if (endPos > colonPos) {
                     std::string val = msg.substr(colonPos, endPos - colonPos);
                     try { 
-                        songInfo_.duration = std::stod(val);
-                        if (f) fprintf(f, "[DEBUG] duration field: %.2f\n", songInfo_.duration);
+                        localInfo.duration = std::stod(val);
+                        if (f) fprintf(f, "[DEBUG] duration field: %.2f\n", localInfo.duration);
                     } catch (...) {}
                 }
             }
@@ -740,55 +757,74 @@ void MoeKoeWS::parseMessage(const std::string& msg) {
                     }
                     
                     if (!title.empty()) {
-                        songInfo_.title = utf8ToWstring(title);
+                        localInfo.title = utf8ToWstring(title);
                     }
                     if (!artist.empty()) {
-                        songInfo_.artist = utf8ToWstring(artist);
+                        localInfo.artist = utf8ToWstring(artist);
                     }
                     if (!total.empty()) {
                         try { 
-                            songInfo_.duration = std::stod(total) / 1000.0; // ms to seconds
+                            localInfo.duration = std::stod(total) / 1000.0; // ms to seconds
                         } catch (...) {}
                     }
                     
                     // Parse lyrics
-                    songInfo_.lyrics = parseKRC(unescaped);
+                    localInfo.lyrics = parseKRC(unescaped);
                     
                     // Debug: print first few lyrics
                     if (f) {
-                        fprintf(f, "Parsed %zu lyrics lines, currentTime=%.2f sec\n", songInfo_.lyrics.size(), songInfo_.currentTime);
-                        for (size_t i = 0; i < 5 && i < songInfo_.lyrics.size(); i++) {
+                        fprintf(f, "Parsed %zu lyrics lines, currentTime=%.2f sec\n", localInfo.lyrics.size(), localInfo.currentTime);
+                        for (size_t i = 0; i < 5 && i < localInfo.lyrics.size(); i++) {
                             // Convert wstring back to UTF-8 for debug output
                             std::string utf8Text;
-                            if (!songInfo_.lyrics[i].text.empty()) {
-                                int len = WideCharToMultiByte(CP_UTF8, 0, songInfo_.lyrics[i].text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                            if (!localInfo.lyrics[i].text.empty()) {
+                                int len = WideCharToMultiByte(CP_UTF8, 0, localInfo.lyrics[i].text.c_str(), -1, nullptr, 0, nullptr, nullptr);
                                 if (len > 0) {
                                     utf8Text.resize(len - 1);
-                                    WideCharToMultiByte(CP_UTF8, 0, songInfo_.lyrics[i].text.c_str(), -1, &utf8Text[0], len, nullptr, nullptr);
+                                    WideCharToMultiByte(CP_UTF8, 0, localInfo.lyrics[i].text.c_str(), -1, &utf8Text[0], len, nullptr, nullptr);
                                 }
                             }
-                            fprintf(f, "  [%d] startTime=%d ms: %s\n", (int)i, songInfo_.lyrics[i].startTime, utf8Text.c_str());
+                            fprintf(f, "  [%d] startTime=%d ms: %s\n", (int)i, localInfo.lyrics[i].startTime, utf8Text.c_str());
                         }
                     }
                     
                     // Fallback: estimate duration from last lyric line if not available
-                    if (songInfo_.duration <= 0 && !songInfo_.lyrics.empty()) {
-                        const auto& lastLine = songInfo_.lyrics.back();
-                        songInfo_.duration = (lastLine.startTime + lastLine.duration) / 1000.0;
-                        if (f) fprintf(f, "[DEBUG] Estimated duration from lyrics: %.2f sec\n", songInfo_.duration);
+                    if (localInfo.duration <= 0 && !localInfo.lyrics.empty()) {
+                        const auto& lastLine = localInfo.lyrics.back();
+                        localInfo.duration = (lastLine.startTime + lastLine.duration) / 1000.0;
+                        if (f) fprintf(f, "[DEBUG] Estimated duration from lyrics: %.2f sec\n", localInfo.duration);
                     }
                     
-                    songInfo_.hasData = true;
+                    localInfo.hasData = true;
                 }
             }
         }
         
-        if (callback_) callback_(songInfo_);
+        // 更新共享数据并调用回调
+        {
+            std::lock_guard<std::mutex> lock(songInfoMutex_);
+            songInfo_ = localInfo;
+        }
+        if (callback_) callback_(localInfo);
     }
     else if (type == "playerState") {
-        songInfo_.isPlaying = jsonGetBool(msg, "isPlaying");
-        songInfo_.currentTime = jsonGetDouble(msg, "currentTime");
-        if (callback_) callback_(songInfo_);
+        bool isPlaying;
+        double currentTime;
+        {
+            std::lock_guard<std::mutex> lock(songInfoMutex_);
+            songInfo_.isPlaying = jsonGetBool(msg, "isPlaying");
+            songInfo_.currentTime = jsonGetDouble(msg, "currentTime");
+            isPlaying = songInfo_.isPlaying;
+            currentTime = songInfo_.currentTime;
+        }
+        if (callback_) {
+            SongInfo info;
+            {
+                std::lock_guard<std::mutex> lock(songInfoMutex_);
+                info = songInfo_;
+            }
+            callback_(info);
+        }
     }
     
     if (f) fclose(f);
@@ -800,6 +836,12 @@ std::wstring MoeKoeWS::utf8ToWstring(const std::string& utf8) {
     std::wstring wstr(len - 1, 0);
     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], len);
     return wstr;
+}
+
+// 线程安全获取歌曲信息
+const SongInfo MoeKoeWS::getSongInfo() const {
+    std::lock_guard<std::mutex> lock(songInfoMutex_);
+    return songInfo_;
 }
 
 // === OSCSender Implementation ===

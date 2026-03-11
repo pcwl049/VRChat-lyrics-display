@@ -135,65 +135,104 @@ void SMTCClient::stop() {
 void SMTCClient::run() {
     LOG_INFO("[SMTC] run() started");
     
-    try {
-        // Request session manager
-        auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
-        manager_ = reinterpret_cast<void*>(winrt::get_abi(manager));
-        LOG_INFO("[SMTC] Session manager acquired successfully");
-        
-        // Subscribe to current session changed event
-        auto token = manager.CurrentSessionChanged([this](auto&&, auto&&) {
-            LOG_DEBUG("[SMTC] CurrentSessionChanged event fired");
-            processMediaUpdate();
-        });
-        
-        // Subscribe to media properties changed for all sessions
-        auto sessions = manager.GetSessions();
-        char msg[128];
-        sprintf_s(msg, "[SMTC] Found sessions: %d", sessions.Size());
-        LOG_INFO(msg);
-        
-        for (auto session : sessions) {
-            auto appId = session.SourceAppUserModelId();
-            std::string appIdStr(appId.begin(), appId.end());
-            char sessionMsg[256];
-            sprintf_s(sessionMsg, "[SMTC] Session: %s", appIdStr.c_str());
-            LOG_DEBUG(sessionMsg);
+    int retryCount = 0;
+    const int maxRetries = 3;
+    const int retryDelayMs = 2000;
+    
+    while (running_) {
+        try {
+            // Request session manager (with retry)
+            auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
             
-            session.MediaPropertiesChanged([this](auto&&, auto&&) {
-                LOG_DEBUG("[SMTC] MediaPropertiesChanged event fired");
+            if (!manager) {
+                throw std::runtime_error("Session manager is null");
+            }
+            
+            manager_ = reinterpret_cast<void*>(winrt::get_abi(manager));
+            retryCount = 0;  // Reset retry count on success
+            LOG_INFO("[SMTC] Session manager acquired successfully");
+            
+            // Subscribe to current session changed event
+            auto token = manager.CurrentSessionChanged([this](auto&&, auto&&) {
+                LOG_DEBUG("[SMTC] CurrentSessionChanged event fired");
                 processMediaUpdate();
             });
-            session.PlaybackInfoChanged([this](auto&&, auto&&) {
-                LOG_DEBUG("[SMTC] PlaybackInfoChanged event fired");
+            
+            // Subscribe to media properties changed for all sessions
+            auto sessions = manager.GetSessions();
+            char msg[128];
+            sprintf_s(msg, "[SMTC] Found sessions: %d", sessions.Size());
+            LOG_INFO(msg);
+            
+            for (auto session : sessions) {
+                auto appId = session.SourceAppUserModelId();
+                std::string appIdStr(appId.begin(), appId.end());
+                char sessionMsg[256];
+                sprintf_s(sessionMsg, "[SMTC] Session: %s", appIdStr.c_str());
+                LOG_DEBUG(sessionMsg);
+                
+                session.MediaPropertiesChanged([this](auto&&, auto&&) {
+                    LOG_DEBUG("[SMTC] MediaPropertiesChanged event fired");
+                    processMediaUpdate();
+                });
+                session.PlaybackInfoChanged([this](auto&&, auto&&) {
+                    LOG_DEBUG("[SMTC] PlaybackInfoChanged event fired");
+                    processMediaUpdate();
+                });
+                session.TimelinePropertiesChanged([this](auto&&, auto&&) {
+                    LOG_DEBUG("[SMTC] TimelinePropertiesChanged event fired");
+                    processMediaUpdate();
+                });
+            }
+            
+            // Initial fetch
+            processMediaUpdate();
+            
+            // Keep running and process updates
+            while (running_) {
+                // Sleep and check periodically
+                Sleep(1500);  // 1.5s interval matching OSC rate
+                
+                // Refresh media info
                 processMediaUpdate();
-            });
-            session.TimelinePropertiesChanged([this](auto&&, auto&&) {
-                LOG_DEBUG("[SMTC] TimelinePropertiesChanged event fired");
-                processMediaUpdate();
-            });
+            }
+            
+        } catch (const winrt::hresult_error& e) {
+            // WinRT error - retry if within limit
+            char msg[256];
+            sprintf_s(msg, "[SMTC] WinRT Error: 0x%08X", e.code().value);
+            LOG_ERROR(msg);
+            
+            if (running_ && retryCount < maxRetries) {
+                retryCount++;
+                char retryMsg[128];
+                sprintf_s(retryMsg, "[SMTC] Retrying (%d/%d) in %dms...", retryCount, maxRetries, retryDelayMs);
+                LOG_INFO(retryMsg);
+                Sleep(retryDelayMs);
+                continue;  // Retry
+            }
+        } catch (...) {
+            // Other error
+            LOG_ERROR("[SMTC] Unknown error in run()");
+            
+            if (running_ && retryCount < maxRetries) {
+                retryCount++;
+                char retryMsg[128];
+                sprintf_s(retryMsg, "[SMTC] Retrying (%d/%d) in %dms...", retryCount, maxRetries, retryDelayMs);
+                LOG_INFO(retryMsg);
+                Sleep(retryDelayMs);
+                continue;  // Retry
+            }
         }
         
-        // Initial fetch
-        processMediaUpdate();
-        
-        // Keep running and process updates
-        while (running_) {
-            // Sleep and check periodically
-            Sleep(1500);  // 1.5s interval matching OSC rate
-            
-            // Refresh media info
-            processMediaUpdate();
+        // If we get here without running_ being false, we've exhausted retries
+        if (running_) {
+            LOG_ERROR("[SMTC] Max retries exhausted, waiting for restart");
+            // Wait for potential restart or stop
+            while (running_) {
+                Sleep(5000);
+            }
         }
-        
-    } catch (const winrt::hresult_error& e) {
-        // WinRT error
-        char msg[256];
-        sprintf_s(msg, "[SMTC] WinRT Error: 0x%08X", e.code().value);
-        LOG_ERROR(msg);
-    } catch (...) {
-        // Other error
-        LOG_ERROR("[SMTC] Unknown error in run()");
     }
     
     LOG_INFO("[SMTC] run() exited");

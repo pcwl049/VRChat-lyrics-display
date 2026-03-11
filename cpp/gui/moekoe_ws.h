@@ -11,6 +11,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <mutex>
 
 namespace moekoe {
 
@@ -87,7 +88,7 @@ public:
     bool connect();
     void disconnect();
     bool isConnected() const { return connected_; }
-    const SongInfo& getSongInfo() const { return songInfo_; }
+    const SongInfo getSongInfo() const;  // 返回副本，线程安全
     
 private:
     void run();
@@ -102,6 +103,7 @@ private:
     std::atomic<bool> connected_{false};
     std::thread thread_;
     Callback callback_;
+    mutable std::mutex songInfoMutex_;  // 保护 songInfo_ 的互斥锁
     SongInfo songInfo_;
 };
 

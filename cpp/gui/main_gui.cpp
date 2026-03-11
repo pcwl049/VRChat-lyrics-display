@@ -1238,6 +1238,12 @@ bool DownloadAndInstallUpdate() {
                 DeleteFileW(tempFile);
                 return false;
             }
+        } else {
+            // SHA256 URL was set but we couldn't download the checksum
+            // Fail the update for safety
+            LOG_ERROR("[Update] SHA256 checksum file download failed, aborting update for safety");
+            DeleteFileW(tempFile);
+            return false;
         }
     }
     
@@ -2262,10 +2268,25 @@ void LoadConfig(const wchar_t* path) {
         size_t end = content.find('"', pos + 1);
         if (end == std::string::npos) return L"";
         std::string val = content.substr(pos + 1, end - pos - 1);
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, nullptr, 0);
+        // Unescape basic JSON escape sequences
+        std::string unescaped;
+        for (size_t i = 0; i < val.size(); i++) {
+            if (val[i] == '\\' && i + 1 < val.size()) {
+                char next = val[i + 1];
+                if (next == 'n') { unescaped += '\n'; i++; }
+                else if (next == 'r') { unescaped += '\r'; i++; }
+                else if (next == 't') { unescaped += '\t'; i++; }
+                else if (next == '"') { unescaped += '"'; i++; }
+                else if (next == '\\') { unescaped += '\\'; i++; }
+                else { unescaped += val[i]; }
+            } else {
+                unescaped += val[i];
+            }
+        }
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, nullptr, 0);
         if (wlen <= 0) return L"";
         std::wstring wval(wlen - 1, 0);
-        MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, &wval[0], wlen);
+        MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, &wval[0], wlen);
         return wval;
     };
     
@@ -2275,14 +2296,36 @@ void LoadConfig(const wchar_t* path) {
         if (pos == std::string::npos) return def;
         pos = content.find(':', pos);
         if (pos == std::string::npos) return def;
-        return atoi(content.c_str() + pos + 1);
+        // Skip whitespace
+        while (pos < content.size() && (content[pos] == ':' || content[pos] == ' ' || content[pos] == '\t' || content[pos] == '\n' || content[pos] == '\r')) {
+            pos++;
+        }
+        if (pos >= content.size()) return def;
+        return atoi(content.c_str() + pos);
     };
     
     auto getBool = [&](const char* key, bool def) -> bool {
         std::string search = std::string("\"") + key + "\"";
         size_t pos = content.find(search);
         if (pos == std::string::npos) return def;
-        return content.find("true", pos) < content.find("false", pos);
+        // Find the colon after the key
+        size_t colonPos = content.find(':', pos);
+        if (colonPos == std::string::npos) return def;
+        // Find the value after the colon (skip whitespace)
+        size_t valStart = colonPos + 1;
+        while (valStart < content.size() && (content[valStart] == ' ' || content[valStart] == '\t' || content[valStart] == '\n' || content[valStart] == '\r')) {
+            valStart++;
+        }
+        if (valStart >= content.size()) return def;
+        // Check for "true" at valStart
+        if (valStart + 4 <= content.size() && content.compare(valStart, 4, "true") == 0) {
+            return true;
+        }
+        // Check for "false" at valStart
+        if (valStart + 5 <= content.size() && content.compare(valStart, 5, "false") == 0) {
+            return false;
+        }
+        return def;  // Value not found or invalid
     };
     
     std::wstring ip = getStr("ip");
@@ -2389,7 +2432,16 @@ void LoadConfig(const wchar_t* path) {
                     // 解析 enabled
                     size_t enabledPos = modContent.find("\"enabled\"");
                     if (enabledPos != std::string::npos) {
-                        mod.enabled = modContent.find("true", enabledPos) < modContent.find("false", enabledPos);
+                        size_t colonPos = modContent.find(':', enabledPos);
+                        if (colonPos != std::string::npos) {
+                            size_t valStart = colonPos + 1;
+                            while (valStart < modContent.size() && (modContent[valStart] == ' ' || modContent[valStart] == '\t')) valStart++;
+                            if (valStart + 4 <= modContent.size() && modContent.compare(valStart, 4, "true") == 0) {
+                                mod.enabled = true;
+                            } else if (valStart + 5 <= modContent.size() && modContent.compare(valStart, 5, "false") == 0) {
+                                mod.enabled = false;
+                            }
+                        }
                     }
                     
                     // 解析 sub_modules 数组
@@ -2431,7 +2483,16 @@ void LoadConfig(const wchar_t* path) {
                                 
                                 size_t subEnabledPos = subObj.find("\"enabled\"");
                                 if (subEnabledPos != std::string::npos) {
-                                    subMod.enabled = subObj.find("true", subEnabledPos) < subObj.find("false", subEnabledPos);
+                                    size_t colonPos = subObj.find(':', subEnabledPos);
+                                    if (colonPos != std::string::npos) {
+                                        size_t valStart = colonPos + 1;
+                                        while (valStart < subObj.size() && (subObj[valStart] == ' ' || subObj[valStart] == '\t')) valStart++;
+                                        if (valStart + 4 <= subObj.size() && subObj.compare(valStart, 4, "true") == 0) {
+                                            subMod.enabled = true;
+                                        } else if (valStart + 5 <= subObj.size() && subObj.compare(valStart, 5, "false") == 0) {
+                                            subMod.enabled = false;
+                                        }
+                                    }
                                 }
                                 
                                 switch (subMod.type) {
@@ -2494,24 +2555,48 @@ void LoadConfig(const wchar_t* path) {
     }
 }
 
+// Escape special characters for JSON string values
+std::string JsonEscape(const std::wstring& wstr) {
+    // Convert to UTF-8 first
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string utf8(len - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &utf8[0], len, nullptr, nullptr);
+    
+    // Escape special characters
+    std::string result;
+    result.reserve(utf8.size() * 2);
+    for (char c : utf8) {
+        switch (c) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default: result += c; break;
+        }
+    }
+    return result;
+}
+
 void SaveConfig(const wchar_t* path) {
     FILE* f = _wfopen(path, L"wb");
     if (!f) return;
-    fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%ls\",\n    \"port\": %d\n  },\n", g_oscIp.c_str(), g_oscPort);
+    fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%s\",\n    \"port\": %d\n  },\n", JsonEscape(g_oscIp).c_str(), g_oscPort);
     fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n  \"run_as_admin\": %s,\n  \"performance_mode\": %d,\n",
             g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false",
             g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
             g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
             "true", g_autoStart ? "true" : "false", g_runAsAdmin ? "true" : "false", g_performanceMode);  // g_darkMode固定为true
-    fprintf(f, "  \"cpu_name\": \"%ls\",\n  \"gpu_name\": \"%ls\",\n  \"ram_name\": \"%ls\",\n",
-            g_cpuDisplayName.c_str(), g_gpuDisplayName.c_str(), g_ramDisplayName.c_str());
+    fprintf(f, "  \"cpu_name\": \"%s\",\n  \"gpu_name\": \"%s\",\n  \"ram_name\": \"%s\",\n",
+            JsonEscape(g_cpuDisplayName).c_str(), JsonEscape(g_gpuDisplayName).c_str(), JsonEscape(g_ramDisplayName).c_str());
     
     // Save display_modules
     fprintf(f, "  \"display_modules\": [\n");
     for (size_t i = 0; i < g_displayModules.size(); i++) {
         const auto& mod = g_displayModules[i];
         fprintf(f, "    {\n");
-        fprintf(f, "      \"key\": \"%ls\",\n", mod.key.c_str());
+        fprintf(f, "      \"key\": \"%s\",\n", JsonEscape(mod.key).c_str());
         fprintf(f, "      \"enabled\": %s,\n", mod.enabled ? "true" : "false");
         fprintf(f, "      \"sub_modules\": [\n");
         for (size_t j = 0; j < mod.subModules.size(); j++) {
@@ -2534,7 +2619,7 @@ void SaveConfig(const wchar_t* path) {
             g_winW, g_winH, g_winX, g_winY);
     fprintf(f, "  \"osc_pause_hotkey\": %d,\n  \"osc_pause_hotkey_mods\": %d,\n",
             g_oscPauseHotkey, g_oscPauseHotkeyMods);
-    fprintf(f, "  \"skip_version\": \"%ls\"\n}\n", g_skipVersion.c_str());
+    fprintf(f, "  \"skip_version\": \"%s\"\n}\n", JsonEscape(g_skipVersion).c_str());
     fclose(f);
 }
 
@@ -3500,8 +3585,9 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_dialogScaleAnim.target = 1.0;
             g_dialogScaleAnim.speed = 0.2;
             
-            // 初始透明度
-            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+            // 初始透明度设为一个小值，确保窗口可见性
+            // 0会导致某些情况下窗口无法正确绘制
+            SetLayeredWindowAttributes(hwnd, 0, 1, LWA_ALPHA);
             return 0;
         }
         case WM_TIMER: {
@@ -3888,7 +3974,7 @@ int ShowCustomDialog(const DialogConfig& config) {
     g_dialogScaleAnim.speed = 0.25;
     g_dialogAnimComplete = false;
     
-    SetLayeredWindowAttributes(g_dialogHwnd, 0, 0, LWA_ALPHA);  // 初始透明度为0
+    SetLayeredWindowAttributes(g_dialogHwnd, 0, 1, LWA_ALPHA);  // 初始透明度为1，避免黑屏
     ShowWindow(g_dialogHwnd, SW_SHOW);
     SetForegroundWindow(g_dialogHwnd);
     UpdateWindow(g_dialogHwnd);

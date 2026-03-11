@@ -56,6 +56,7 @@ public:
     };
     
     GlassWindow(HWND hwnd, const Config& config);
+    ~GlassWindow();  // 析构函数释放字体资源
     
     void Paint(HDC hdc);
     void Update();
