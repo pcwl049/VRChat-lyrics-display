@@ -21,6 +21,7 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <queue>
 #pragma comment(lib, "wbemuuid.lib")
 
 // GDI+ for anti-aliased rendering
@@ -1203,6 +1204,11 @@ std::wstring g_qqMusicLastArtist;
 std::thread g_lyricsSearchThread;
 std::atomic<bool> g_lyricsSearchRunning{false};
 
+// 系统消息队列（串行发送，避免限流）
+std::queue<std::wstring> g_systemMsgQueue;
+std::mutex g_systemMsgMutex;
+std::atomic<bool> g_systemMsgRunning{false};
+
 // Preview cache (to avoid rapid flickering)
 std::wstring g_cachedPreviewMsg;
 DWORD g_lastPreviewUpdate = 0;
@@ -1488,29 +1494,49 @@ void UpdatePerfStats() {
 }
 
 // 发送系统消息（启动/暂停/关闭），确保不触发VRChat限流
-// 使用后台线程发送，避免阻塞主线程导致状态不一致
+// 使用队列串行发送，避免多条消息同时发送触发限流
 bool SendSystemOSCMessage(const std::wstring& message) {
     if (!g_osc || !g_oscEnabled) {
         return false;
     }
     
-    // 在后台线程发送，避免阻塞主线程
-    std::thread([message]() {
-        DWORD now = GetTickCount();
-        DWORD timeSinceLastSend = now - g_lastOscSendTime;
-        
-        // 如果距离上次发送不足2秒，等待剩余时间
-        if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-            Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
-        }
-        
-        // 发送消息
-        if (g_osc && g_oscEnabled) {
-            g_osc->sendChatbox(message);
-            g_lastOscSendTime = GetTickCount();
-            MainDebugLog("[SystemOSC] Sent system message");
-        }
-    }).detach();
+    // 将消息加入队列
+    {
+        std::lock_guard<std::mutex> lock(g_systemMsgMutex);
+        g_systemMsgQueue.push(message);
+    }
+    
+    // 如果线程未运行，启动新线程处理队列
+    if (!g_systemMsgRunning.exchange(true)) {
+        std::thread([]() {
+            while (true) {
+                std::wstring msg;
+                {
+                    std::lock_guard<std::mutex> lock(g_systemMsgMutex);
+                    if (g_systemMsgQueue.empty()) {
+                        g_systemMsgRunning = false;
+                        break;
+                    }
+                    msg = g_systemMsgQueue.front();
+                    g_systemMsgQueue.pop();
+                }
+                
+                // 等待足够时间，确保不触发限流
+                DWORD now = GetTickCount();
+                DWORD timeSinceLastSend = now - g_lastOscSendTime;
+                if (timeSinceLastSend < OSC_MIN_INTERVAL) {
+                    Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
+                }
+                
+                // 发送消息
+                if (g_osc && g_oscEnabled) {
+                    g_osc->sendChatbox(msg);
+                    g_lastOscSendTime = GetTickCount();
+                    MainDebugLog("[SystemOSC] Sent system message");
+                }
+            }
+        }).detach();
+    }
     
     return true;
 }
