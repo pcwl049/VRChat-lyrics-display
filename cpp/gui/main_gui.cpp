@@ -9398,8 +9398,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (appId.find(L"QQMusic") != std::wstring::npos) {
                         smtcPlatform = 2;  // QQ 音乐
                         g_platforms[2].connected = true;
-                    } else if (appId.find(L"Qishui") != std::wstring::npos) {
-                        smtcPlatform = 3;  // 汽水音乐
+                    } else if (appId.find(L"SodaMusic") != std::wstring::npos || appId.find(L"Qishui") != std::wstring::npos) {
+                        smtcPlatform = 3;  // 汽水音乐 (进程名 SodaMusic)
                         g_platforms[3].connected = true;
                     }
                 }
