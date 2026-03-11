@@ -1,5 +1,0 @@
-D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaCore.dir
-D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/NovaExample.dir
-D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/LiquidGlass.dir
-D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/edit_cache.dir
-D:/Projects/MusicDisplay/NovaRenderer/build/CMakeFiles/rebuild_cache.dir
