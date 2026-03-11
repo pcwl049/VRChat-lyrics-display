@@ -1,4 +1,0 @@
-Backup created: 20260310_020127 
- 
-File size: 338432 bytes 
-Source: D:\Project\音乐显示\cpp\bin\VRCLyricsDisplay.exe 
