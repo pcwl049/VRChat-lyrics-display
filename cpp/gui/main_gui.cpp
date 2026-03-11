@@ -9671,23 +9671,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Update overall connection status
                 g_isConnected = g_moeKoeConnected || g_neteaseConnected || g_smtcConnected;
                 
-                if (smtcInfo.hasData && smtcInfo.isPlaying) {
+                if (smtcInfo.hasData) {
                     DWORD now = GetTickCount();
                     
-                    // 更新对应平台的播放时间
-                    if (smtcPlatform == 2) {
-                        g_qqMusicLastPlayTime = now;
-                    } else if (smtcPlatform == 3) {
-                        g_qishuiLastPlayTime = now;
-                    }
-                    
-                    // Auto switch to playing platform if enabled
-                    if (g_autoPlatformSwitch && smtcPlatform >= 0 && g_activePlatform != smtcPlatform) {
-                        g_activePlatform = smtcPlatform;
-                        LOG_INFO("Main", "Auto-switched to SMTC platform");
+                    // 只在播放时更新 lastPlayTime
+                    if (smtcInfo.isPlaying) {
+                        // 更新对应平台的播放时间
+                        if (smtcPlatform == 2) {
+                            g_qqMusicLastPlayTime = now;
+                        } else if (smtcPlatform == 3) {
+                            g_qishuiLastPlayTime = now;
+                        }
+                        
+                        // Auto switch to playing platform if enabled
+                        if (g_autoPlatformSwitch && smtcPlatform >= 0 && g_activePlatform != smtcPlatform) {
+                            g_activePlatform = smtcPlatform;
+                            LOG_INFO("Main", "Auto-switched to SMTC platform");
+                        }
                     }
                     
                     // Update pending song info for OSC (if this is the active platform)
+                    // 无论播放还是暂停都要更新进度条
                     if (smtcPlatform >= 0 && (g_activePlatform == smtcPlatform || g_activePlatform < 0)) {
                         g_pendingTitle = smtcInfo.title;
                         g_pendingArtist = smtcInfo.artist;
