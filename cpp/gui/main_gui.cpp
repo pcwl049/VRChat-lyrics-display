@@ -5302,11 +5302,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     // Toggle pause state
                     DWORD now = GetTickCount();
                     
-                    // 判断是否真的在暂停中（时间还没到）
-                    bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now;
+                    // 判断是否真的在暂停中（时间还没到，且不在关闭动画中）
+                    bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now && !g_overlayClosing;
                     
-                    if (isReallyPaused || g_overlayHwnd) {
-                        // Already paused or window exists - cancel pause with particle burst
+                    if (isReallyPaused) {
+                        // 真正在暂停中 - 取消暂停，触发粒子爆发
                         MainDebugLog("[Hotkey] Canceling OSC pause (low-level hook)");
                         
                         // 发送恢复消息提示
@@ -5320,22 +5320,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         g_oscPaused = false;
                         g_oscPauseEndTime = 0;
                         
-                        // 如果窗口正在关闭动画，立即销毁；否则开始关闭动画
-                        if (g_overlayHwnd) {
-                            if (g_overlayClosing) {
-                                // 正在关闭，立即销毁
-                                DestroyWindow(g_overlayHwnd);
-                                g_overlayHwnd = nullptr;
-                                g_overlayActive = false;
-                                g_overlayClosing = false;
-                                g_overlayExpandAnim = 0.0f;
-                                g_particles.clear();
-                                g_sandParticles.clear();
-                            } else {
-                                // 开始关闭动画
-                                g_overlayClosing = true;
-                            }
+                        // 开始关闭动画
+                        if (g_overlayHwnd && !g_overlayClosing) {
+                            g_overlayClosing = true;
                         }
+                    } else if (g_overlayHwnd && g_overlayClosing) {
+                        // 正在关闭动画中，加速关闭
+                        MainDebugLog("[Hotkey] Accelerating overlay close");
+                        DestroyWindow(g_overlayHwnd);
+                        g_overlayHwnd = nullptr;
+                        g_overlayActive = false;
+                        g_overlayClosing = false;
+                        g_overlayExpandAnim = 0.0f;
+                        g_particles.clear();
+                        g_sandParticles.clear();
                     } else {
                         // Start pause
                         g_oscPaused = true;
@@ -5862,11 +5860,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 切换暂停状态
                 DWORD now = GetTickCount();
                 
-                // 判断是否真的在暂停中（时间还没到）
-                bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now;
+                // 判断是否真的在暂停中（时间还没到，且不在关闭动画中）
+                bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now && !g_overlayClosing;
                 
-                if (isReallyPaused || g_overlayHwnd) {
-                    // 已经在暂停中或窗口存在 - 取消暂停，触发粒子爆发
+                if (isReallyPaused) {
+                    // 真正在暂停中 - 取消暂停，触发粒子爆发
                     MainDebugLog("[Hotkey] Canceling OSC pause (WM_HOTKEY)");
                     
                     // 发送恢复消息提示
@@ -5880,22 +5878,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
                     
-                    // 如果窗口正在关闭动画，立即销毁；否则开始关闭动画
-                    if (g_overlayHwnd) {
-                        if (g_overlayClosing) {
-                            // 正在关闭，立即销毁
-                            DestroyWindow(g_overlayHwnd);
-                            g_overlayHwnd = nullptr;
-                            g_overlayActive = false;
-                            g_overlayClosing = false;  // 重置关闭状态
-                            g_overlayExpandAnim = 0.0f;
-                            g_particles.clear();
-                            g_sandParticles.clear();
-                        } else {
-                            // 开始关闭动画
-                            g_overlayClosing = true;
-                        }
+                    // 开始关闭动画
+                    if (g_overlayHwnd && !g_overlayClosing) {
+                        g_overlayClosing = true;
                     }
+                } else if (g_overlayHwnd && g_overlayClosing) {
+                    // 正在关闭动画中，加速关闭
+                    MainDebugLog("[Hotkey] Accelerating overlay close");
+                    DestroyWindow(g_overlayHwnd);
+                    g_overlayHwnd = nullptr;
+                    g_overlayActive = false;
+                    g_overlayClosing = false;
+                    g_overlayExpandAnim = 0.0f;
+                    g_particles.clear();
+                    g_sandParticles.clear();
                 } else {
                     // 开始新的暂停
                     g_oscPaused = true;
@@ -7196,11 +7192,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // OSC接收器回调 - 切换暂停状态
             DWORD now = GetTickCount();
             
-            // 判断是否真的在暂停中（时间还没到）
-            bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now;
+            // 判断是否真的在暂停中（时间还没到，且不在关闭动画中）
+            bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now && !g_overlayClosing;
             
-            if (isReallyPaused || g_overlayHwnd) {
-                // 已经在暂停中或窗口存在 - 取消暂停，触发粒子爆发
+            if (isReallyPaused) {
+                // 真正在暂停中 - 取消暂停，触发粒子爆发
                 MainDebugLog("[OSC Receiver] Canceling OSC pause");
                 
                 // 发送恢复消息提示
@@ -7214,22 +7210,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_oscPaused = false;
                 g_oscPauseEndTime = 0;
                 
-                // 如果窗口正在关闭动画，立即销毁；否则开始关闭动画
-                if (g_overlayHwnd) {
-                    if (g_overlayClosing) {
-                        // 正在关闭，立即销毁
-                        DestroyWindow(g_overlayHwnd);
-                        g_overlayHwnd = nullptr;
-                        g_overlayActive = false;
-                        g_overlayClosing = false;
-                        g_overlayExpandAnim = 0.0f;
-                        g_particles.clear();
-                        g_sandParticles.clear();
-                    } else {
-                        // 开始关闭动画
-                        g_overlayClosing = true;
-                    }
+                // 开始关闭动画
+                if (g_overlayHwnd && !g_overlayClosing) {
+                    g_overlayClosing = true;
                 }
+            } else if (g_overlayHwnd && g_overlayClosing) {
+                // 正在关闭动画中，加速关闭
+                MainDebugLog("[OSC Receiver] Accelerating overlay close");
+                DestroyWindow(g_overlayHwnd);
+                g_overlayHwnd = nullptr;
+                g_overlayActive = false;
+                g_overlayClosing = false;
+                g_overlayExpandAnim = 0.0f;
+                g_particles.clear();
+                g_sandParticles.clear();
             } else {
                 // 开始新的暂停
                 g_oscPaused = true;
