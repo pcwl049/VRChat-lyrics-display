@@ -261,6 +261,7 @@ void SMTCClient::processMediaUpdate() {
             L"QQMusic",           // QQ Music
             L"SodaMusic",         // 汽水音乐 (字节跳动) - 进程名是 SodaMusic
             L"Qishui",            // 汽水音乐 (备用匹配)
+            L"\x6C7D\x6C34\x97F3\x4E50",  // 汽水音乐 (中文 appId)
             L"Spotify",           // Spotify
             L"CloudMusic",        // Netease Cloud Music
             L"Kugou",             // Kugou
