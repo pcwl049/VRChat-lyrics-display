@@ -5785,38 +5785,34 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == 2) {
                 DWORD now = GetTickCount();
                 
-                // 更新粒子系统（关闭动画期间加速粒子消失）
-                UpdateParticles();
+                // 如果正在关闭，快速收缩并销毁
                 if (g_overlayClosing) {
-                    // 关闭期间加速粒子消失
-                    UpdateParticles();
-                    UpdateParticles();
+                    g_overlayExpandAnim -= 0.15f;  // 更快的收缩速度
+                    if (g_overlayExpandAnim <= 0.0f) {
+                        g_overlayExpandAnim = 0.0f;
+                        KillTimer(hwnd, 2);
+                        DestroyWindow(hwnd);
+                        return 0;
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
                 }
                 
-                // 更新展开/收缩动画
-                if (!g_overlayClosing && g_overlayExpandAnim < 1.0f) {
-                    // 展开：从中间向两边展开
-                    g_overlayExpandAnim += 0.08f;  // 动画速度
+                // 更新粒子系统
+                UpdateParticles();
+                
+                // 更新展开动画
+                if (g_overlayExpandAnim < 1.0f) {
+                    g_overlayExpandAnim += 0.08f;
                     if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
-                } else if (g_overlayClosing && g_overlayExpandAnim > 0.0f) {
-                    // 收缩：从两边向中间收缩（更快）
-                    g_overlayExpandAnim -= 0.12f;
-                    if (g_overlayExpandAnim < 0.0f) g_overlayExpandAnim = 0.0f;
                 }
                 
                 // 检查暂停是否自然结束
                 if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
-                    g_overlayClosing = true;  // 开始收缩动画
-                    MainDebugLog("[Overlay] OSC pause ended naturally, closing animation");
-                }
-                
-                // 检查是否应该销毁覆盖层（收缩完成后立即销毁）
-                if (g_overlayClosing && g_overlayExpandAnim <= 0.0f) {
-                    KillTimer(hwnd, 2);
-                    DestroyWindow(hwnd);
-                    return 0;
+                    g_overlayClosing = true;
+                    MainDebugLog("[Overlay] OSC pause ended naturally, closing");
                 }
                 
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -6760,13 +6756,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int btnY = showSystemInfo ? (modeBtnY + modeBtnH + 20 + 140 + 20) : (modeBtnY + modeBtnH + 20);
 
             if (IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH)) {
-                // Auto Detect button clicked
+                // Auto Detect button clicked - 静默检测并更新
                 g_cpuDisplayName = DetectCpuName();
                 g_gpuDisplayName = DetectGpuName();
                 SaveConfig(g_configPath);
-                ShowInfoDialog(L"\x81EA\x52A8\x68C0\x6D4B", 
-                    (L"CPU: " + g_cpuDisplayName + L"\nGPU: " + g_gpuDisplayName).c_str());
-                return 0;
             }
 
             btnY += 44;
