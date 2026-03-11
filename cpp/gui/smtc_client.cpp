@@ -109,16 +109,8 @@ SMTCClient::~SMTCClient() {
 bool SMTCClient::start() {
     if (running_) return true;
     
-    try {
-        // Initialize WinRT apartment
-        init_apartment(apartment_type::single_threaded);
-        initialized_ = true;
-        LOG_INFO("[SMTC] Client started successfully");
-    } catch (...) {
-        LOG_ERROR("[SMTC] Failed to initialize WinRT apartment");
-        return false;
-    }
-    
+    // Note: WinRT apartment initialization will be done in the worker thread
+    // to avoid conflicts with main thread's COM initialization
     running_ = true;
     thread_ = std::thread(&SMTCClient::run, this);
     return true;
@@ -134,6 +126,23 @@ void SMTCClient::stop() {
 
 void SMTCClient::run() {
     LOG_INFO("[SMTC] run() started");
+    
+    // Initialize WinRT apartment in this thread
+    try {
+        init_apartment(apartment_type::multi_threaded);
+        initialized_ = true;
+        LOG_INFO("[SMTC] WinRT apartment initialized (multi-threaded)");
+    } catch (const winrt::hresult_error& e) {
+        char errMsg[256];
+        sprintf_s(errMsg, "[SMTC] Failed to initialize WinRT apartment: 0x%08X", e.code().value);
+        LOG_ERROR(errMsg);
+        running_ = false;
+        return;
+    } catch (...) {
+        LOG_ERROR("[SMTC] Failed to initialize WinRT apartment (unknown error)");
+        running_ = false;
+        return;
+    }
     
     int retryCount = 0;
     const int maxRetries = 3;
