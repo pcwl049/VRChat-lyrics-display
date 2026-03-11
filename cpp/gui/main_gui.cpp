@@ -1487,18 +1487,22 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     
     LOG_INFO("Qishui Music", "Search path: %s", searchPath.c_str());
     
-    HINTERNET hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) return lyrics;
     
-    HINTERNET hConnect = WinHttpConnect(hSession, L"api.qishui.com", INTERNET_DEFAULT_HTTP_PORT, 0);
+    // 使用 HTTPS
+    HINTERNET hConnect = WinHttpConnect(hSession, L"api.qishui.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
     
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", Utf8ToWstring(searchPath).c_str(), 
-                                             NULL, L"https://www.douyin.com", WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+                                             NULL, L"https://www.douyin.com", WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
     
-    std::wstring headers = L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n";
-    headers += L"Referer: https://www.douyin.com/qishui/\r\n";
+    // 添加必要的 headers
+    std::wstring headers = L"Accept: application/json, text/plain, */*\r\n";
+    headers += L"Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n";
+    headers += L"Referer: https://www.douyin.com/\r\n";
+    headers += L"Origin: https://www.douyin.com\r\n";
     WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     WinHttpReceiveResponse(hRequest, NULL);
     
@@ -9655,14 +9659,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int smtcPlatform = -1;  // -1 = 未知, 2 = QQ 音乐, 3 = 汽水音乐
                 if (smtcInfo.hasData) {
                     std::wstring appId = smtcInfo.appId;
+                    
+                    // Log appId for debugging
+                    std::string appIdUtf8 = WstringToUtf8(appId);
+                    LOG_INFO("Main", "SMTC appId: %s", appIdUtf8.c_str());
+                    
                     if (appId.find(L"QQMusic") != std::wstring::npos) {
                         smtcPlatform = 2;  // QQ 音乐
                         g_platforms[2].connected = true;
+                        LOG_INFO("Main", "Identified as QQ Music");
                     } else if (appId.find(L"SodaMusic") != std::wstring::npos || 
                                appId.find(L"Qishui") != std::wstring::npos ||
                                appId.find(L"\x6C7D\x6C34\x97F3\x4E50") != std::wstring::npos) {  // 汽水音乐 (中文)
                         smtcPlatform = 3;  // 汽水音乐
                         g_platforms[3].connected = true;
+                        LOG_INFO("Main", "Identified as Qishui Music");
+                    } else {
+                        LOG_INFO("Main", "SMTC platform not identified (appId: %s)", appIdUtf8.c_str());
                     }
                 }
                 

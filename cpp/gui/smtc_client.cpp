@@ -301,6 +301,9 @@ void SMTCClient::processMediaUpdate() {
             for (const auto& musicId : musicPlayerIds) {
                 if (appIdStr.find(musicId) != std::wstring::npos) {
                     isMusicPlayer = true;
+                    char matchMsg[128];
+                    sprintf_s(matchMsg, "[SMTC] Matched music player: %ls", musicId.c_str());
+                    LOG_INFO(matchMsg);
                     break;
                 }
             }
@@ -309,16 +312,19 @@ void SMTCClient::processMediaUpdate() {
             if (!appFilter_.empty()) {
                 if (appIdStr.find(appFilter_) != std::wstring::npos && isMusicPlayer) {
                     current = session;
+                    LOG_INFO("[SMTC] Selected session (filter match)");
                     break;  // Found the filtered app
                 }
             } else if (isMusicPlayer) {
                 // No filter, take first music player
                 if (!current) {
                     current = session;
+                    LOG_INFO("[SMTC] Selected first music player session");
                 }
                 // Prefer QQ Music
                 if (appIdStr.find(L"QQMusic") != std::wstring::npos) {
                     current = session;
+                    LOG_INFO("[SMTC] Switched to QQ Music session");
                     break;
                 }
             }
