@@ -1584,7 +1584,8 @@ void UpdatePerfStats() {
 
 // 发送系统消息（启动/暂停/关闭），确保不触发VRChat限流
 // 使用队列串行发送，避免多条消息同时发送触发限流
-bool SendSystemOSCMessage(const std::wstring& message) {
+// clearQueue参数：是否清空队列中旧消息（用于快速切换状态时避免堆积）
+bool SendSystemOSCMessage(const std::wstring& message, bool clearQueue = true) {
     if (!g_osc || !g_oscEnabled) {
         return false;
     }
@@ -1592,6 +1593,12 @@ bool SendSystemOSCMessage(const std::wstring& message) {
     // 将消息加入队列
     {
         std::lock_guard<std::mutex> lock(g_systemMsgMutex);
+        if (clearQueue) {
+            // 清空队列中所有旧消息，只保留最新的
+            while (!g_systemMsgQueue.empty()) {
+                g_systemMsgQueue.pop();
+            }
+        }
         g_systemMsgQueue.push(message);
     }
     

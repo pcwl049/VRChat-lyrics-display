@@ -8,6 +8,9 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+// 外部变量：主程序的OSC发送时间戳（用于限流）- 全局命名空间
+extern DWORD g_lastOscSendTime;
+
 namespace moekoe {
 
 // Helper function to get temp log file path
@@ -843,13 +846,15 @@ std::vector<uint8_t> OSCSender::buildOSCMessage(const std::string& address, cons
     return data;
 }
 
+// 外部变量：主程序的OSC发送时间戳（用于限流）
+extern DWORD g_lastOscSendTime;
+const DWORD MIN_SEND_INTERVAL = 2000;  // 2秒最小间隔
+
 bool OSCSender::sendChatbox(const std::string& message) {
-    // 全局发送间隔保护（最后一道防线）
-    static DWORD s_lastSendTime = 0;
-    const DWORD MIN_SEND_INTERVAL = 2000;  // 2秒最小间隔
-    
+    // 全局发送间隔保护（使用主程序的计时器）
     DWORD now = GetTickCount();
-    if (now - s_lastSendTime < MIN_SEND_INTERVAL) {
+    // g_lastOscSendTime 是 main_gui.cpp 中定义的全局变量，通过extern声明在文件开头
+    if (now - ::g_lastOscSendTime < MIN_SEND_INTERVAL) {
         // 跳过这次发送，避免触发VRChat限流
         return true;
     }
@@ -881,6 +886,8 @@ bool OSCSender::sendChatbox(const std::string& message) {
         msg = msg.substr(0, safeLen) + "...";
     }
     
+    // 更新全局发送时间戳
+    ::g_lastOscSendTime = now;
     auto data = buildOSCMessage("/chatbox/input", msg);
     
     sockaddr_in addr = {};
@@ -891,10 +898,7 @@ bool OSCSender::sendChatbox(const std::string& message) {
     int result = sendto(sock_, (const char*)data.data(), (int)data.size(), 0,
                         (sockaddr*)&addr, sizeof(addr));
     
-    // 更新最后发送时间（只在成功发送后更新）
-    if (result != SOCKET_ERROR) {
-        s_lastSendTime = now;
-    }
+    // 更新最后发送时间（只在成功发送后更新）- 已在函数开头更新g_lastOscSendTime
     
     // Debug output
     FILE* f = fopen(oscLogPath.c_str(), "a");
