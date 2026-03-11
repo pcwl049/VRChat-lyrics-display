@@ -2303,32 +2303,35 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
             artist = TruncateToBytes(artist, MAX_ARTIST_TRUNCATE);
         }
         
-        // 计算歌名+歌手字节数
+        // 计算歌名+歌手字节数（不含括号）
         std::wstring titleArtist = artist.empty() ? mainTitle : (mainTitle + L" - " + artist);
         size_t titleArtistBytes = Utf8ByteLength(titleArtist);
         size_t artistBytes = artist.empty() ? 0 : Utf8ByteLength(artist);
         
+        // 计算总字节数（含括号）
+        size_t bracketBytes = bracketContent.empty() ? 0 : (Utf8ByteLength(bracketContent) + 3); // +3 for " ()"
+        size_t totalBytes = titleArtistBytes + bracketBytes;
+        
+        // 决定是否显示括号（如果总字节数超过16字节，去掉括号）
+        bool showBracket = !bracketContent.empty() && (totalBytes <= MAX_TITLE_ARTIST_BYTES);
+        
         // 构建显示
-        if (titleArtistBytes <= MAX_TITLE_ARTIST_BYTES) {
-            // 情况1：歌名+歌手 ≤ 16字节，第一行显示
+        if (totalBytes <= MAX_TITLE_ARTIST_BYTES) {
+            // 情况1：总字节数 ≤ 16字节，第一行显示歌名+歌手+括号
             msg = L"\x266B " + titleArtist;
-            if (!bracketContent.empty()) {
+            if (showBracket) {
                 msg += L" (" + bracketContent + L")";
             }
             msg += L"\n" + platformName;
         } else if (artistBytes <= MAX_ARTIST_BYTES && !artist.empty()) {
-            // 情况2：歌名+歌手 > 16字节 且 歌手 ≤ 6字节
+            // 情况2：总字节数 > 16字节 且 歌手 ≤ 6字节
+            // 不显示括号，歌手放第二行
             msg = L"\x266B " + mainTitle;
-            if (!bracketContent.empty()) {
-                msg += L" (" + bracketContent + L")";
-            }
             msg += L"\n" + artist + L" " + platformName;
         } else {
-            // 情况3：歌名+歌手 > 16字节 且 歌手 > 6字节（或无歌手）
+            // 情况3：总字节数 > 16字节 且 歌手 > 6字节（或无歌手）
+            // 不显示括号，只显示歌名
             msg = L"\x266B " + mainTitle;
-            if (!bracketContent.empty()) {
-                msg += L" (" + bracketContent + L")";
-            }
             msg += L"\n" + platformName;
         }
         
