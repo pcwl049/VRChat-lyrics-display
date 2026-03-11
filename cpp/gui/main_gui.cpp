@@ -272,7 +272,10 @@ public:
     
     // 消息发送（统一入口）- 普通消息（有速率限制）
     bool sendMessage(const std::wstring& msg) {
-        if (!canSend()) return false;
+        if (!canSend()) {
+            LOG_DEBUG("OSCManager", "sendMessage blocked: canSend() returned false");
+            return false;
+        }
         
         DWORD now = GetTickCount();
         
@@ -283,6 +286,7 @@ public:
                 if (timeSinceResume < 100) {
                     m_lastSendTime = now;
                 }
+                LOG_DEBUG("OSCManager", "sendMessage blocked: system resume wait");
                 return false;
             } else {
                 m_systemResumeTime = 0;
@@ -290,18 +294,22 @@ public:
         }
         
         // 速率限制
-        if (now - m_lastSendTime < OSC_MIN_INTERVAL) {
+        DWORD timeSinceLastSend = now - m_lastSendTime;
+        if (timeSinceLastSend < OSC_MIN_INTERVAL) {
+            LOG_DEBUG("OSCManager", "sendMessage blocked: rate limit (%dms < %dms)", (int)timeSinceLastSend, (int)OSC_MIN_INTERVAL);
             return false;
         }
         
         // 去重
         if (msg == m_lastMessage) {
+            LOG_DEBUG("OSCManager", "sendMessage blocked: duplicate message");
             return false;
         }
         
         doSend(msg);
         m_lastMessage = msg;
         m_lastSendTime = now;
+        LOG_DEBUG("OSCManager", "sendMessage success: sent new message");
         return true;
     }
     
@@ -347,6 +355,9 @@ public:
     moekoe::OSCSender* getSender() { return m_sender; }
     const std::string& getIp() const { return m_ip; }
     int getPort() const { return m_port; }
+    
+    // 清除上次发送的消息（用于配置改变后强制发送新消息）
+    void clearLastMessage() { m_lastMessage.clear(); }
     
 private:
     OSCManager() = default;
@@ -8882,6 +8893,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
                     SyncDisplayModuleNames();
+                    g_displayConfigChanged = true;  // 标记配置改变，触发消息发送
+                    OSCManager::instance().clearLastMessage();  // 清除去重缓存
 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
@@ -8958,6 +8971,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
                     SyncDisplayModuleNames();
+                    g_displayConfigChanged = true;
+                    OSCManager::instance().clearLastMessage();
 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (wParam == VK_DELETE) {
@@ -8983,6 +8998,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                     }
                     SyncDisplayModuleNames();
+                    g_displayConfigChanged = true;
+                    OSCManager::instance().clearLastMessage();
 
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (wParam == VK_LEFT) {
@@ -9061,6 +9078,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                     case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                                 }
                                 SyncDisplayModuleNames();
+                                g_displayConfigChanged = true;
+                                OSCManager::instance().clearLastMessage();
                                 
                                 InvalidateRect(hwnd, nullptr, FALSE);
                             }
@@ -9122,6 +9141,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
                         }
                         SyncDisplayModuleNames();
+                        g_displayConfigChanged = true;
+                        OSCManager::instance().clearLastMessage();
                         
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
@@ -10110,6 +10131,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
         if (SetProcessDPIAware) SetProcessDPIAware();
         FreeLibrary(hUser32);
     }
+    
+    // 设置日志级别为 INFO（生产环境）
+    // Logger::instance().setLevel(Logger::LOG_LVL_DEBUG);  // 调试时取消注释
     
     LOG_INFO("WinMain", "Application starting");
     InitCommonControls();
