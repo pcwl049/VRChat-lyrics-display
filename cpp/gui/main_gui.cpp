@@ -8853,6 +8853,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CLOSE:
             // 退出前发送关闭OSC消息（同步发送，确保消息能发出）
             if (g_osc && g_oscEnabled) {
+                MainDebugLog("[Main] Sending goodbye OSC message...");
                 // 等待足够时间，确保不触发限流
                 DWORD now = GetTickCount();
                 DWORD timeSinceLastSend = now - g_lastOscSendTime;
@@ -8861,6 +8862,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 g_osc->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
                 g_lastOscSendTime = GetTickCount();
+                MainDebugLog("[Main] Goodbye OSC message sent");
+            } else {
+                MainDebugLog("[Main] OSC not enabled or not connected, skipping goodbye message");
             }
             // Save window position and size before closing
             {
