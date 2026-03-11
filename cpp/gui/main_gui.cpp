@@ -2094,6 +2094,7 @@ HWND g_overlayHwnd = nullptr;
 bool g_overlayActive = false;
 float g_overlayExpandAnim = 0.0f;  // 展开动画进度 (0=收缩, 1=完全展开)
 bool g_overlayClosing = false;     // 是否正在关闭（播放收缩动画）
+DWORD g_overlayCloseDelayTime = 0; // 延迟关闭的时间戳（等待粒子效果完成）
 
 // 粒子系统
 struct Particle {
@@ -6603,18 +6604,21 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         g_oscPaused = false;
                         g_oscPauseEndTime = 0;
                         
-                        // 开始关闭动画
+                        // 延迟关闭动画（等待粒子效果播放）
+                        // 粒子效果约 2-3 秒，延迟 1.5 秒后开始关闭
                         if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
                             OSCManager::instance().setOverlayClosing(true);
-                            g_overlayClosing = true;
+                            g_overlayClosing = false;  // 先不开始关闭
+                            g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
                         }
-                    } else if (g_overlayHwnd && OSCManager::instance().isOverlayClosing()) {
-                        // 正在关闭动画中，加速关闭
+                    } else if (g_overlayHwnd && (OSCManager::instance().isOverlayClosing() || g_overlayCloseDelayTime > 0)) {
+                        // 正在关闭动画中或等待关闭，加速关闭
                         LOG_INFO("Hotkey", "Accelerating overlay close");
                         DestroyWindow(g_overlayHwnd);
                         g_overlayHwnd = nullptr;
                         g_overlayActive = false;
                         g_overlayClosing = false;
+                        g_overlayCloseDelayTime = 0;
                         OSCManager::instance().setOverlayClosing(false);
                         g_overlayExpandAnim = 0.0f;
                         g_particles.clear();
@@ -6652,8 +6656,8 @@ void UpdateParticles() {
     for (auto it = g_particles.begin(); it != g_particles.end();) {
         it->x += it->vx;
         it->y += it->vy;
-        it->vy += 0.3f; // 重力
-        it->life -= 0.02f;
+        it->vy += 0.25f; // 重力（减小让粒子飘得更久）
+        it->life -= 0.012f;  // 减慢衰减速度，让粒子持续更久
         
         if (it->life <= 0) {
             it = g_particles.erase(it);
@@ -6665,9 +6669,9 @@ void UpdateParticles() {
     // 更新沙漏粒子
     for (auto it = g_sandParticles.begin(); it != g_sandParticles.end();) {
         it->y += it->vy;
-        it->vy += 0.15f; // 重力
+        it->vy += 0.12f; // 重力（减小）
         
-        if (it->y > 60) { // 超出进度条范围（窗口高度80，进度条在底部）
+        if (it->y > 80) { // 超出进度条范围
             it = g_sandParticles.erase(it);
         } else {
             ++it;
@@ -6690,7 +6694,7 @@ void TriggerParticleBurst(int centerX, int centerY) {
         float speed = 3.0f + (rand() % 200) / 10.0f;  // 3 to 23
         p.vx = cosf(angle) * speed;
         p.vy = sinf(angle) * speed - 4.0f;  // 向上偏移更多
-        p.life = 1.5f + (rand() % 80) / 100.0f;  // 1.5 to 2.3 (更长)
+        p.life = 2.5f + (rand() % 100) / 100.0f;  // 2.5 to 3.5 (更长，配合更慢衰减)
         p.maxLife = p.life;
         p.size = rand() % 8 + 4;  // 4 to 11 (更大)
         
@@ -6713,7 +6717,7 @@ void TriggerParticleBurst(int centerX, int centerY) {
         p.y = (float)centerY + (rand() % 40 - 20);
         p.vx = ((rand() % 300) - 150) / 10.0f;  // -15 to 15
         p.vy = ((rand() % 300) - 200) / 10.0f;  // -20 to 10 (向上)
-        p.life = 0.5f + (rand() % 50) / 100.0f;  // 0.5 to 1.0 (更长)
+        p.life = 1.2f + (rand() % 80) / 100.0f;  // 1.2 to 2.0 (更长)
         p.maxLife = p.life;
         p.size = rand() % 3 + 1;  // 1 to 3
         
@@ -6939,6 +6943,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 }
                 
+                // 检查延迟关闭时间（等待粒子效果播放完毕）
+                if (g_overlayCloseDelayTime > 0 && now >= g_overlayCloseDelayTime) {
+                    g_overlayCloseDelayTime = 0;
+                    g_overlayClosing = true;
+                    LOG_INFO("Overlay", "Delay ended, starting close animation");
+                }
+                
                 // 更新粒子系统
                 UpdateParticles();
                 
@@ -6967,6 +6978,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_overlayActive = false;
             g_overlayExpandAnim = 0.0f;
             g_overlayClosing = false;
+            g_overlayCloseDelayTime = 0;
             g_particles.clear();
             g_sandParticles.clear();
             g_particleBurst = false;
@@ -7031,6 +7043,7 @@ void CreateOverlayWindow() {
     // 初始化展开动画：从中间向两边展开
     g_overlayExpandAnim = 0.0f;
     g_overlayClosing = false;
+    g_overlayCloseDelayTime = 0;
     
     ShowWindow(g_overlayHwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(g_overlayHwnd);
@@ -7046,6 +7059,8 @@ void DestroyOverlayWindow() {
         DestroyWindow(g_overlayHwnd);
         g_overlayHwnd = nullptr;
         g_overlayActive = false;
+        g_overlayClosing = false;
+        g_overlayCloseDelayTime = 0;
         g_particles.clear();
         g_sandParticles.clear();
         g_particleBurst = false;
@@ -7951,18 +7966,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
                     
-                    // 开始关闭动画
+                    // 延迟关闭动画（等待粒子效果播放）
                     if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
                         OSCManager::instance().setOverlayClosing(true);
-                        g_overlayClosing = true;
+                        g_overlayClosing = false;  // 先不开始关闭
+                        g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
                     }
-                } else if (g_overlayHwnd && OSCManager::instance().isOverlayClosing()) {
-                    // 正在关闭动画中，加速关闭
+                } else if (g_overlayHwnd && (OSCManager::instance().isOverlayClosing() || g_overlayCloseDelayTime > 0)) {
+                    // 正在关闭动画中或等待关闭，加速关闭
                     LOG_INFO("Hotkey", "Accelerating overlay close");
                     DestroyWindow(g_overlayHwnd);
                     g_overlayHwnd = nullptr;
                     g_overlayActive = false;
                     g_overlayClosing = false;
+                    g_overlayCloseDelayTime = 0;
                     OSCManager::instance().setOverlayClosing(false);
                     g_overlayExpandAnim = 0.0f;
                     g_particles.clear();
@@ -7973,6 +7990,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_oscPaused = true;
                     g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
                     g_overlayClosing = false;
+                    g_overlayCloseDelayTime = 0;
                     LOG_INFO("OSC", "Paused for 30 seconds");
                     
                     // 发送暂停消息提示
@@ -9490,18 +9508,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_oscPaused = false;
                 g_oscPauseEndTime = 0;
                 
-                // 开始关闭动画
+                // 延迟关闭动画（等待粒子效果播放）
                 if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
                     OSCManager::instance().setOverlayClosing(true);
-                    g_overlayClosing = true;
+                    g_overlayClosing = false;  // 先不开始关闭
+                    g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
                 }
-            } else if (g_overlayHwnd && OSCManager::instance().isOverlayClosing()) {
-                // 正在关闭动画中，加速关闭
+            } else if (g_overlayHwnd && (OSCManager::instance().isOverlayClosing() || g_overlayCloseDelayTime > 0)) {
+                // 正在关闭动画中或等待关闭，加速关闭
                 LOG_INFO("OSC Receiver", "Accelerating overlay close");
                 DestroyWindow(g_overlayHwnd);
                 g_overlayHwnd = nullptr;
                 g_overlayActive = false;
                 g_overlayClosing = false;
+                g_overlayCloseDelayTime = 0;
                 OSCManager::instance().setOverlayClosing(false);
                 g_overlayExpandAnim = 0.0f;
                 g_particles.clear();
@@ -9512,6 +9532,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_oscPaused = true;
                 g_oscPauseEndTime = GetTickCount() + OSC_PAUSE_DURATION * 1000;
                 g_overlayClosing = false;
+                g_overlayCloseDelayTime = 0;
                 LOG_INFO("OSC Receiver", "OSC paused for 30 seconds");
                 
                 // 发送暂停消息提示
