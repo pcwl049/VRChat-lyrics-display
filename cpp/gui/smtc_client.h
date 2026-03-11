@@ -89,6 +89,7 @@ std::wstring GetAppDisplayName(const std::wstring& appId);
 // Known music app IDs
 namespace Apps {
     const std::wstring QQMusic = L"QQMusic.exe";
+    const std::wstring QishuiMusic = L"QishuiMusic.exe";  // 汽水音乐
     const std::wstring Spotify = L"Spotify.exe";
     const std::wstring AppleMusic = L"AppleMusic.exe";
     const std::wstring NeteaseUWP = L"Netease.CloudMusic.UWP";

@@ -908,7 +908,7 @@ moekoe::OSCReceiver* g_oscReceiver = nullptr;  // OSC receiver for VRChat pause 
 moekoe::MoeKoeWS* g_moeKoeClient = nullptr;
 moekoe::NeteaseWS* g_neteaseClient = nullptr;
 smtc::SMTCClient* g_smtcClient = nullptr;  // QQ Music & other SMTC players
-const wchar_t* g_platformNames[] = { L"MoeKoeMusic", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐" };
+const wchar_t* g_platformNames[] = { L"MoeKoeMusic", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐", L"\x6C7D\x6C34\x97F3\x4E50" };  // 汽水音乐
 // Platform definition - easy to add new platforms
 struct PlatformInfo {
     std::wstring name;           // Display name
@@ -919,29 +919,35 @@ struct PlatformInfo {
 };
 
 // Platform list - add new platforms here
+// Index: 0=MoeKoe, 1=Netease, 2=QQ Music, 3=Qishui Music
 std::vector<PlatformInfo> g_platforms = {
     { L"MoeKoe", L"HTTP", false, false, 0 },
     { L"\x7F51\x6613\x4E91", L"HTTP", false, false, 0 },  // 网易云
-    { L"QQ音乐", L"SMTC", false, false, 0 }
+    { L"QQ音乐", L"SMTC", false, false, 0 },
+    { L"\x6C7D\x6C34\x97F3\x4E50", L"SMTC", false, false, 0 }  // 汽水音乐
 };
 
 // Legacy compatibility macros
 #define g_platformCount ((int)g_platforms.size())
 #define g_moeKoeConnected g_platforms[0].connected
 #define g_neteaseConnected g_platforms[1].connected
-#define g_smtcConnected g_platforms[2].connected
+#define g_qqMusicConnected g_platforms[2].connected
+#define g_qishuiConnected g_platforms[3].connected
+#define g_smtcConnected (g_platforms[2].connected || g_platforms[3].connected)  // 任一 SMTC 平台连接
 #define g_moeKoeBoxHover g_platforms[0].hover
 #define g_neteaseBoxHover g_platforms[1].hover
 #define g_qqMusicBoxHover g_platforms[2].hover
+#define g_qishuiBoxHover g_platforms[3].hover
 #define g_moeKoeLastPlayTime g_platforms[0].lastPlayTime
 #define g_neteaseLastPlayTime g_platforms[1].lastPlayTime
-#define g_smtcLastPlayTime g_platforms[2].lastPlayTime
+#define g_qqMusicLastPlayTime g_platforms[2].lastPlayTime
+#define g_qishuiLastPlayTime g_platforms[3].lastPlayTime
 
 // 网易云进程检测
 bool g_neteaseRunningNoDebug = false;  // 网易云在运行但调试端口未开启
 bool IsNeteaseRunning();  // 前向声明
 
-const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91", L"QQ音乐" };
+const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91", L"QQ音乐", L"\x6C7D\x6C34" };  // 酷狗, 网易云, QQ音乐, 汽水
 int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
 bool g_autoPlatformSwitch = false; // Auto switch platforms when playing (disabled by default)
@@ -7900,17 +7906,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             CreateTrayIcon(hwnd);
             
-            // Initialize SMTC client for QQ Music support
-            LOG_INFO("Main", "Initializing SMTC client for QQ Music");
+            // Initialize SMTC client for QQ Music and Qishui Music support
+            LOG_INFO("Main", "Initializing SMTC client for QQ Music and Qishui Music");
             g_smtcClient = new smtc::SMTCClient();
             if (g_smtcClient) {
-                g_smtcClient->setAppFilter(L"QQMusic");  // Only detect QQ Music
+                // No app filter - detect all SMTC-capable music players
+                // g_smtcClient->setAppFilter(L"");  // Empty filter = all apps
                 if (g_smtcClient->start()) {
                     g_smtcClient->setCallback([hwnd](const smtc::MediaInfo& info) {
                         // Post message to main thread for UI update
                         PostMessageW(hwnd, WM_USER + 101, 0, 0);
                     });
-                    LOG_INFO("Main", "SMTC client started successfully (QQ Music only)");
+                    LOG_INFO("Main", "SMTC client started successfully (multi-platform)");
                 } else {
                     LOG_WARNING("Main", "SMTC client failed to start");
                 }
@@ -9380,27 +9387,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         
         case WM_USER + 101: {
-            // SMTC (QQ Music) media update
+            // SMTC (QQ Music / Qishui Music) media update
             if (g_smtcClient) {
                 smtc::MediaInfo smtcInfo = g_smtcClient->getCurrentMedia();
-                g_smtcConnected = smtcInfo.hasData;
                 
-                // Update overall connection status
+                // 识别 SMTC 平台（QQ 音乐或汽水音乐）
+                int smtcPlatform = -1;  // -1 = 未知, 2 = QQ 音乐, 3 = 汽水音乐
                 if (smtcInfo.hasData) {
-                    g_isConnected = true;
+                    std::wstring appId = smtcInfo.appId;
+                    if (appId.find(L"QQMusic") != std::wstring::npos) {
+                        smtcPlatform = 2;  // QQ 音乐
+                        g_platforms[2].connected = true;
+                    } else if (appId.find(L"Qishui") != std::wstring::npos) {
+                        smtcPlatform = 3;  // 汽水音乐
+                        g_platforms[3].connected = true;
+                    }
                 }
                 
+                // 清除未连接的平台状态
+                if (smtcPlatform != 2) g_platforms[2].connected = false;
+                if (smtcPlatform != 3) g_platforms[3].connected = false;
+                
+                // Update overall connection status
+                g_isConnected = g_moeKoeConnected || g_neteaseConnected || g_smtcConnected;
+                
                 if (smtcInfo.hasData && smtcInfo.isPlaying) {
-                    g_smtcLastPlayTime = GetTickCount();
+                    DWORD now = GetTickCount();
                     
-                    // Auto switch to QQ Music if enabled
-                    if (g_autoPlatformSwitch && g_activePlatform != 2) {
-                        g_activePlatform = 2;
-                        LOG_INFO("Main", "Auto-switched to QQ Music platform");
+                    // 更新对应平台的播放时间
+                    if (smtcPlatform == 2) {
+                        g_qqMusicLastPlayTime = now;
+                    } else if (smtcPlatform == 3) {
+                        g_qishuiLastPlayTime = now;
                     }
                     
-                    // Update pending song info for OSC
-                    if (g_activePlatform == 2) {
+                    // Auto switch to playing platform if enabled
+                    if (g_autoPlatformSwitch && smtcPlatform >= 0 && g_activePlatform != smtcPlatform) {
+                        g_activePlatform = smtcPlatform;
+                        LOG_INFO("Main", "Auto-switched to SMTC platform");
+                    }
+                    
+                    // Update pending song info for OSC (if this is the active platform)
+                    if (smtcPlatform >= 0 && (g_activePlatform == smtcPlatform || g_activePlatform < 0)) {
                         g_pendingTitle = smtcInfo.title;
                         g_pendingArtist = smtcInfo.artist;
                         g_pendingDuration = smtcInfo.duration;
@@ -9410,12 +9438,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_pendingProgress = smtcInfo.duration > 0 ? smtcInfo.position / smtcInfo.duration : 0;
                         
                         // Check if song changed - search lyrics
-                        if (smtcInfo.title != g_qqMusicLastTitle || smtcInfo.artist != g_qqMusicLastArtist) {
-                            g_qqMusicLastTitle = smtcInfo.title;
-                            g_qqMusicLastArtist = smtcInfo.artist;
+                        static std::wstring lastSMTCTitle, lastSMTCArtist;
+                        if (smtcInfo.title != lastSMTCTitle || smtcInfo.artist != lastSMTCArtist) {
+                            lastSMTCTitle = smtcInfo.title;
+                            lastSMTCArtist = smtcInfo.artist;
                             g_pendingLyrics.clear();  // Clear old lyrics
                             
-                            // Search lyrics in background thread
+                            // Search lyrics in background thread (use same logic as QQ Music)
                             if (g_lyricsSearchThread.joinable()) {
                                 g_lyricsSearchRunning = false;
                                 g_lyricsSearchThread.join();
@@ -9430,7 +9459,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             });
                         }
                         
-                        // Send OSC message for QQ Music (using OSCManager)
+                        // Send OSC message for SMTC platform (using OSCManager)
                         if (!OSCManager::instance().isPaused()) {
                             // Build SongInfo from pending data
                             moekoe::SongInfo info;

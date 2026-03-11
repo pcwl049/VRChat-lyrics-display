@@ -250,6 +250,7 @@ void SMTCClient::processMediaUpdate() {
         // Known music player app IDs (partial match)
         static const std::vector<std::wstring> musicPlayerIds = {
             L"QQMusic",           // QQ Music
+            L"QishuiMusic",       // 汽水音乐 (字节跳动)
             L"Spotify",           // Spotify
             L"CloudMusic",        // Netease Cloud Music
             L"Kugou",             // Kugou
