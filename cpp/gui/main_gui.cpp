@@ -2277,8 +2277,8 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     
     const size_t MAX_MSG_LEN = 144;
     const size_t MAX_TITLE_ARTIST_BYTES = 16;  // 第一行歌名+歌手最大字节数
-    const size_t MAX_ARTIST_BYTES = 6;         // 歌手最大字节数（用于判断是否单独显示）
-    const size_t MAX_ARTIST_TRUNCATE = 9;      // 歌手截断字节数
+    const size_t MAX_ARTIST_BYTES = 12;        // 歌手最大字节数（约4个中文字符，用于判断是否单独显示）
+    const size_t MAX_ARTIST_TRUNCATE = 12;     // 歌手截断字节数
     
     int currentLyricIdx = -1;
     if (!info.lyrics.empty()) {
