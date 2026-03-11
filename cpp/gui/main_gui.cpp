@@ -5023,14 +5023,7 @@ void OnPaint(HWND hwnd) {
             int infoY = modeBtnY + modeBtnH + 20;
             int infoW = leftColW - 36;
 
-            // Background with alpha
-            COLORREF infoBg = COLOR_BOX_BG;
-            if (expandAnim < 1.0) {
-                int alpha = (int)(255 * expandAnim);
-                DrawRoundRectAlpha(memDC, infoX, infoY, infoW, infoH, 8, infoBg, alpha);
-            } else {
-                DrawRoundRect(memDC, infoX, infoY, infoW, infoH, 8, infoBg);
-            }
+            // 不绘制整个区域的大背景
 
             // Clip to animation region
             HRGN clipRgn = nullptr;
