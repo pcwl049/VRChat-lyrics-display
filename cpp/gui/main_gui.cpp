@@ -1802,7 +1802,7 @@ std::wstring DetectCpuName() {
         }
     }
     
-    // 提取核心型号（如 i5-12600K -> i5-12600K）
+    // 提取核心型号（如 i5-12600KF -> i5-12600KF）
     // 查找第一个数字作为起始点
     size_t firstDigit = cpuName.find_first_of(L"0123456789");
     if (firstDigit != std::wstring::npos && firstDigit > 0) {
@@ -1811,7 +1811,7 @@ std::wstring DetectCpuName() {
         if (prefix.find(L"i") != std::wstring::npos || 
             prefix.find(L"R") != std::wstring::npos ||
             prefix.find(L"r") != std::wstring::npos) {
-            // 保留 i5-12600K 格式
+            // 保留 i5-12600KF 格式
         } else {
             // 从数字开始截取
             cpuName = cpuName.substr(firstDigit);
@@ -1824,9 +1824,19 @@ std::wstring DetectCpuName() {
         if (c != L' ') result += c;
     }
     
-    // 限制长度：最多8个字符（约2-3个中文字或8个英文字）
-    if (result.length() > 8) {
-        result = result.substr(0, 8);
+    // 限制长度：最多10个字符（保留完整的型号后缀如KF）
+    // 但如果太长，优先保留型号数字和后缀
+    if (result.length() > 10) {
+        // 尝试保留后缀（K/KF/F/X等）
+        size_t lastDash = result.rfind(L'-');
+        if (lastDash != std::wstring::npos && lastDash > 3) {
+            // 从型号数字开始截取，保留后缀
+            // 如 i7-13700KF -> i7-13700KF (10字符)
+            // 如 i5-12600KF -> i5-12600KF (10字符)
+            result = result.substr(0, 10);
+        } else {
+            result = result.substr(0, 10);
+        }
     }
     
     return result.empty() ? L"CPU" : result;
