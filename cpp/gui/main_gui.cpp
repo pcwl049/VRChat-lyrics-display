@@ -3580,6 +3580,25 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
                 
                 perfLine += modName + L":";
                 
+                // GPU: 直接显示占用率和显存（不依赖 subModules 配置）
+                if (mod.key == L"gpu") {
+                    bool hasGpuData = false;
+                    if (g_latestPerfData.gpuUsageValid) {
+                        wchar_t buf[16];
+                        swprintf_s(buf, L"%d%%", g_latestPerfData.gpuUsage);
+                        perfLine += buf;
+                        hasGpuData = true;
+                    }
+                    if (g_gpuMemUsed > 0) {
+                        if (hasGpuData) perfLine += L" ";
+                        double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
+                        wchar_t buf[16];
+                        swprintf_s(buf, L"%.1fG", vramUsedGB);
+                        perfLine += buf;
+                    }
+                    continue;  // GPU 已处理，跳过 subModules 循环
+                }
+                
                 bool firstSub = true;
                 for (const auto& sub : mod.subModules) {
                     if (!sub.enabled || !sub.available) continue;
@@ -3596,19 +3615,6 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
                             wchar_t buf[16];
                             swprintf_s(buf, L"%d°C", g_latestPerfData.cpuTemp);
                             perfLine += buf;
-                        }
-                    } else if (mod.key == L"gpu") {
-                        if (sub.type == SUBMOD_USAGE && g_latestPerfData.gpuUsageValid) {
-                            wchar_t buf[16];
-                            swprintf_s(buf, L"%d%%", g_latestPerfData.gpuUsage);
-                            perfLine += buf;
-                        } else if (sub.type == SUBMOD_VRAM) {
-                            double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
-                            wchar_t buf[16];
-                            swprintf_s(buf, L"%.1fG", vramUsedGB);
-                            perfLine += buf;
-                        } else if (sub.type == SUBMOD_TEMP) {
-                            // GPU温度暂未实现
                         }
                     } else if (mod.key == L"ram") {
                         if (sub.type == SUBMOD_USAGE) {
@@ -6369,7 +6375,7 @@ void Connect() {
         LOG_INFO("Connect", g_isConnected ? "Overall: CONNECTED" : "Overall: FAILED");
         if (!g_isConnected) {
             g_pendingTitle = L"\x8FDE\x63A5\x5931\x8D25";
-            g_pendingArtist = L"\x8BF7\x542F\x52A8 MoeKoeMusic \x6216\x7F51\x6613\x4E91\x97F3\x4E50";
+            g_pendingArtist = L"\x8BF7\x542F\x52A8\x97F3\x4E50\x5E73\x53F0";  // 请启动音乐平台
             g_needsRedraw = true;
         } else {
             // Set active platform to the one that's connected
@@ -9197,28 +9203,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 g_lastTimerTick = now;
                 
-                // 定期发送 OSC 消息（性能模式 或 音乐模式无音乐时）
+                // 定期发送 OSC 消息（仅性能模式）
                 static DWORD lastOscTimerSend = 0;
-                if (!OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
-                    bool needSend = false;
-                    std::wstring oscMsg;
-                    
-                    if (g_performanceMode == 1) {
-                        // 性能模式：发送性能信息
-                        oscMsg = BuildPerformanceOSCMessage(0);
-                        needSend = true;
-                    } else if (!g_isConnected || g_pendingTitle.empty()) {
-                        // 音乐模式无音乐：发送等待消息
-                        oscMsg = L"🎵 等待音乐中...\n请播放歌曲";
-                        needSend = true;
-                        LOG_INFO("Timer", "Music mode, no song - sending wait message");
-                    }
-                    
-                    if (needSend) {
-                        if (OSCManager::instance().sendMessage(oscMsg)) {
-                            g_lastOscMessage = oscMsg;
-                            lastOscTimerSend = now;
-                        }
+                if (g_performanceMode == 1 && !OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
+                    std::wstring oscMsg = BuildPerformanceOSCMessage(0);
+                    if (OSCManager::instance().sendMessage(oscMsg)) {
+                        g_lastOscMessage = oscMsg;
+                        lastOscTimerSend = now;
                     }
                 }
                 
