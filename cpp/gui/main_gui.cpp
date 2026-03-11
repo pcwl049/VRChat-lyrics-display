@@ -319,6 +319,7 @@ std::wstring BuildProgressBar(double progress, int bars);
 std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
 void CreateOverlayWindow();    // OSC暂停覆盖层
 void DestroyOverlayWindow();   // 销毁OSC暂停覆盖层
+void MainDebugLog(const char* msg, int level);  // 调试日志
 
 // 统一性能监控线程（合并原4个线程）
 DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param);
@@ -330,9 +331,16 @@ void ShutdownPerfMonitoring();
 // Animation helpers
 struct Animation {
     double value = 0.0, target = 0.0, speed = 0.25;  // 提高默认速度
-    void update() { value += (target - value) * speed; if (fabs(target - value) < 0.001) value = target; }
+    void update() { 
+        // 使用更平滑的缓动：速度与剩余距离成正比
+        double diff = target - value;
+        value += diff * speed; 
+        if (fabs(diff) < 0.001) value = target; 
+    }
     void setTarget(double t) { target = t; }
     bool isActive() const { return fabs(target - value) > 0.001; }
+    // 设置目标并重置value（用于需要从固定起点开始的动画）
+    void setFromTo(double from, double to) { value = from; target = to; }
 };
 
 // Smooth value for color transitions
@@ -475,6 +483,10 @@ int g_dialogHeight = 200;
 HWND g_trayMenuHwnd = nullptr;
 int g_trayMenuHover = -1;
 bool g_trayMenuVisible = false;
+bool g_trayMenuClosing = false;
+bool g_trayMenuExitRequested = false;  // 退出程序请求标志
+Animation g_trayMenuFadeAnim;
+Animation g_trayMenuScaleAnim;
 
 // Dialog animation state
 Animation g_dialogFadeAnim;
@@ -1168,6 +1180,9 @@ bool g_btnThemeHover = false;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
 bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false, g_hotkeyBoxHover = false;
 
+// Checkbox hover states for settings tab
+bool g_checkboxHover[7] = {false, false, false, false, false, false, false};  // 暂停统计, 自动更新, 显示平台, 最小化到托盘, 启动最小化, 开机自启, 管理员启动
+
 // Song data
 std::wstring g_pendingTitle, g_pendingArtist, g_pendingTime;
 double g_pendingProgress = 0;
@@ -1470,6 +1485,32 @@ void UpdatePerfStats() {
         g_listenMinutes += (now - g_lastListenUpdate) / 60000;
         g_lastListenUpdate = now;
     }
+}
+
+// 发送系统消息（启动/暂停/关闭），确保不触发VRChat限流
+// 返回是否成功发送
+bool SendSystemOSCMessage(const std::wstring& message) {
+    if (!g_osc || !g_oscEnabled) {
+        return false;
+    }
+    
+    DWORD now = GetTickCount();
+    DWORD timeSinceLastSend = now - g_lastOscSendTime;
+    
+    // 如果距离上次发送不足2秒，等待剩余时间
+    if (timeSinceLastSend < OSC_MIN_INTERVAL) {
+        Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
+    }
+    
+    // 发送消息
+    bool result = g_osc->sendChatbox(message);
+    
+    // 更新时间戳
+    g_lastOscSendTime = GetTickCount();
+    
+    MainDebugLog("[SystemOSC] Sent system message");
+    
+    return result;
 }
 
 std::string WstringToUtf8(const std::wstring& wstr) {
@@ -2334,9 +2375,20 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         // 统一使用2秒间隔，避免VRChat限流
         DWORD minInterval = OSC_MIN_INTERVAL;
         
-        // 如果系统刚从卡顿恢复，额外等待2秒
-        if (g_systemResumeTime > 0 && (now - g_systemResumeTime) < 2000) {
-            minInterval = 2000 - (now - g_systemResumeTime);  // 剩余等待时间
+        // 如果系统刚从卡顿恢复，额外等待确保不会连续发送
+        if (g_systemResumeTime > 0) {
+            DWORD timeSinceResume = now - g_systemResumeTime;
+            if (timeSinceResume < 3000) {
+                // 卡顿恢复后3秒内，强制等待完整间隔
+                minInterval = OSC_MIN_INTERVAL;
+                // 同时重置最后发送时间
+                if (timeSinceResume < 100) {
+                    g_lastOscSendTime = now;
+                }
+            } else {
+                // 已经过去足够时间，清除恢复标记
+                g_systemResumeTime = 0;
+            }
         }
         
         if (now - g_lastOscSendTime >= minInterval) {
@@ -3107,6 +3159,57 @@ LRESULT CALLBACK TrayMenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_CREATE: {
             // Enable blur behind effect (毛玻璃)
             EnableBlurBehind(hwnd);
+            // 设置圆角
+            typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
+            HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+            if (hDwm) {
+                auto fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+                if (fn) {
+                    int corner = 2;  // DWMWCP_ROUND
+                    fn(hwnd, 33, &corner, sizeof(corner));
+                }
+                FreeLibrary(hDwm);
+            }
+            // 初始化显示动画
+            g_trayMenuClosing = false;
+            g_trayMenuFadeAnim.value = 0.0;
+            g_trayMenuFadeAnim.target = 1.0;
+            g_trayMenuFadeAnim.speed = 0.2;
+            g_trayMenuScaleAnim.value = 0.85;
+            g_trayMenuScaleAnim.target = 1.0;
+            g_trayMenuScaleAnim.speed = 0.25;
+            SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+            SetTimer(hwnd, 1, 16, nullptr);
+            return 0;
+        }
+        case WM_TIMER: {
+            if (wParam == 1) {
+                g_trayMenuFadeAnim.update();
+                g_trayMenuScaleAnim.update();
+                
+                // 计算透明度和缩放
+                BYTE alpha = (BYTE)(255 * g_trayMenuFadeAnim.value);
+                SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                
+                // 检查是否完成关闭动画
+                if (g_trayMenuClosing && g_trayMenuFadeAnim.value < 0.01) {
+                    bool shouldExit = g_trayMenuExitRequested;
+                    g_trayMenuExitRequested = false;
+                    g_trayMenuVisible = false;
+                    g_trayMenuHover = -1;
+                    g_trayMenuClosing = false;
+                    KillTimer(hwnd, 1);
+                    DestroyWindow(hwnd);  // 销毁窗口，让下次可以重新创建
+                    
+                    // 如果请求退出程序，动画完成后发送关闭消息
+                    if (shouldExit) {
+                        PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+                    }
+                    return 0;
+                }
+                
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
         case WM_ERASEBKGND: {
@@ -3125,38 +3228,75 @@ LRESULT CALLBACK TrayMenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
             HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
             
-            // 绘制背景（直角矩形，带毛玻璃效果）
+            // 清除背景
             {
-                Graphics graphics(memDC);
-                graphics.SetSmoothingMode(SmoothingModeHighQuality);
-                
-                // 半透明背景（配合毛玻璃效果）
-                SolidBrush bgBrush(Color(200, GetRValue(COLOR_CARD), GetGValue(COLOR_CARD), GetBValue(COLOR_CARD)));
-                graphics.FillRectangle(&bgBrush, 0, 0, w, h);
-                
-                // 边框
-                Pen borderPen(Color(255, GetRValue(COLOR_BORDER), GetGValue(COLOR_BORDER), GetBValue(COLOR_BORDER)));
-                graphics.DrawRectangle(&borderPen, 0, 0, w - 1, h - 1);
+                HBRUSH bgBrush = CreateSolidBrush(COLOR_BG);
+                FillRect(memDC, &rc, bgBrush);
+                DeleteObject(bgBrush);
             }
             
-            // 菜单项
-            const wchar_t* items[] = { L"\x663E\x793A\x7A97\x53E3", L"\x9000\x51FA\x7A0B\x5E8F" };  // 显示窗口, 退出程序
+            // 应用缩放变换
+            double scale = g_trayMenuScaleAnim.value;
+            
+            // 使用 GDI+ 绘制所有内容，应用统一的缩放变换
             {
                 Graphics graphics(memDC);
                 graphics.SetSmoothingMode(SmoothingModeHighQuality);
+                graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+                
+                // 设置缩放变换（以窗口中心为缩放中心）
+                float centerX = w / 2.0f;
+                float centerY = h / 2.0f;
+                graphics.TranslateTransform(centerX, centerY);
+                graphics.ScaleTransform((REAL)scale, (REAL)scale);
+                graphics.TranslateTransform(-centerX, -centerY);
+                
+                // 绘制圆角背景
+                RectF rectF(0, 0, (REAL)w, (REAL)h);
+                GraphicsPath path;
+                int cornerRadius = 10;
+                CreateRoundRectPath(&path, rectF, cornerRadius);
+                
+                // 半透明背景
+                int bgAlpha = (int)(220 * g_trayMenuFadeAnim.value);
+                SolidBrush bgBrush(Color(bgAlpha, GetRValue(COLOR_CARD), GetGValue(COLOR_CARD), GetBValue(COLOR_CARD)));
+                graphics.FillPath(&bgBrush, &path);
+                
+                // 发光边框
+                int borderAlpha = (int)(255 * g_trayMenuFadeAnim.value);
+                Pen borderPen(Color(borderAlpha, GetRValue(COLOR_BORDER), GetGValue(COLOR_BORDER), GetBValue(COLOR_BORDER)), 1.5f);
+                graphics.DrawPath(&borderPen, &path);
+                
+                // 菜单项（文字固定位置，不抖动）
+                const wchar_t* items[] = { L"\x663E\x793A\x7A97\x53E3", L"\x9000\x51FA\x7A0B\x5E8F" };  // 显示窗口, 退出程序
+                int textAlpha = (int)(255 * g_trayMenuFadeAnim.value);
                 
                 for (int i = 0; i < 2; i++) {
+                    // 固定位置（不再基于scale重新计算）
                     int itemY = 4 + i * TRAY_MENU_ITEM_H;
+                    int itemX = 2;
+                    int itemW = w - 4;
+                    int itemH = TRAY_MENU_ITEM_H - 4;
                     
                     // 悬停背景
                     if (g_trayMenuHover == i) {
-                        SolidBrush hoverBrush(Color(255, GetRValue(COLOR_BTN_HOVER), GetGValue(COLOR_BTN_HOVER), GetBValue(COLOR_BTN_HOVER)));
-                        graphics.FillRectangle(&hoverBrush, 2, itemY, w - 4, TRAY_MENU_ITEM_H - 4);
+                        SolidBrush hoverBrush(Color(textAlpha, GetRValue(COLOR_BTN_HOVER), GetGValue(COLOR_BTN_HOVER), GetBValue(COLOR_BTN_HOVER)));
+                        GraphicsPath hoverPath;
+                        RectF hoverRect((REAL)itemX, (REAL)itemY, (REAL)itemW, (REAL)itemH);
+                        CreateRoundRectPath(&hoverPath, hoverRect, 6);
+                        graphics.FillPath(&hoverBrush, &hoverPath);
                     }
                     
-                    // 文字
+                    // 文字（固定位置，居中显示）
                     COLORREF textColor = (i == 1) ? COLOR_ERROR : COLOR_TEXT;
-                    DrawTextVCentered(memDC, items[i], 12, itemY, TRAY_MENU_ITEM_H - 4, textColor, g_fontNormal);
+                    Font font(memDC, g_fontNormal);
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(textColor), GetGValue(textColor), GetBValue(textColor)));
+                    
+                    StringFormat format;
+                    format.SetAlignment(StringAlignmentCenter);
+                    format.SetLineAlignment(StringAlignmentCenter);
+                    RectF textRect((REAL)itemX, (REAL)itemY, (REAL)itemW, (REAL)itemH);
+                    graphics.DrawString(items[i], -1, &font, textRect, &format, &textBrush);
                 }
             }
             
@@ -3172,10 +3312,21 @@ LRESULT CALLBACK TrayMenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             int x = LOWORD(lParam), y = HIWORD(lParam);
             int oldHover = g_trayMenuHover;
             
+            // 逆变换：将屏幕坐标转换到缩放前的坐标系
+            double scale = g_trayMenuScaleAnim.value;
+            if (scale < 0.1) scale = 0.1;  // 避免除零
+            
+            int centerX = TRAY_MENU_W / 2;
+            int centerY = TRAY_MENU_H / 2;
+            // 逆变换：先平移到中心，再除以scale，再平移回去
+            int localX = (int)((x - centerX) / scale + centerX);
+            int localY = (int)((y - centerY) / scale + centerY);
+            
             g_trayMenuHover = -1;
             for (int i = 0; i < 2; i++) {
                 int itemY = 4 + i * TRAY_MENU_ITEM_H;
-                if (y >= itemY && y < itemY + TRAY_MENU_ITEM_H - 4) {
+                int itemH = TRAY_MENU_ITEM_H - 4;
+                if (localY >= itemY && localY < itemY + itemH) {
                     g_trayMenuHover = i;
                     break;
                 }
@@ -3189,37 +3340,48 @@ LRESULT CALLBACK TrayMenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_LBUTTONUP: {
             int x = LOWORD(lParam), y = HIWORD(lParam);
             
+            // 逆变换：将屏幕坐标转换到缩放前的坐标系
+            double scale = g_trayMenuScaleAnim.value;
+            if (scale < 0.1) scale = 0.1;  // 避免除零
+            
+            int centerX = TRAY_MENU_W / 2;
+            int centerY = TRAY_MENU_H / 2;
+            int localX = (int)((x - centerX) / scale + centerX);
+            int localY = (int)((y - centerY) / scale + centerY);
+            
             for (int i = 0; i < 2; i++) {
                 int itemY = 4 + i * TRAY_MENU_ITEM_H;
-                if (y >= itemY && y < itemY + TRAY_MENU_ITEM_H - 4) {
+                int itemH = TRAY_MENU_ITEM_H - 4;
+                if (localY >= itemY && localY < itemY + itemH) {
                     if (i == 0) {
                         // 显示窗口
                         ShowWindow(g_hwnd, SW_SHOW);
                         SetForegroundWindow(g_hwnd);
                     } else if (i == 1) {
-                        // 退出程序 - 发送WM_CLOSE以触发正常的退出流程（发送关闭OSC消息）
-                        PostMessage(g_hwnd, WM_CLOSE, 0, 0);
+                        // 退出程序 - 设置标志，动画完成后再发送关闭消息
+                        g_trayMenuExitRequested = true;
                     }
                     break;
                 }
             }
             
-            // 关闭菜单
-            ShowWindow(hwnd, SW_HIDE);
-            g_trayMenuVisible = false;
-            g_trayMenuHover = -1;
+            // 触发关闭动画
+            g_trayMenuClosing = true;
+            g_trayMenuFadeAnim.target = 0.0;
+            g_trayMenuScaleAnim.target = 0.85;
             return 0;
         }
         case WM_ACTIVATE: {
-            if (LOWORD(wParam) == WA_INACTIVE) {
-                // 失去焦点时关闭菜单
-                ShowWindow(hwnd, SW_HIDE);
-                g_trayMenuVisible = false;
-                g_trayMenuHover = -1;
+            if (LOWORD(wParam) == WA_INACTIVE && !g_trayMenuClosing) {
+                // 失去焦点时触发关闭动画
+                g_trayMenuClosing = true;
+                g_trayMenuFadeAnim.target = 0.0;
+                g_trayMenuScaleAnim.target = 0.85;
             }
             return 0;
         }
         case WM_DESTROY: {
+            KillTimer(hwnd, 1);
             g_trayMenuHwnd = nullptr;
             return 0;
         }
@@ -3250,11 +3412,6 @@ void ShowTrayMenu(int x, int y) {
             WS_POPUP,
             x, y, TRAY_MENU_W, TRAY_MENU_H,
             nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-        
-        if (g_trayMenuHwnd) {
-            // 直角矩形（无圆角）
-            SetLayeredWindowAttributes(g_trayMenuHwnd, 0, 255, LWA_ALPHA);
-        }
     }
     
     if (g_trayMenuHwnd) {
@@ -3267,6 +3424,13 @@ void ShowTrayMenu(int x, int y) {
         SetWindowPos(g_trayMenuHwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         g_trayMenuHover = -1;
         g_trayMenuVisible = true;
+        g_trayMenuClosing = false;
+        g_trayMenuExitRequested = false;  // 重置退出请求
+        // 重置动画状态
+        g_trayMenuFadeAnim.value = 0.0;
+        g_trayMenuFadeAnim.target = 1.0;
+        g_trayMenuScaleAnim.value = 0.85;
+        g_trayMenuScaleAnim.target = 1.0;
         ShowWindow(g_trayMenuHwnd, SW_SHOW);
         SetForegroundWindow(g_trayMenuHwnd);
     }
@@ -3881,13 +4045,13 @@ void OnPaint(HWND hwnd) {
 
         // === System Info Section (only in Performance mode, with animation) ===
         double expandAnim = g_systemInfoExpandAnim.value;
-        bool showSystemInfo = (g_performanceMode == 1) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
+        int infoH = (int)(140 * expandAnim);
+        bool showSystemInfo = (g_performanceMode == 1 && expandAnim > 0.01) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
 
-        if (showSystemInfo) {
+        if (showSystemInfo && infoH > 4) {
             int infoX = CARD_PADDING + 18;
             int infoY = modeBtnY + modeBtnH + 20;
             int infoW = leftColW - 36;
-            int infoH = (int)(140 * expandAnim);
 
             // Background with alpha
             COLORREF infoBg = COLOR_BOX_BG;
@@ -3899,91 +4063,176 @@ void OnPaint(HWND hwnd) {
             }
 
             // Clip to animation region
+            HRGN clipRgn = nullptr;
             if (expandAnim < 1.0 && infoH > 0) {
-                HRGN clipRgn = CreateRectRgn(infoX, infoY, infoX + infoW, infoY + infoH);
+                clipRgn = CreateRectRgn(infoX, infoY, infoX + infoW, infoY + infoH);
                 SelectClipRgn(memDC, clipRgn);
             }
 
-            // CPU input
-            int inputH = 36;
-            int inputY = infoY + 15;
-            DrawTextLeft(memDC, L"CPU", infoX, inputY + 7, COLOR_TEXT_DIM, g_fontNormal);
-            bool cpuEditing = (g_editingField == EDIT_CPU_NAME);
-            COLORREF cpuBorder = cpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
-            DrawRoundRectWithBorder(memDC, infoX + 50, inputY, infoW - 50, inputH, 6, COLOR_EDIT_BG, cpuBorder);
+            // Calculate alpha for fade effect
+            int textAlpha = min(255, (int)(255 * expandAnim * 1.2));  // 文字淡入稍快
+            
+            // Use GDI+ for alpha-blended text and controls (limited scope)
+            {
+                Graphics graphics(memDC);
+                graphics.SetSmoothingMode(SmoothingModeHighQuality);
 
-            // Draw text
-            const wchar_t* cpuText = g_cpuDisplayName.c_str();
-            DrawTextLeft(memDC, cpuText, infoX + 60, inputY + 7, COLOR_TEXT, g_fontNormal);
+                // CPU input
+                int inputH = 36;
+                int inputY = infoY + 15;
+                
+                // CPU label with alpha
+                {
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(COLOR_TEXT_DIM), GetGValue(COLOR_TEXT_DIM), GetBValue(COLOR_TEXT_DIM)));
+                    Font font(memDC, g_fontNormal);
+                    PointF pt((REAL)infoX, (REAL)(inputY + 7));
+                    graphics.DrawString(L"CPU", -1, &font, pt, &textBrush);
+                }
+                
+                bool cpuEditing = (g_editingField == EDIT_CPU_NAME);
+                COLORREF cpuBorder = cpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
+                
+                // CPU input box with alpha
+                {
+                    int boxAlpha = (int)(255 * expandAnim);
+                    SolidBrush boxBrush(Color(boxAlpha, GetRValue(COLOR_EDIT_BG), GetGValue(COLOR_EDIT_BG), GetBValue(COLOR_EDIT_BG)));
+                    RectF rect((REAL)(infoX + 50), (REAL)inputY, (REAL)(infoW - 50), (REAL)inputH);
+                    GraphicsPath path;
+                    CreateRoundRectPath(&path, rect, 6);
+                    graphics.FillPath(&boxBrush, &path);
+                    
+                    // Border
+                    Pen borderPen(Color(boxAlpha, GetRValue(cpuBorder), GetGValue(cpuBorder), GetBValue(cpuBorder)));
+                    graphics.DrawPath(&borderPen, &path);
+                }
 
-            // Draw cursor if editing and visible
-            if (cpuEditing && g_cursorVisible) {
-                int cursorX = infoX + 60 + GetTextWidth(memDC, cpuText, g_fontNormal, g_cursorPos);
-                HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
-                HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-                MoveToEx(memDC, cursorX, inputY + 10, nullptr);
-                LineTo(memDC, cursorX, inputY + 26);
-                SelectObject(memDC, oldPen);
-                DeleteObject(pen);
-            }
+                // CPU text with alpha
+                {
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(COLOR_TEXT), GetGValue(COLOR_TEXT), GetBValue(COLOR_TEXT)));
+                    Font font(memDC, g_fontNormal);
+                    PointF pt((REAL)(infoX + 60), (REAL)(inputY + 7));
+                    graphics.DrawString(g_cpuDisplayName.c_str(), -1, &font, pt, &textBrush);
+                }
 
-            // RAM input
-            inputY += 45;
-            DrawTextLeft(memDC, L"RAM", infoX, inputY + 7, COLOR_TEXT_DIM, g_fontNormal);
-            bool ramEditing = (g_editingField == EDIT_RAM_NAME);
-            COLORREF ramBorder = ramEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
-            DrawRoundRectWithBorder(memDC, infoX + 50, inputY, infoW - 50, inputH, 6, COLOR_EDIT_BG, ramBorder);
+                // Draw cursor if editing and visible
+                if (cpuEditing && g_cursorVisible) {
+                    int cursorX = infoX + 60 + GetTextWidth(memDC, g_cpuDisplayName.c_str(), g_fontNormal, g_cursorPos);
+                    HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
+                    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+                    MoveToEx(memDC, cursorX, inputY + 10, nullptr);
+                    LineTo(memDC, cursorX, inputY + 26);
+                    SelectObject(memDC, oldPen);
+                    DeleteObject(pen);
+                }
 
-            // Draw text
-            const wchar_t* ramText = g_ramDisplayName.c_str();
-            DrawTextLeft(memDC, ramText, infoX + 60, inputY + 7, COLOR_TEXT, g_fontNormal);
+                // RAM input
+                inputY += 45;
+                
+                // RAM label with alpha
+                {
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(COLOR_TEXT_DIM), GetGValue(COLOR_TEXT_DIM), GetBValue(COLOR_TEXT_DIM)));
+                    Font font(memDC, g_fontNormal);
+                    PointF pt((REAL)infoX, (REAL)(inputY + 7));
+                    graphics.DrawString(L"RAM", -1, &font, pt, &textBrush);
+                }
+                
+                bool ramEditing = (g_editingField == EDIT_RAM_NAME);
+                COLORREF ramBorder = ramEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
+                
+                // RAM input box with alpha
+                {
+                    int boxAlpha = (int)(255 * expandAnim);
+                    SolidBrush boxBrush(Color(boxAlpha, GetRValue(COLOR_EDIT_BG), GetGValue(COLOR_EDIT_BG), GetBValue(COLOR_EDIT_BG)));
+                    RectF rect((REAL)(infoX + 50), (REAL)inputY, (REAL)(infoW - 50), (REAL)inputH);
+                    GraphicsPath path;
+                    CreateRoundRectPath(&path, rect, 6);
+                    graphics.FillPath(&boxBrush, &path);
+                    
+                    Pen borderPen(Color(boxAlpha, GetRValue(ramBorder), GetGValue(ramBorder), GetBValue(ramBorder)));
+                    graphics.DrawPath(&borderPen, &path);
+                }
 
-            // Draw cursor if editing and visible
-            if (ramEditing && g_cursorVisible) {
-                int cursorX = infoX + 60 + GetTextWidth(memDC, ramText, g_fontNormal, g_cursorPos);
-                HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
-                HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-                MoveToEx(memDC, cursorX, inputY + 10, nullptr);
-                LineTo(memDC, cursorX, inputY + 26);
-                SelectObject(memDC, oldPen);
-                DeleteObject(pen);
-            }
+                // RAM text with alpha
+                {
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(COLOR_TEXT), GetGValue(COLOR_TEXT), GetBValue(COLOR_TEXT)));
+                    Font font(memDC, g_fontNormal);
+                    PointF pt((REAL)(infoX + 60), (REAL)(inputY + 7));
+                    graphics.DrawString(g_ramDisplayName.c_str(), -1, &font, pt, &textBrush);
+                }
 
-            // GPU input
-            inputY += 45;
-            DrawTextLeft(memDC, L"GPU", infoX, inputY + 7, COLOR_TEXT_DIM, g_fontNormal);
-            bool gpuEditing = (g_editingField == EDIT_GPU_NAME);
-            COLORREF gpuBorder = gpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
-            DrawRoundRectWithBorder(memDC, infoX + 50, inputY, infoW - 50, inputH, 6, COLOR_EDIT_BG, gpuBorder);
+                // Draw cursor if editing and visible
+                if (ramEditing && g_cursorVisible) {
+                    int cursorX = infoX + 60 + GetTextWidth(memDC, g_ramDisplayName.c_str(), g_fontNormal, g_cursorPos);
+                    HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
+                    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+                    MoveToEx(memDC, cursorX, inputY + 10, nullptr);
+                    LineTo(memDC, cursorX, inputY + 26);
+                    SelectObject(memDC, oldPen);
+                    DeleteObject(pen);
+                }
 
-            // Draw text
-            const wchar_t* gpuText = g_gpuDisplayName.c_str();
-            DrawTextLeft(memDC, gpuText, infoX + 60, inputY + 7, COLOR_TEXT, g_fontNormal);
+                // GPU input
+                inputY += 45;
+                
+                // GPU label with alpha
+                {
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(COLOR_TEXT_DIM), GetGValue(COLOR_TEXT_DIM), GetBValue(COLOR_TEXT_DIM)));
+                    Font font(memDC, g_fontNormal);
+                    PointF pt((REAL)infoX, (REAL)(inputY + 7));
+                    graphics.DrawString(L"GPU", -1, &font, pt, &textBrush);
+                }
+                
+                bool gpuEditing = (g_editingField == EDIT_GPU_NAME);
+                COLORREF gpuBorder = gpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
+                
+                // GPU input box with alpha
+                {
+                    int boxAlpha = (int)(255 * expandAnim);
+                    SolidBrush boxBrush(Color(boxAlpha, GetRValue(COLOR_EDIT_BG), GetGValue(COLOR_EDIT_BG), GetBValue(COLOR_EDIT_BG)));
+                    RectF rect((REAL)(infoX + 50), (REAL)inputY, (REAL)(infoW - 50), (REAL)inputH);
+                    GraphicsPath path;
+                    CreateRoundRectPath(&path, rect, 6);
+                    graphics.FillPath(&boxBrush, &path);
+                    
+                    Pen borderPen(Color(boxAlpha, GetRValue(gpuBorder), GetGValue(gpuBorder), GetBValue(gpuBorder)));
+                    graphics.DrawPath(&borderPen, &path);
+                }
 
-            // Draw cursor if editing and visible
-            if (gpuEditing && g_cursorVisible) {
-                int cursorX = infoX + 60 + GetTextWidth(memDC, gpuText, g_fontNormal, g_cursorPos);
-                HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
-                HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-                MoveToEx(memDC, cursorX, inputY + 10, nullptr);
-                LineTo(memDC, cursorX, inputY + 26);
-                SelectObject(memDC, oldPen);
-                DeleteObject(pen);
-            }
+                // GPU text with alpha
+                {
+                    SolidBrush textBrush(Color(textAlpha, GetRValue(COLOR_TEXT), GetGValue(COLOR_TEXT), GetBValue(COLOR_TEXT)));
+                    Font font(memDC, g_fontNormal);
+                    PointF pt((REAL)(infoX + 60), (REAL)(inputY + 7));
+                    graphics.DrawString(g_gpuDisplayName.c_str(), -1, &font, pt, &textBrush);
+                }
 
-            // Cancel clipping
-            if (expandAnim < 1.0 && infoH > 0) {
+                // Draw cursor if editing and visible
+                if (gpuEditing && g_cursorVisible) {
+                    int cursorX = infoX + 60 + GetTextWidth(memDC, g_gpuDisplayName.c_str(), g_fontNormal, g_cursorPos);
+                    HPEN pen = CreatePen(PS_SOLID, 2, COLOR_TEXT);
+                    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+                    MoveToEx(memDC, cursorX, inputY + 10, nullptr);
+                    LineTo(memDC, cursorX, inputY + 26);
+                    SelectObject(memDC, oldPen);
+                    DeleteObject(pen);
+                }
+            }  // Graphics 对象在这里销毁
+
+            // Cancel clipping (after Graphics object is destroyed)
+            if (clipRgn) {
                 SelectClipRgn(memDC, nullptr);
+                DeleteObject(clipRgn);
             }
         }
 
         // === Auto Detect Button ===
         int btnW = leftColW - 36;
         int btnH = 36;
-        // 使用expandAnim平滑计算按钮位置，使其随系统信息展开而移动
+        // 按钮位置与系统信息区域同步：只有当区域可见时才移动
+        double btnExpandAnim = showSystemInfo ? expandAnim : 0.0;
         int baseBtnY = modeBtnY + modeBtnH + 20;
         int expandedBtnY = baseBtnY + 140 + 20;
-        int btnY = (int)(baseBtnY + (expandedBtnY - baseBtnY) * expandAnim);
+        int btnY = (int)(baseBtnY + (expandedBtnY - baseBtnY) * btnExpandAnim);
         DrawButtonAnim(memDC, CARD_PADDING + 18, btnY, btnW, btnH, L"\x81EA\x52A8\x68C0\x6D4B", g_btnAutoDetectAnim, false);
 
         // === Show Order Button ===
@@ -4005,113 +4254,199 @@ void OnPaint(HWND hwnd) {
         
         // === Checkbox: Show Performance ===
         rowY += 70;
-        COLORREF cbBg = g_showPerfOnPause ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
-        
-        if (g_showPerfOnPause) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_showPerfOnPause;
+            bool hover = g_checkboxHover[0];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            // 悬停且未选中时绘制边框
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                // 绘制圆角矩形边框
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x6682\x505C\x7EDF\x8BA1", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
         
         // === Checkbox: Auto Update ===
         rowY += 38;
-        COLORREF cbBg2 = g_autoUpdate ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg2);
-        
-        if (g_autoUpdate) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_autoUpdate;
+            bool hover = g_checkboxHover[1];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x81EA\x52A8\x66F4\x65B0", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
         
         // === Checkbox: Show Platform ===
         rowY += 38;
-        COLORREF cbBg3 = g_showPlatform ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg3);
-        
-        if (g_showPlatform) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_showPlatform;
+            bool hover = g_checkboxHover[2];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x663E\x793A\x5E73\x53F0", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
         
         // === Checkbox: Minimize to Tray ===
         rowY += 38;
-        COLORREF cbBg4 = g_minimizeToTray ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg4);
-        
-        if (g_minimizeToTray) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_minimizeToTray;
+            bool hover = g_checkboxHover[3];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x6700\x5C0F\x5316\x5230\x6258\x76D8", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
 
         // === Checkbox: Start Minimized ===
         rowY += 38;
-        COLORREF cbBg5 = g_startMinimized ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg5);
-
-        if (g_startMinimized) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_startMinimized;
+            bool hover = g_checkboxHover[4];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x542F\x52A8\x6700\x5C0F\x5316", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
 
         // === Checkbox: Auto Start ===
         rowY += 38;
-        COLORREF cbBg6 = g_autoStart ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg6);
-
-        if (g_autoStart) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_autoStart;
+            bool hover = g_checkboxHover[5];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x5F00\x673A\x81EA\x542F", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
 
         // === Checkbox: Run as Admin ===
         rowY += 38;
-        COLORREF cbBg7 = g_runAsAdmin ? COLOR_CHECK_ACCENT : COLOR_CHECK_BG;
-        DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg7);
-        
-        if (g_runAsAdmin) {
-            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
-            HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
-            MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
-            LineTo(memDC, checkboxX + 10, rowY + 18);
-            LineTo(memDC, checkboxX + 20, rowY + 8);
-            SelectObject(memDC, oldTickPen);
-            DeleteObject(tickPen);
+        {
+            bool checked = g_runAsAdmin;
+            bool hover = g_checkboxHover[6];
+            COLORREF cbBg = checked ? COLOR_CHECK_ACCENT : (hover ? COLOR_BTN_HOVER : COLOR_CHECK_BG);
+            DrawRoundRect(memDC, checkboxX, rowY, checkboxSize, checkboxSize, 4, cbBg);
+            if (hover && !checked) {
+                HPEN hoverPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+                HPEN oldPen = (HPEN)SelectObject(memDC, hoverPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+                RoundRect(memDC, checkboxX, rowY, checkboxX + checkboxSize, rowY + checkboxSize, 8, 8);
+                SelectObject(memDC, oldBrush);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hoverPen);
+            }
+            if (checked) {
+                HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+                HPEN oldTickPen = (HPEN)SelectObject(memDC, tickPen);
+                MoveToEx(memDC, checkboxX + 6, rowY + 13, nullptr);
+                LineTo(memDC, checkboxX + 10, rowY + 18);
+                LineTo(memDC, checkboxX + 20, rowY + 8);
+                SelectObject(memDC, oldTickPen);
+                DeleteObject(tickPen);
+            }
         }
         DrawTextVCentered(memDC, L"\x7BA1\x7406\x5458\x542F\x52A8", checkboxX + checkboxSize + 8, rowY, checkboxSize, COLOR_TEXT, g_fontNormal);
         
@@ -4806,8 +5141,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                     // Toggle pause state
                     DWORD now = GetTickCount();
                     
-                    if (g_oscPaused) {
-                        // Already paused - cancel pause with particle burst
+                    // 判断是否真的在暂停中（时间还没到）
+                    bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now;
+                    
+                    if (isReallyPaused || g_overlayHwnd) {
+                        // Already paused or window exists - cancel pause with particle burst
                         MainDebugLog("[Hotkey] Canceling OSC pause (low-level hook)");
                         
                         // 触发粒子爆炸（在进度条末端）
@@ -4815,14 +5153,34 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         
                         g_oscPaused = false;
                         g_oscPauseEndTime = 0;
-                        g_overlayClosing = true;  // 开始收缩动画
                         
-                        // 覆盖层窗口会自己管理销毁，不再使用主窗口定时器
+                        // 如果窗口正在关闭动画，立即销毁；否则开始关闭动画
+                        if (g_overlayHwnd) {
+                            if (g_overlayClosing) {
+                                // 正在关闭，立即销毁
+                                DestroyWindow(g_overlayHwnd);
+                                g_overlayHwnd = nullptr;
+                                g_overlayActive = false;
+                                g_overlayClosing = false;
+                                g_overlayExpandAnim = 0.0f;
+                                g_particles.clear();
+                                g_sandParticles.clear();
+                            } else {
+                                // 开始关闭动画
+                                g_overlayClosing = true;
+                            }
+                        }
                     } else {
                         // Start pause
                         g_oscPaused = true;
                         g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
+                        g_overlayClosing = false;  // 确保不是关闭状态
                         MainDebugLog("[Hotkey] OSC paused for 30 seconds (low-level hook)");
+                        
+                        // 发送暂停消息提示
+                        if (g_osc && g_oscEnabled) {
+                            SendSystemOSCMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                        }
                         
                         // Create overlay window
                         CreateOverlayWindow();
@@ -5010,37 +5368,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 HRGN clipRgn = CreateRectRgn(clipX, 0, clipX + clipW, h);
                 SelectClipRgn(memDC, clipRgn);
                 
-                // 绘制蓝色渐变背景
-                for (int y = 0; y < h; y++) {
-                    int blueBase = 40 - (y * 15 / h);
-                    int greenBase = 25 - (y * 10 / h);
-                    int redBase = 20 - (y * 8 / h);
-                    COLORREF lineColor = RGB(redBase, greenBase, blueBase + 30);
-                    HPEN pen = CreatePen(PS_SOLID, 1, lineColor);
-                    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-                    MoveToEx(memDC, 0, y, nullptr);
-                    LineTo(memDC, w, y);
-                    SelectObject(memDC, oldPen);
-                    DeleteObject(pen);
-                }
-                
-                // 卡片参数
-                int cardRadius = 12;
-                int cardPadding = 5;
-                
-                // 绘制毛玻璃圆角卡片背景（蓝色调）
-                DrawRoundRectAlpha(memDC, cardPadding, cardPadding, w - cardPadding * 2, h - cardPadding * 2, 
-                                   cardRadius, RGB(20, 30, 50), 230);
-                
-                // 左侧蓝色装饰条
-                DrawRoundRect(memDC, cardPadding + 8, cardPadding + 10, 4, h - cardPadding * 2 - 20, 2, RGB(100, 180, 255));
-                
                 // 进度条参数
                 int barPadding = 20;
                 int barH = 10;
                 int barY = h - barH - 22;
-                int barX = barPadding + 12;  // 留出装饰条位置
-                int barW = w - barPadding * 2 - 12;
+                int barX = barPadding;
+                int barW = w - barPadding * 2;
                 
                 // 计算进度
                 DWORD now = GetTickCount();
@@ -5052,25 +5385,28 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 // 更新粒子
                 UpdateParticles();
                 
-                // 绘制进度条背景（圆角）
-                DrawRoundRect(memDC, barX, barY, barW, barH, barH / 2, RGB(60, 60, 65));
-                
-                if (progress > 0) {
-                    // 绘制进度条（从左到右减少，绿→黄→红渐变）
-                    int progressW = (int)(barW * progress);
-                    if (progressW > barH) {  // 确保最小宽度以显示圆角
-                        COLORREF progressColor = GetProgressColor(progress);
-                        DrawRoundRect(memDC, barX, barY, progressW, barH, barH / 2, progressColor);
-                        
-                        // 沙漏粒子效果 - 从进度条末端向上飘落
-                        if ((rand() % 4) == 0 && g_overlayExpandAnim >= 1.0f) {
-                            SandParticle sp;
-                            sp.x = (float)(barX + progressW);
-                            sp.y = -5.0f;
-                            sp.vy = 0.5f + (rand() % 10) / 10.0f;
-                            sp.size = 2 + rand() % 2;
-                            sp.color = progressColor;
-                            g_sandParticles.push_back(sp);
+                // 只有在暂停状态有效时才绘制进度条
+                if (g_oscPaused && g_oscPauseEndTime > now) {
+                    // 绘制进度条背景（圆角）
+                    DrawRoundRect(memDC, barX, barY, barW, barH, barH / 2, RGB(60, 60, 65));
+                    
+                    if (progress > 0) {
+                        // 绘制进度条（从左到右减少，绿→黄→红渐变）
+                        int progressW = (int)(barW * progress);
+                        if (progressW > barH) {  // 确保最小宽度以显示圆角
+                            COLORREF progressColor = GetProgressColor(progress);
+                            DrawRoundRect(memDC, barX, barY, progressW, barH, barH / 2, progressColor);
+                            
+                            // 沙漏粒子效果 - 从进度条末端向上飘落
+                            if ((rand() % 4) == 0 && g_overlayExpandAnim >= 1.0f) {
+                                SandParticle sp;
+                                sp.x = (float)(barX + progressW);
+                                sp.y = -5.0f;
+                                sp.vy = 0.5f + (rand() % 10) / 10.0f;
+                                sp.size = 2 + rand() % 2;
+                                sp.color = progressColor;
+                                g_sandParticles.push_back(sp);
+                            }
                         }
                     }
                 }
@@ -5106,27 +5442,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     int textX = w - barPadding - textSize.cx;
                     int textY = 12;
                     TextOutW(memDC, textX, textY, timeText, (int)wcslen(timeText));
-                    
-                    // 热键提示
-                    std::wstring hk;
-                    if (g_oscPauseHotkeyMods & MOD_CONTROL) hk += L"Ctrl+";
-                    if (g_oscPauseHotkeyMods & MOD_ALT) hk += L"Alt+";
-                    if (g_oscPauseHotkeyMods & MOD_SHIFT) hk += L"Shift+";
-                    if (g_oscPauseHotkeyMods & MOD_WIN) hk += L"Win+";
-                    if (g_oscPauseHotkey >= VK_F1 && g_oscPauseHotkey <= VK_F24) {
-                        hk += L"F" + std::to_wstring(g_oscPauseHotkey - VK_F1 + 1);
-                    } else if (g_oscPauseHotkey >= 'A' && g_oscPauseHotkey <= 'Z') {
-                        hk += (wchar_t)g_oscPauseHotkey;
-                    }
-                    wchar_t hint[64];
-                    swprintf_s(hint, L"[%s]", hk.c_str());
-                    SetTextColor(memDC, RGB(150, 150, 150));
-                    HFONT smallFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 
-                        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-                    SelectObject(memDC, smallFont);
-                    TextOutW(memDC, barX, 14, hint, (int)wcslen(hint));
-                    DeleteObject(smallFont);
                     
                     SelectObject(memDC, oldFont);
                     DeleteObject(font);
@@ -5216,7 +5531,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 // 创建覆盖层窗口
 void CreateOverlayWindow() {
-    if (g_overlayHwnd) return;
+    // 如果窗口已存在，先销毁（支持快速重复启动）
+    if (g_overlayHwnd) {
+        DestroyWindow(g_overlayHwnd);
+        g_overlayHwnd = nullptr;
+        g_overlayActive = false;
+    }
     
     HINSTANCE hInst = GetModuleHandle(nullptr);
     
@@ -5245,9 +5565,9 @@ void CreateOverlayWindow() {
         registered = true;
     }
     
-    // 创建顶层窗口，点击穿透，不抢焦点
+    // 创建顶层窗口，点击穿透，不抢焦点，不显示在任务栏
     g_overlayHwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_APPWINDOW,
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
         L"VRCLyricsOverlay_Class", L"",
         WS_POPUP,
         winX, winY, winW, winH,
@@ -5376,8 +5696,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 切换暂停状态
                 DWORD now = GetTickCount();
                 
-                if (g_oscPaused) {
-                    // 已经在暂停中 - 取消暂停，触发粒子爆发
+                // 判断是否真的在暂停中（时间还没到）
+                bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now;
+                
+                if (isReallyPaused || g_overlayHwnd) {
+                    // 已经在暂停中或窗口存在 - 取消暂停，触发粒子爆发
                     MainDebugLog("[Hotkey] Canceling OSC pause (WM_HOTKEY)");
                     
                     // 触发粒子爆炸（在进度条末端）
@@ -5385,14 +5708,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
-                    g_overlayClosing = true;  // 开始收缩动画
                     
-                    // 覆盖层窗口会自己管理销毁
+                    // 如果窗口正在关闭动画，立即销毁；否则开始关闭动画
+                    if (g_overlayHwnd) {
+                        if (g_overlayClosing) {
+                            // 正在关闭，立即销毁
+                            DestroyWindow(g_overlayHwnd);
+                            g_overlayHwnd = nullptr;
+                            g_overlayActive = false;
+                            g_overlayClosing = false;  // 重置关闭状态
+                            g_overlayExpandAnim = 0.0f;
+                            g_particles.clear();
+                            g_sandParticles.clear();
+                        } else {
+                            // 开始关闭动画
+                            g_overlayClosing = true;
+                        }
+                    }
                 } else {
                     // 开始新的暂停
                     g_oscPaused = true;
                     g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
+                    g_overlayClosing = false;  // 确保不是关闭状态
                     MainDebugLog("[OSC] Paused for 30 seconds");
+                    
+                    // 发送暂停消息提示
+                    if (g_osc && g_oscEnabled) {
+                        SendSystemOSCMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                    }
                     
                     // 创建覆盖层窗口
                     CreateOverlayWindow();
@@ -5510,11 +5853,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Auto Detect and Show Order buttons
                 int btnW = leftColW - 36;
                 int btnH = 36;
-                // 使用expandAnim平滑计算按钮位置
+                // 按钮位置与系统信息区域同步
                 double expandAnim = g_systemInfoExpandAnim.value;
+                int infoH = (int)(140 * expandAnim);
+                bool showSystemInfo = (g_performanceMode == 1 && expandAnim > 0.01) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
+                double btnExpandAnim = (showSystemInfo && infoH > 4) ? expandAnim : 0.0;
                 int baseBtnY = modeBtnY + modeBtnH + 20;
                 int expandedBtnY = baseBtnY + 140 + 20;
-                int btnY = (int)(baseBtnY + (expandedBtnY - baseBtnY) * expandAnim);
+                int btnY = (int)(baseBtnY + (expandedBtnY - baseBtnY) * btnExpandAnim);
                 g_autoDetectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH);
                 g_showOrderHover = IsInRect(x, y, CARD_PADDING + 18, btnY + 44, btnW, btnH);
 
@@ -5549,6 +5895,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 只有当按钮在可见区域内时才检测悬停
                 g_btnExportLogHover = (exportLogRowY + 38 < g_winH - CARD_PADDING) && 
                                        IsInRect(x, y, checkboxX, exportLogRowY, leftColW - 36 - checkboxX, 38);
+                
+                // Checkbox hover detection (also include the label area for better UX)
+                int checkboxSize = 26;
+                int labelWidth = 120;  // 大致标签宽度
+                g_checkboxHover[0] = IsInRect(x, y, checkboxX, checkboxRowY, checkboxSize + labelWidth, checkboxSize);
+                g_checkboxHover[1] = IsInRect(x, y, checkboxX, autoUpdateRowY, checkboxSize + labelWidth, checkboxSize);
+                g_checkboxHover[2] = IsInRect(x, y, checkboxX, showPlatformRowY, checkboxSize + labelWidth, checkboxSize);
+                g_checkboxHover[3] = IsInRect(x, y, checkboxX, trayRowY, checkboxSize + labelWidth, checkboxSize);
+                g_checkboxHover[4] = IsInRect(x, y, checkboxX, startMinimizedRowY, checkboxSize + labelWidth, checkboxSize);
+                g_checkboxHover[5] = IsInRect(x, y, checkboxX, autoStartRowY, checkboxSize + labelWidth, checkboxSize);
+                g_checkboxHover[6] = IsInRect(x, y, checkboxX, runAsAdminRowY, checkboxSize + labelWidth, checkboxSize);
+            }
+            
+            // Clear checkbox hover when not in settings tab
+            if (g_currentTab != 2) {
+                for (int i = 0; i < 7; i++) g_checkboxHover[i] = false;
             }
             
             g_btnApplyHover = false;
@@ -6008,16 +6370,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_lastOscMessage.clear();
 
                         // 触发系统信息展开/收缩动画
+                        // 使用当前value作为起点，避免突然跳变
                         if (m == 1) {
-                            // 切换到性能模式，展开
-                            g_systemInfoExpandAnim.value = 0.0;
+                            // 切换到性能模式，展开（从当前位置开始动画）
+                            // 如果当前值很小，设置一个最小值让动画更平滑
+                            if (g_systemInfoExpandAnim.value < 0.02) {
+                                g_systemInfoExpandAnim.value = 0.02;
+                            }
                             g_systemInfoExpandAnim.target = 1.0;
-                            g_systemInfoExpandAnim.speed = 0.15;  // 150ms展开
+                            g_systemInfoExpandAnim.speed = 0.08;
                         } else {
-                            // 切换到音乐模式，收缩
-                            g_systemInfoExpandAnim.value = 1.0;
+                            // 切换到音乐模式，收缩（从当前位置开始动画）
                             g_systemInfoExpandAnim.target = 0.0;
-                            g_systemInfoExpandAnim.speed = 0.15;  // 150ms收缩
+                            g_systemInfoExpandAnim.speed = 0.08;
                         }
 
                         SaveConfig(g_configPath);
@@ -6029,7 +6394,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             // System info input boxes
             double expandAnim = g_systemInfoExpandAnim.value;
-            bool showSystemInfo = (g_performanceMode == 1) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
+            bool showSystemInfo = (g_performanceMode == 1 && expandAnim > 0.01) || (g_systemInfoExpandAnim.isActive() && expandAnim > 0.01);
 
             if (showSystemInfo) {
                 int infoX = CARD_PADDING + 18;
@@ -6450,14 +6815,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         
         case WM_SIZE: {
-            g_winW = LOWORD(lParam);
-            g_winH = HIWORD(lParam);
-            // 更新窗口圆角区域
-            HRGN hrgn = CreateRoundedWindowRegion(hwnd, 12);
-            if (hrgn) {
-                SetWindowRgn(hwnd, hrgn, TRUE);
+            // 忽略最小化状态，此时宽高为0
+            if (wParam != SIZE_MINIMIZED) {
+                g_winW = LOWORD(lParam);
+                g_winH = HIWORD(lParam);
+                // 更新窗口圆角区域
+                HRGN hrgn = CreateRoundedWindowRegion(hwnd, 12);
+                if (hrgn) {
+                    SetWindowRgn(hwnd, hrgn, TRUE);
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         
@@ -6628,10 +6996,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         
         case WM_CLOSE:
-            // 退出前发送关闭OSC消息（无条件发送，不管OSC是否启用）
-            if (g_osc) {
-                g_osc->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
-                Sleep(200);  // 等待消息发送完成
+            // 退出前发送关闭OSC消息
+            if (g_osc && g_oscEnabled) {
+                SendSystemOSCMessage(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
             }
             // Save window position and size before closing
             {
@@ -6651,8 +7018,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // OSC接收器回调 - 切换暂停状态
             DWORD now = GetTickCount();
             
-            if (g_oscPaused) {
-                // 已经在暂停中 - 取消暂停，触发粒子爆发
+            // 判断是否真的在暂停中（时间还没到）
+            bool isReallyPaused = g_oscPaused && g_oscPauseEndTime > now;
+            
+            if (isReallyPaused || g_overlayHwnd) {
+                // 已经在暂停中或窗口存在 - 取消暂停，触发粒子爆发
                 MainDebugLog("[OSC Receiver] Canceling OSC pause");
                 
                 // 触发粒子爆炸（在进度条末端）
@@ -6660,14 +7030,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 g_oscPaused = false;
                 g_oscPauseEndTime = 0;
-                g_overlayClosing = true;  // 开始收缩动画
                 
-                // 覆盖层窗口会自己管理销毁
+                // 如果窗口正在关闭动画，立即销毁；否则开始关闭动画
+                if (g_overlayHwnd) {
+                    if (g_overlayClosing) {
+                        // 正在关闭，立即销毁
+                        DestroyWindow(g_overlayHwnd);
+                        g_overlayHwnd = nullptr;
+                        g_overlayActive = false;
+                        g_overlayClosing = false;
+                        g_overlayExpandAnim = 0.0f;
+                        g_particles.clear();
+                        g_sandParticles.clear();
+                    } else {
+                        // 开始关闭动画
+                        g_overlayClosing = true;
+                    }
+                }
             } else {
                 // 开始新的暂停
                 g_oscPaused = true;
                 g_oscPauseEndTime = now + OSC_PAUSE_DURATION * 1000;
+                g_overlayClosing = false;  // 确保不是关闭状态
                 MainDebugLog("[OSC Receiver] OSC paused for 30 seconds");
+                
+                // 发送暂停消息提示
+                if (g_osc && g_oscEnabled) {
+                    SendSystemOSCMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                }
                 
                 // 创建覆盖层窗口
                 CreateOverlayWindow();
@@ -7492,6 +7882,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_osc = new moekoe::OSCSender(WstringToUtf8(g_oscIp), g_oscPort);
     Connect();
     SetTimer(g_hwnd, 1, 16, nullptr);
+    
+    // 启动时发送测试消息，确保OSC连接正常
+    if (g_osc && g_oscEnabled) {
+        SendSystemOSCMessage(L"VRCLyricsDisplay\n\x5DF2\x542F\x52A8\x5E76\x8FDE\x63A5\x6210\x529F");
+        MainDebugLog("[Main] Startup test message sent");
+    }
     
     // Auto-check for updates on startup if enabled (in background thread)
     if (g_autoUpdate) {

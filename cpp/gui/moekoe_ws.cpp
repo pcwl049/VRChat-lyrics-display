@@ -844,6 +844,16 @@ std::vector<uint8_t> OSCSender::buildOSCMessage(const std::string& address, cons
 }
 
 bool OSCSender::sendChatbox(const std::string& message) {
+    // 全局发送间隔保护（最后一道防线）
+    static DWORD s_lastSendTime = 0;
+    const DWORD MIN_SEND_INTERVAL = 2000;  // 2秒最小间隔
+    
+    DWORD now = GetTickCount();
+    if (now - s_lastSendTime < MIN_SEND_INTERVAL) {
+        // 跳过这次发送，避免触发VRChat限流
+        return true;
+    }
+    
     std::string oscLogPath = GetDebugLogPath("moekoe_osc.log");
     
     if (sock_ == INVALID_SOCKET) {
@@ -880,6 +890,11 @@ bool OSCSender::sendChatbox(const std::string& message) {
     
     int result = sendto(sock_, (const char*)data.data(), (int)data.size(), 0,
                         (sockaddr*)&addr, sizeof(addr));
+    
+    // 更新最后发送时间（只在成功发送后更新）
+    if (result != SOCKET_ERROR) {
+        s_lastSendTime = now;
+    }
     
     // Debug output
     FILE* f = fopen(oscLogPath.c_str(), "a");
