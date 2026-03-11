@@ -3452,12 +3452,7 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     if (!info.hasData || info.title.empty()) {
         // 根据连接状态显示不同提示
         if (!g_isConnected) {
-            // 检查各平台连接状态，给出更具体的提示
-            if (g_currentPlatform == 1 && g_neteaseConnected == false) {
-                // 网易云模式但未连接 - 可能是调试端口未开启
-                return L"\x7F51\x6613\x4E91\x672A\x8FDE\x63A5\n\x8BF7\x786E\x8BA4\x5F00\x542F\x8C03\x8BD5\x7AEF\x53E3\n--remote-debugging-port=9222";  // 网易云未连接\n请确认开启调试端口
-            }
-            return L"\x97F3\x4E50\x5E73\x53F0\x672A\x8FDE\x63A5\n\x70B9\x51FB\x5DE6\x4FA7\"\x8FDE\x63A5\"\x6309\x94AE";  // 音乐平台未连接\n点击左侧"连接"按钮
+            return L"\x8FDE\x63A5\x5931\x8D25\n\x8BF7\x542F\x52A8\x97F3\x4E50\x5E73\x53F0";  // 连接失败\n请启动音乐平台
         } else {
             return L"\x7B49\x5F85\x97F3\x4E50\x64AD\x653E...";  // 等待音乐播放...
         }
@@ -6650,20 +6645,20 @@ void UpdateParticles() {
 void TriggerParticleBurst(int centerX, int centerY) {
     g_particleBurst = true;
     
-    // 主爆发粒子（大粒子，向外扩散）
-    for (int i = 0; i < 40; i++) {
+    // 主爆发粒子（大粒子，向外扩散）- 增加数量和范围
+    for (int i = 0; i < 60; i++) {
         Particle p;
         p.x = (float)centerX;
         p.y = (float)centerY;
         
-        // 放射状速度
+        // 放射状速度 - 扩大范围
         float angle = (rand() % 360) * 3.14159f / 180.0f;
-        float speed = 2.0f + (rand() % 120) / 10.0f;  // 2 to 14
+        float speed = 3.0f + (rand() % 200) / 10.0f;  // 3 to 23
         p.vx = cosf(angle) * speed;
-        p.vy = sinf(angle) * speed - 3.0f;  // 向上偏移
-        p.life = 1.2f + (rand() % 50) / 100.0f;  // 1.2 to 1.7
+        p.vy = sinf(angle) * speed - 4.0f;  // 向上偏移更多
+        p.life = 1.5f + (rand() % 80) / 100.0f;  // 1.5 to 2.3 (更长)
         p.maxLife = p.life;
-        p.size = rand() % 6 + 4;  // 4 to 9
+        p.size = rand() % 8 + 4;  // 4 to 11 (更大)
         
         // 蓝色系渐变颜色
         int colorType = rand() % 5;
@@ -6677,14 +6672,14 @@ void TriggerParticleBurst(int centerX, int centerY) {
         g_particles.push_back(p);
     }
     
-    // 小粒子火花（快速消失）
-    for (int i = 0; i < 30; i++) {
+    // 小粒子火花（快速消失）- 增加数量
+    for (int i = 0; i < 50; i++) {
         Particle p;
-        p.x = (float)centerX + (rand() % 20 - 10);
-        p.y = (float)centerY + (rand() % 20 - 10);
-        p.vx = ((rand() % 200) - 100) / 10.0f;  // -10 to 10
-        p.vy = ((rand() % 200) - 150) / 10.0f;  // -15 to 5 (向上)
-        p.life = 0.4f + (rand() % 30) / 100.0f;  // 0.4 to 0.7
+        p.x = (float)centerX + (rand() % 40 - 20);  // 更大范围
+        p.y = (float)centerY + (rand() % 40 - 20);
+        p.vx = ((rand() % 300) - 150) / 10.0f;  // -15 to 15
+        p.vy = ((rand() % 300) - 200) / 10.0f;  // -20 to 10 (向上)
+        p.life = 0.5f + (rand() % 50) / 100.0f;  // 0.5 to 1.0 (更长)
         p.maxLife = p.life;
         p.size = rand() % 3 + 1;  // 1 to 3
         
@@ -9191,10 +9186,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 g_lastTimerTick = now;
                 
-                // 定期发送 OSC 消息（仅性能模式）
+                // 定期发送 OSC 消息（性能模式和音乐模式都需要）
                 static DWORD lastOscTimerSend = 0;
-                if (g_performanceMode == 1 && !OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
-                    std::wstring oscMsg = BuildPerformanceOSCMessage(0);
+                if (!OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
+                    std::wstring oscMsg;
+                    if (g_performanceMode == 1) {
+                        oscMsg = BuildPerformanceOSCMessage(0);
+                    } else {
+                        // 音乐模式：使用当前歌曲信息或未连接提示
+                        moekoe::SongInfo info;
+                        info.hasData = !g_pendingTitle.empty();
+                        info.title = g_pendingTitle;
+                        info.artist = g_pendingArtist;
+                        info.duration = g_pendingDuration;
+                        info.currentTime = g_pendingCurrentTime;
+                        info.isPlaying = g_pendingIsPlaying;
+                        info.lyrics = g_pendingLyrics;
+                        oscMsg = FormatOSCMessage(info);
+                    }
                     if (OSCManager::instance().sendMessage(oscMsg)) {
                         g_lastOscMessage = oscMsg;
                         lastOscTimerSend = now;
