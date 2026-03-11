@@ -1488,29 +1488,31 @@ void UpdatePerfStats() {
 }
 
 // 发送系统消息（启动/暂停/关闭），确保不触发VRChat限流
-// 返回是否成功发送
+// 使用后台线程发送，避免阻塞主线程导致状态不一致
 bool SendSystemOSCMessage(const std::wstring& message) {
     if (!g_osc || !g_oscEnabled) {
         return false;
     }
     
-    DWORD now = GetTickCount();
-    DWORD timeSinceLastSend = now - g_lastOscSendTime;
+    // 在后台线程发送，避免阻塞主线程
+    std::thread([message]() {
+        DWORD now = GetTickCount();
+        DWORD timeSinceLastSend = now - g_lastOscSendTime;
+        
+        // 如果距离上次发送不足2秒，等待剩余时间
+        if (timeSinceLastSend < OSC_MIN_INTERVAL) {
+            Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
+        }
+        
+        // 发送消息
+        if (g_osc && g_oscEnabled) {
+            g_osc->sendChatbox(message);
+            g_lastOscSendTime = GetTickCount();
+            MainDebugLog("[SystemOSC] Sent system message");
+        }
+    }).detach();
     
-    // 如果距离上次发送不足2秒，等待剩余时间
-    if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-        Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
-    }
-    
-    // 发送消息
-    bool result = g_osc->sendChatbox(message);
-    
-    // 更新时间戳
-    g_lastOscSendTime = GetTickCount();
-    
-    MainDebugLog("[SystemOSC] Sent system message");
-    
-    return result;
+    return true;
 }
 
 std::string WstringToUtf8(const std::wstring& wstr) {
@@ -5150,7 +5152,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         
                         // 发送恢复消息提示
                         if (g_osc && g_oscEnabled) {
-                            SendSystemOSCMessage(L"OSC \x5DF2\x6062\x590D\x53D1\x9001");
+                            SendSystemOSCMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                         }
                         
                         // 触发粒子爆炸（在进度条末端）
@@ -5710,7 +5712,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     
                     // 发送恢复消息提示
                     if (g_osc && g_oscEnabled) {
-                        SendSystemOSCMessage(L"OSC \x5DF2\x6062\x590D\x53D1\x9001");
+                        SendSystemOSCMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                     }
                     
                     // 触发粒子爆炸（在进度条末端）
@@ -7037,7 +7039,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 // 发送恢复消息提示
                 if (g_osc && g_oscEnabled) {
-                    SendSystemOSCMessage(L"OSC \x5DF2\x6062\x590D\x53D1\x9001");
+                    SendSystemOSCMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                 }
                 
                 // 触发粒子爆炸（在进度条末端）
