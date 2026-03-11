@@ -5148,6 +5148,11 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         // Already paused or window exists - cancel pause with particle burst
                         MainDebugLog("[Hotkey] Canceling OSC pause (low-level hook)");
                         
+                        // 发送恢复消息提示
+                        if (g_osc && g_oscEnabled) {
+                            SendSystemOSCMessage(L"OSC \x5DF2\x6062\x590D\x53D1\x9001");
+                        }
+                        
                         // 触发粒子爆炸（在进度条末端）
                         TriggerParticleBurstAtProgressEnd();
                         
@@ -5702,6 +5707,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (isReallyPaused || g_overlayHwnd) {
                     // 已经在暂停中或窗口存在 - 取消暂停，触发粒子爆发
                     MainDebugLog("[Hotkey] Canceling OSC pause (WM_HOTKEY)");
+                    
+                    // 发送恢复消息提示
+                    if (g_osc && g_oscEnabled) {
+                        SendSystemOSCMessage(L"OSC \x5DF2\x6062\x590D\x53D1\x9001");
+                    }
                     
                     // 触发粒子爆炸（在进度条末端）
                     TriggerParticleBurstAtProgressEnd();
@@ -7024,6 +7034,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (isReallyPaused || g_overlayHwnd) {
                 // 已经在暂停中或窗口存在 - 取消暂停，触发粒子爆发
                 MainDebugLog("[OSC Receiver] Canceling OSC pause");
+                
+                // 发送恢复消息提示
+                if (g_osc && g_oscEnabled) {
+                    SendSystemOSCMessage(L"OSC \x5DF2\x6062\x590D\x53D1\x9001");
+                }
                 
                 // 触发粒子爆炸（在进度条末端）
                 TriggerParticleBurstAtProgressEnd();
