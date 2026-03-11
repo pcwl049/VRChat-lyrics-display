@@ -5023,14 +5023,13 @@ void OnPaint(HWND hwnd) {
                 bool cpuEditing = (g_editingField == EDIT_CPU_NAME);
                 COLORREF cpuBorder = cpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
                 
-                // CPU input box with alpha
+                // CPU input box - 只绘制边框，不填充背景
                 {
                     int boxAlpha = (int)(255 * expandAnim);
-                    SolidBrush boxBrush(Color(boxAlpha, GetRValue(COLOR_EDIT_BG), GetGValue(COLOR_EDIT_BG), GetBValue(COLOR_EDIT_BG)));
                     RectF rect((REAL)(infoX + 50), (REAL)inputY, (REAL)(infoW - 50), (REAL)inputH);
                     GraphicsPath path;
                     CreateRoundRectPath(&path, rect, 6);
-                    graphics.FillPath(&boxBrush, &path);
+                    // 不填充背景
                     
                     // Border
                     Pen borderPen(Color(boxAlpha, GetRValue(cpuBorder), GetGValue(cpuBorder), GetBValue(cpuBorder)));
@@ -5075,14 +5074,13 @@ void OnPaint(HWND hwnd) {
                 bool ramEditing = (g_editingField == EDIT_RAM_NAME);
                 COLORREF ramBorder = ramEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
                 
-                // RAM input box with alpha
+                // RAM input box - 只绘制边框，不填充背景
                 {
                     int boxAlpha = (int)(255 * expandAnim);
-                    SolidBrush boxBrush(Color(boxAlpha, GetRValue(COLOR_EDIT_BG), GetGValue(COLOR_EDIT_BG), GetBValue(COLOR_EDIT_BG)));
                     RectF rect((REAL)(infoX + 50), (REAL)inputY, (REAL)(infoW - 50), (REAL)inputH);
                     GraphicsPath path;
                     CreateRoundRectPath(&path, rect, 6);
-                    graphics.FillPath(&boxBrush, &path);
+                    // 不填充背景
                     
                     Pen borderPen(Color(boxAlpha, GetRValue(ramBorder), GetGValue(ramBorder), GetBValue(ramBorder)));
                     graphics.DrawPath(&borderPen, &path);
@@ -5126,14 +5124,13 @@ void OnPaint(HWND hwnd) {
                 bool gpuEditing = (g_editingField == EDIT_GPU_NAME);
                 COLORREF gpuBorder = gpuEditing ? COLOR_ACCENT : COLOR_BOX_BORDER;
                 
-                // GPU input box with alpha
+                // GPU input box - 只绘制边框，不填充背景
                 {
                     int boxAlpha = (int)(255 * expandAnim);
-                    SolidBrush boxBrush(Color(boxAlpha, GetRValue(COLOR_EDIT_BG), GetGValue(COLOR_EDIT_BG), GetBValue(COLOR_EDIT_BG)));
                     RectF rect((REAL)(infoX + 50), (REAL)inputY, (REAL)(infoW - 50), (REAL)inputH);
                     GraphicsPath path;
                     CreateRoundRectPath(&path, rect, 6);
-                    graphics.FillPath(&boxBrush, &path);
+                    // 不填充背景
                     
                     Pen borderPen(Color(boxAlpha, GetRValue(gpuBorder), GetGValue(gpuBorder), GetBValue(gpuBorder)));
                     graphics.DrawPath(&borderPen, &path);
@@ -7095,6 +7092,7 @@ LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (x >= w - padding - btnW * 2 - 12 && x <= w - padding - btnW - 12) {
                     SaveConfig(g_configPath);
                     g_cachedPreviewMsg.clear();  // 清除缓存，让性能消息使用新顺序
+                    g_lastOscMessage.clear();    // 清除上次发送的消息，强制下次发送
                     g_displayConfigChanged = true;  // 标记配置改变
                     InvalidateRect(g_hwnd, nullptr, FALSE);  // 刷新主窗口预览
                     DestroyWindow(hwnd);
