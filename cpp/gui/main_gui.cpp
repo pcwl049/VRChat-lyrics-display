@@ -3580,20 +3580,11 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
                 
                 perfLine += modName + L":";
                 
-                // GPU: 直接显示占用率和显存（不依赖 subModules 配置）
+                // GPU: 只显示占用率（不依赖 subModules 配置）
                 if (mod.key == L"gpu") {
-                    bool hasGpuData = false;
                     if (g_latestPerfData.gpuUsageValid) {
                         wchar_t buf[16];
                         swprintf_s(buf, L"%d%%", g_latestPerfData.gpuUsage);
-                        perfLine += buf;
-                        hasGpuData = true;
-                    }
-                    if (g_gpuMemUsed > 0) {
-                        if (hasGpuData) perfLine += L" ";
-                        double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
-                        wchar_t buf[16];
-                        swprintf_s(buf, L"%.1fG", vramUsedGB);
                         perfLine += buf;
                     }
                     continue;  // GPU 已处理，跳过 subModules 循环
@@ -3780,13 +3771,8 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
             // 性能模式：一次性发送所有硬件信息
             oscMsg = BuildPerformanceOSCMessage(0);
         } else {
-            // 音乐模式
-            if (info.hasData) {
-                oscMsg = FormatOSCMessage(info);
-            } else {
-                // 无音乐时显示等待消息
-                oscMsg = L"🎵 等待音乐中...\n\n暂无播放信息";
-            }
+            // 音乐模式：FormatOSCMessage 会处理连接状态和无音乐的情况
+            oscMsg = FormatOSCMessage(info);
         }
         
         // 强制发送如果配置改变
@@ -6288,9 +6274,11 @@ void OnPaint(HWND hwnd) {
 
 void ApplySettings() {
     // IP and Port are now edited via config file
-    // Just recreate OSC sender with current values
-    if (g_osc) delete g_osc;
-    g_osc = new moekoe::OSCSender(WstringToUtf8(g_oscIp), g_oscPort);
+    // 同步更新 OSCManager 和 g_osc
+    OSCManager::instance().connect(WstringToUtf8(g_oscIp), g_oscPort);
+    g_osc = OSCManager::instance().getSender();  // 兼容层
+    OSCManager::instance().clearLastMessage();   // 清除缓存
+    g_lastOscMessage.clear();
     SaveConfig(g_configPath);
 }
 
@@ -10358,7 +10346,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     
     if (g_moeKoeClient) delete g_moeKoeClient;
     if (g_neteaseClient) delete g_neteaseClient;
-    if (g_osc) delete g_osc;
+    // g_osc 由 OSCManager 管理，不需要手动删除
+    OSCManager::instance().disconnect();
     DeleteCriticalSection(&g_cs);
     if (g_mutex) {
         ReleaseMutex(g_mutex);
