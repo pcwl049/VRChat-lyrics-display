@@ -6751,7 +6751,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             if (IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH)) {
                 // Auto Detect button clicked
-                ShowInfoDialog(L"\x63D0\x793A", L"\x81EA\x52A8\x68C0\x6D4B\x529F\x80FD\x5F85\x5B9E\x73B0");
+                g_cpuDisplayName = DetectCpuName();
+                g_gpuDisplayName = DetectGpuName();
+                SaveConfig(g_configPath);
+                ShowInfoDialog(L"\x81EA\x52A8\x68C0\x6D4B", 
+                    (L"CPU: " + g_cpuDisplayName + L"\nGPU: " + g_gpuDisplayName).c_str());
                 return 0;
             }
 
