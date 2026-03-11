@@ -5775,8 +5775,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == 2) {
                 DWORD now = GetTickCount();
                 
-                // 更新粒子系统
+                // 更新粒子系统（关闭动画期间加速粒子消失）
                 UpdateParticles();
+                if (g_overlayClosing) {
+                    // 关闭期间加速粒子消失
+                    UpdateParticles();
+                    UpdateParticles();
+                }
                 
                 // 更新展开/收缩动画
                 if (!g_overlayClosing && g_overlayExpandAnim < 1.0f) {
@@ -5784,8 +5789,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     g_overlayExpandAnim += 0.08f;  // 动画速度
                     if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
                 } else if (g_overlayClosing && g_overlayExpandAnim > 0.0f) {
-                    // 收缩：从两边向中间收缩
-                    g_overlayExpandAnim -= 0.08f;
+                    // 收缩：从两边向中间收缩（更快）
+                    g_overlayExpandAnim -= 0.12f;
                     if (g_overlayExpandAnim < 0.0f) g_overlayExpandAnim = 0.0f;
                 }
                 
@@ -5797,8 +5802,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     MainDebugLog("[Overlay] OSC pause ended naturally, closing animation");
                 }
                 
-                // 检查是否应该销毁覆盖层
-                if (g_overlayClosing && g_overlayExpandAnim <= 0.0f && g_particles.empty() && g_sandParticles.empty()) {
+                // 检查是否应该销毁覆盖层（收缩完成后立即销毁）
+                if (g_overlayClosing && g_overlayExpandAnim <= 0.0f) {
                     KillTimer(hwnd, 2);
                     DestroyWindow(hwnd);
                     return 0;
