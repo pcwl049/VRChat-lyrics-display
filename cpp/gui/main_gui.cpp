@@ -1487,22 +1487,41 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     
     LOG_INFO("Qishui Music", "Search path: %s", searchPath.c_str());
     
-    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) return lyrics;
+    // 使用简单的 WinHTTP 配置
+    HINTERNET hSession = WinHttpOpen(L"VRCLyricsDisplay", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) {
+        LOG_INFO("Qishui Music", "WinHttpOpen failed: %d", GetLastError());
+        return lyrics;
+    }
     
     // 设置超时
-    DWORD timeout = 10000;  // 10秒
+    DWORD timeout = 15000;  // 15秒
     WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
     WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+    
+    // 忽略 SSL 证书错误（开发用）
+    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID | SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
     
     // 使用 HTTPS
     HINTERNET hConnect = WinHttpConnect(hSession, L"api.qishui.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
+    if (!hConnect) {
+        LOG_INFO("Qishui Music", "WinHttpConnect failed: %d", GetLastError());
+        WinHttpCloseHandle(hSession);
+        return lyrics;
+    }
     
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", Utf8ToWstring(searchPath).c_str(), 
-                                             NULL, L"https://www.douyin.com", WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
+                                             NULL, NULL, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        LOG_INFO("Qishui Music", "WinHttpOpenRequest failed: %d", GetLastError());
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return lyrics;
+    }
+    
+    // 也设置请求级别的 SSL 忽略
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
     
     // 添加必要的 headers
     std::wstring headers = L"Accept: application/json, text/plain, */*\r\n";
