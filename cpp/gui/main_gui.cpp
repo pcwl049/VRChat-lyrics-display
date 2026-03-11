@@ -937,6 +937,10 @@ std::vector<PlatformInfo> g_platforms = {
 #define g_neteaseLastPlayTime g_platforms[1].lastPlayTime
 #define g_smtcLastPlayTime g_platforms[2].lastPlayTime
 
+// 网易云进程检测
+bool g_neteaseRunningNoDebug = false;  // 网易云在运行但调试端口未开启
+bool IsNeteaseRunning();  // 前向声明
+
 const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91", L"QQ音乐" };
 int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
 int g_activePlatform = -1;   // Currently active platform (playing music), -1 = none
@@ -3452,6 +3456,10 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     if (!info.hasData || info.title.empty()) {
         // 根据连接状态显示不同提示
         if (!g_isConnected) {
+            // 检查网易云是否在运行但调试端口未开启
+            if (g_neteaseRunningNoDebug) {
+                return L"\x7F51\x6613\x4E91\x8FD0\x884C\x4E2D\n\x8BF7\x5F00\x542F\x8C03\x8BD5\x6A21\x5F0F";  // 网易云运行中\n请开启调试模式
+            }
             return L"\x8FDE\x63A5\x5931\x8D25\n\x8BF7\x542F\x52A8\x97F3\x4E50\x5E73\x53F0";  // 连接失败\n请启动音乐平台
         } else {
             return L"\x7B49\x5F85\x97F3\x4E50\x64AD\x653E...";  // 等待音乐播放...
@@ -6345,10 +6353,16 @@ void Connect() {
         if (neteaseClient->connect()) {
             g_neteaseClient = neteaseClient;
             g_neteaseConnected = true;
+            g_neteaseRunningNoDebug = false;  // 连接成功，清除标记
             g_needsRedraw = true;
             LOG_INFO("Connect", "Netease connected!");
         } else {
             LOG_INFO("Connect", "Netease connection failed");
+            // 检测网易云是否在运行但调试端口未开启
+            if (IsNeteaseRunning()) {
+                g_neteaseRunningNoDebug = true;
+                LOG_INFO("Connect", "Netease is running but debug port not enabled");
+            }
             delete neteaseClient;
         }
         
@@ -6366,11 +6380,31 @@ void Connect() {
             else if (g_neteaseConnected) g_activePlatform = 1;
             g_pendingTitle.clear();
             g_pendingArtist.clear();
+            g_neteaseRunningNoDebug = false;  // 连接成功，清除标记
         }
         
         if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
         return 0;
     }, nullptr, 0, nullptr);
+}
+
+// 检测网易云进程是否在运行
+bool IsNeteaseRunning() {
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return false;
+    
+    bool found = false;
+    PROCESSENTRY32W pe = {sizeof(pe)};
+    if (Process32FirstW(hSnapshot, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"cloudmusic.exe") == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(hSnapshot, &pe));
+    }
+    CloseHandle(hSnapshot);
+    return found;
 }
 
 bool IsInRect(int x, int y, int rx, int ry, int rw, int rh) {
