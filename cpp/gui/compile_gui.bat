@@ -13,20 +13,20 @@ if %errorlevel% neq 0 (
 )
 
 cd /d "%~dp0"
-if not exist ..\bin mkdir ..\bin
 
 echo [Compiling...]
 cl /std:c++20 /EHsc /W3 /O2 /MD /utf-8 /await ^
     main_gui.cpp glass_window.cpp moekoe_ws.cpp netease_ws.cpp smtc_client.cpp ^
     runtimeobject.lib windowsapp.lib dwmapi.lib ole32.lib user32.lib gdi32.lib gdiplus.lib shell32.lib ws2_32.lib msimg32.lib winhttp.lib dxgi.lib ^
-    /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup ^
-    /Fe:..\bin\VRCLyricsDisplay.exe
+    /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup
 
 if %errorlevel% equ 0 (
+    if not exist ..\..\bin mkdir ..\..\bin
+    copy /y main_gui.exe ..\..\bin\VRCLyricsDisplay.exe >nul
     echo.
     echo ========================================
     echo   Build Success!
-    echo   Output: ..\bin\VRCLyricsDisplay.exe
+    echo   Output: bin\VRCLyricsDisplay.exe
     echo ========================================
     echo.
     echo Make sure MoeKoeMusic or Netease Music is running

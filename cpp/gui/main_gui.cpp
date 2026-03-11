@@ -11,6 +11,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 #include <winhttp.h>
 #include <wincrypt.h>
 #include <dwmapi.h>
@@ -320,6 +321,7 @@ std::wstring BuildProgressBar(double progress, int bars);
 std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
 void CreateOverlayWindow();    // OSC暂停覆盖层
 void DestroyOverlayWindow();   // 销毁OSC暂停覆盖层
+void CreateDisplayOrderDialog();  // 显示顺序配置弹窗
 void MainDebugLog(const char* msg, int level);  // 调试日志
 
 // 统一性能监控线程（合并原4个线程）
@@ -440,6 +442,110 @@ int g_performanceMode = 0;  // 0=Music info, 1=System performance
 std::wstring g_cpuDisplayName = L"CPU";
 std::wstring g_ramDisplayName = L"RAM";
 std::wstring g_gpuDisplayName = L"GPU";
+
+// Display Modules Configuration
+enum SubModuleType {
+    SUBMOD_USAGE,      // 使用率/使用量
+    SUBMOD_TEMP,       // 温度
+    SUBMOD_VRAM        // 显存占用 (GPU only)
+};
+
+struct SubModuleInfo {
+    SubModuleType type;
+    std::wstring name;         // 显示名称
+    bool available;            // 是否可用（检测到传感器）
+    bool enabled;              // 是否启用
+};
+
+struct DisplayModule {
+    std::wstring key;          // cpu, gpu, ram
+    std::wstring name;         // 显示名称（从系统信息同步）
+    bool enabled;              // 是否启用
+    bool expanded;             // 是否展开（子菜单）
+    std::vector<SubModuleInfo> subModules;
+    int enabledCount;          // 已启用的子项数量
+};
+
+// 全局显示模块配置
+std::vector<DisplayModule> g_displayModules;
+
+// 显示顺序配置窗口
+HWND g_displayOrderHwnd = nullptr;
+bool g_displayOrderVisible = false;
+int g_draggingModuleIdx = -1;      // 正在拖拽的模块索引
+int g_dragOverIdx = -1;            // 拖拽悬停位置的索引
+bool g_isDraggingModule = false;   // 是否正在拖拽
+int g_displayOrderModuleHover = -1; // 鼠标悬停的模块索引
+int g_displayOrderSubModHover = -1; // 鼠标悬停的子项索引
+// 按钮悬停状态
+bool g_displayOrderCloseBtnHover = false;
+bool g_displayOrderCheckboxHover = false;
+bool g_displayOrderArrowHover = false;
+bool g_displayOrderResetBtnHover = false;
+bool g_displayOrderOkBtnHover = false;
+bool g_displayOrderCancelBtnHover = false;
+bool g_displayOrderIsDraggingWindow = false;
+POINT g_displayOrderDragOffset = {0, 0};
+Animation g_displayOrderFadeAnim;
+Animation g_displayOrderScaleAnim;
+std::vector<Animation> g_moduleExpandAnims;  // 每个模块的展开动画
+Animation g_moduleDragAnim;        // 拖拽挤压动画
+
+// 初始化默认显示模块配置
+void InitDefaultDisplayModules() {
+    g_displayModules.clear();
+    
+    // CPU 模块
+    DisplayModule cpuMod;
+    cpuMod.key = L"cpu";
+    cpuMod.name = g_cpuDisplayName;
+    cpuMod.enabled = true;
+    cpuMod.expanded = false;
+    cpuMod.enabledCount = 1;
+    cpuMod.subModules = {
+        {SUBMOD_USAGE, L"使用率", true, true},    // CPU使用率始终可用
+        {SUBMOD_TEMP, L"温度", false, false}      // 温度需要检测
+    };
+    g_displayModules.push_back(cpuMod);
+    
+    // GPU 模块
+    DisplayModule gpuMod;
+    gpuMod.key = L"gpu";
+    gpuMod.name = g_gpuDisplayName;
+    gpuMod.enabled = true;
+    gpuMod.expanded = false;
+    gpuMod.enabledCount = 2;
+    gpuMod.subModules = {
+        {SUBMOD_USAGE, L"使用率", false, true},   // 需要NVML/ADL
+        {SUBMOD_VRAM, L"显存占用", true, true},   // DXGI始终可用
+        {SUBMOD_TEMP, L"温度", false, false}      // 需要NVML
+    };
+    g_displayModules.push_back(gpuMod);
+    
+    // RAM 模块
+    DisplayModule ramMod;
+    ramMod.key = L"ram";
+    ramMod.name = g_ramDisplayName;
+    ramMod.enabled = true;
+    ramMod.expanded = false;
+    ramMod.enabledCount = 1;
+    ramMod.subModules = {
+        {SUBMOD_USAGE, L"使用量", true, true},    // RAM使用量始终可用
+        {SUBMOD_TEMP, L"温度", false, false}      // 温度需要检测
+    };
+    g_displayModules.push_back(ramMod);
+    
+    // 初始化展开动画
+    g_moduleExpandAnims.resize(g_displayModules.size());
+    for (auto& anim : g_moduleExpandAnims) {
+        anim.value = 0.0;
+        anim.target = 0.0;
+        anim.speed = 0.12;
+    }
+}
+
+// 前向声明 - UpdateDisplayModuleAvailability 定义在 g_latestPerfData 之后
+void UpdateDisplayModuleAvailability();
 
 // Platform selection dropdown menu
 bool g_platformMenuOpen = false;
@@ -1262,6 +1368,35 @@ struct PerfData {
 PerfData g_latestPerfData;
 std::mutex g_perfDataMutex;
 
+// 更新模块可用性（根据实际检测结果）
+void UpdateDisplayModuleAvailability() {
+    // CPU温度
+    if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
+        for (auto& mod : g_displayModules) {
+            if (mod.key == L"cpu") {
+                for (auto& sub : mod.subModules) {
+                    if (sub.type == SUBMOD_TEMP) {
+                        sub.available = true;
+                    }
+                }
+            }
+        }
+    }
+    
+    // GPU使用率和温度
+    if (g_latestPerfData.gpuUsageValid) {
+        for (auto& mod : g_displayModules) {
+            if (mod.key == L"gpu") {
+                for (auto& sub : mod.subModules) {
+                    if (sub.type == SUBMOD_USAGE) {
+                        sub.available = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // 线程同步
 std::atomic<bool> g_threadRunning[4] = {false, false, false, false};
 HANDLE g_workerThreads[4] = {nullptr, nullptr, nullptr, nullptr};
@@ -1791,52 +1926,83 @@ std::wstring DetectCpuName() {
         RegCloseKey(hKey);
     }
     
-    // 清理名称：移除常见前缀
-    std::wstring prefixes[] = {
-        L"Intel(R) ", L"Intel ", L"AMD ", L"AMD Ryzen ", 
-        L"CPU ", L"Processor ", L"(R) ", L"(TM) "
-    };
-    for (const auto& prefix : prefixes) {
-        if (cpuName.find(prefix) == 0) {
-            cpuName = cpuName.substr(prefix.length());
-        }
-    }
+    // 提取核心型号
+    // Intel格式: Intel(R) Core(TM) i5-12600KF CPU @ 3.70GHz
+    // AMD格式: AMD Ryzen 7 5800X 8-Core Processor
     
-    // 提取核心型号（如 i5-12600KF -> i5-12600KF）
-    // 查找第一个数字作为起始点
-    size_t firstDigit = cpuName.find_first_of(L"0123456789");
-    if (firstDigit != std::wstring::npos && firstDigit > 0) {
-        // 检查数字前面是否有 i3/i5/i7/i9 或 R3/R5/R7/R9
-        std::wstring prefix = cpuName.substr(0, firstDigit);
-        if (prefix.find(L"i") != std::wstring::npos || 
-            prefix.find(L"R") != std::wstring::npos ||
-            prefix.find(L"r") != std::wstring::npos) {
-            // 保留 i5-12600KF 格式
-        } else {
-            // 从数字开始截取
-            cpuName = cpuName.substr(firstDigit);
-        }
-    }
-    
-    // 移除空格
     std::wstring result;
-    for (wchar_t c : cpuName) {
-        if (c != L' ') result += c;
+    
+    // 查找 Intel i3/i5/i7/i9 模式
+    size_t intelPos = cpuName.find(L"i3");
+    if (intelPos == std::wstring::npos) intelPos = cpuName.find(L"i5");
+    if (intelPos == std::wstring::npos) intelPos = cpuName.find(L"i7");
+    if (intelPos == std::wstring::npos) intelPos = cpuName.find(L"i9");
+    
+    if (intelPos != std::wstring::npos) {
+        // 从 i3/i5/i7/i9 开始提取，到空格或结尾
+        size_t endPos = cpuName.find(L' ', intelPos);
+        if (endPos == std::wstring::npos) endPos = cpuName.length();
+        result = cpuName.substr(intelPos, endPos - intelPos);
     }
     
-    // 限制长度：最多10个字符（保留完整的型号后缀如KF）
-    // 但如果太长，优先保留型号数字和后缀
-    if (result.length() > 10) {
-        // 尝试保留后缀（K/KF/F/X等）
-        size_t lastDash = result.rfind(L'-');
-        if (lastDash != std::wstring::npos && lastDash > 3) {
-            // 从型号数字开始截取，保留后缀
-            // 如 i7-13700KF -> i7-13700KF (10字符)
-            // 如 i5-12600KF -> i5-12600KF (10字符)
-            result = result.substr(0, 10);
-        } else {
-            result = result.substr(0, 10);
+    // 如果没找到Intel模式，查找AMD Ryzen模式
+    if (result.empty()) {
+        size_t amdPos = cpuName.find(L"Ryzen");
+        if (amdPos != std::wstring::npos) {
+            // Ryzen 后面跟着 R3/R5/R7/R9 或数字
+            size_t start = amdPos;
+            size_t endPos = cpuName.find(L"-Core", start);
+            if (endPos == std::wstring::npos) {
+                // 找到型号后第一个空格后第二个空格（如 "Ryzen 7 5800X"）
+                size_t space1 = cpuName.find(L' ', start);
+                if (space1 != std::wstring::npos) {
+                    size_t space2 = cpuName.find(L' ', space1 + 1);
+                    if (space2 != std::wstring::npos) {
+                        size_t space3 = cpuName.find(L' ', space2 + 1);
+                        if (space3 != std::wstring::npos) {
+                            endPos = space3;
+                        } else {
+                            endPos = cpuName.length();
+                        }
+                    }
+                }
+            }
+            if (endPos != std::wstring::npos && endPos > start) {
+                result = cpuName.substr(start, endPos - start);
+                // 移除空格
+                std::wstring tmp;
+                for (wchar_t c : result) {
+                    if (c != L' ') tmp += c;
+                }
+                result = tmp;
+            }
         }
+    }
+    
+    // 如果都没找到，尝试简单提取
+    if (result.empty()) {
+        // 移除常见前缀和空格
+        std::wstring prefixes[] = {
+            L"Intel(R) ", L"Intel ", L"AMD ", L"CPU ", L"Processor ", L"(R) ", L"(TM) "
+        };
+        for (const auto& prefix : prefixes) {
+            size_t pos = cpuName.find(prefix);
+            if (pos != std::wstring::npos) {
+                cpuName.erase(pos, prefix.length());
+            }
+        }
+        // 取第一个词
+        size_t spacePos = cpuName.find(L' ');
+        if (spacePos != std::wstring::npos) {
+            result = cpuName.substr(0, spacePos);
+        } else {
+            result = cpuName;
+        }
+    }
+    
+    // 限制长度：最多10个字符
+    if (result.length() > 10) {
+        result = result.substr(0, 10);
     }
     
     return result.empty() ? L"CPU" : result;
@@ -1864,39 +2030,106 @@ std::wstring DetectGpuName() {
         pFactory->Release();
     }
     
-    // 清理名称：移除常见前缀和后缀
-    std::wstring prefixes[] = {
-        L"NVIDIA ", L"AMD ", L"ATI ", L"Intel(R) ", L"Intel "
-    };
-    for (const auto& prefix : prefixes) {
-        if (gpuName.find(prefix) == 0) {
-            gpuName = gpuName.substr(prefix.length());
-        }
-    }
+    // 提取核心型号
+    // NVIDIA格式: NVIDIA GeForce RTX 4070 SUPER
+    // AMD格式: AMD Radeon RX 7800 XT, AMD Radeon RX Vega 56, AMD Radeon VII
+    // Intel格式: Intel(R) Arc(R) A770 Graphics
     
-    // 移除常见后缀
-    std::wstring suffixes[] = {
-        L" with DirectX 11.0", L" with DirectX 12.0", L" with DirectX 12.1"
-    };
-    for (const auto& suffix : suffixes) {
-        size_t pos = gpuName.find(suffix);
-        if (pos != std::wstring::npos) {
-            gpuName = gpuName.substr(0, pos);
-        }
-    }
-    
-    // 提取型号（RTX 4070 SUPER -> RTX4070S）
-    // 简化：移除空格，截断长名称
     std::wstring result;
-    bool lastWasAlpha = false;
-    for (wchar_t c : gpuName) {
-        if (c != L' ') {
-            // 如果是字母且上一个也是字母，直接添加
-            // 如果是数字，直接添加
-            if (iswalnum(c)) {
-                result += c;
-                lastWasAlpha = iswalpha(c) != 0;
+    
+    // 查找 NVIDIA RTX/GTX 模式
+    size_t rtxPos = gpuName.find(L"RTX");
+    size_t gtxPos = gpuName.find(L"GTX");
+    
+    if (rtxPos != std::wstring::npos) {
+        // 从 RTX 开始提取，取到结尾（移除空格）
+        std::wstring sub = gpuName.substr(rtxPos);
+        for (wchar_t c : sub) {
+            if (c != L' ') result += c;
+        }
+    } else if (gtxPos != std::wstring::npos) {
+        // 从 GTX 开始提取
+        std::wstring sub = gpuName.substr(gtxPos);
+        for (wchar_t c : sub) {
+            if (c != L' ') result += c;
+        }
+    }
+    
+    // 查找 AMD 模式（RX系列、Vega、Radeon VII等）
+    if (result.empty()) {
+        // AMD RX 系列 (RX 7800 XT, RX 6800等)
+        size_t rxPos = gpuName.find(L"RX ");
+        if (rxPos != std::wstring::npos) {
+            std::wstring sub = gpuName.substr(rxPos);
+            for (wchar_t c : sub) {
+                if (c != L' ') result += c;
             }
+        }
+    }
+    
+    if (result.empty()) {
+        // AMD Vega 系列 (Radeon RX Vega 56/64, Radeon Vega)
+        size_t vegaPos = gpuName.find(L"Vega");
+        if (vegaPos != std::wstring::npos) {
+            std::wstring sub = gpuName.substr(vegaPos);
+            for (wchar_t c : sub) {
+                if (c != L' ') result += c;
+            }
+        }
+    }
+    
+    if (result.empty()) {
+        // AMD Radeon VII
+        size_t viiPos = gpuName.find(L"Radeon VII");
+        if (viiPos != std::wstring::npos) {
+            result = L"RadeonVII";
+        }
+    }
+    
+    if (result.empty()) {
+        // AMD R7/R9 系列 (R7 370, R9 390等)
+        size_t r7Pos = gpuName.find(L"R7 ");
+        size_t r9Pos = gpuName.find(L"R9 ");
+        if (r7Pos != std::wstring::npos) {
+            std::wstring sub = gpuName.substr(r7Pos);
+            for (wchar_t c : sub) {
+                if (c != L' ') result += c;
+            }
+        } else if (r9Pos != std::wstring::npos) {
+            std::wstring sub = gpuName.substr(r9Pos);
+            for (wchar_t c : sub) {
+                if (c != L' ') result += c;
+            }
+        }
+    }
+    
+    // 查找 Intel Arc 模式
+    if (result.empty()) {
+        size_t arcPos = gpuName.find(L"Arc");
+        if (arcPos != std::wstring::npos) {
+            // 从 Arc 开始提取
+            std::wstring sub = gpuName.substr(arcPos);
+            for (wchar_t c : sub) {
+                if (c != L' ') result += c;
+            }
+        }
+    }
+    
+    // 如果都没找到，简单移除前缀和空格
+    if (result.empty()) {
+        std::wstring prefixes[] = {
+            L"NVIDIA ", L"GeForce ", L"AMD ", L"Radeon ", L"ATI ", 
+            L"Intel(R) ", L"Intel ", L"Arc(R) "
+        };
+        for (const auto& prefix : prefixes) {
+            size_t pos = gpuName.find(prefix);
+            if (pos != std::wstring::npos) {
+                gpuName.erase(pos, prefix.length());
+            }
+        }
+        // 取型号部分（通常是第一个词或第一个词+数字）
+        for (wchar_t c : gpuName) {
+            if (c != L' ') result += c;
         }
     }
     
@@ -2031,6 +2264,145 @@ void LoadConfig(const wchar_t* path) {
     if (!cpuName.empty()) g_cpuDisplayName = cpuName;
     std::wstring gpuName = getStr("gpu_name");
     if (!gpuName.empty()) g_gpuDisplayName = gpuName;
+    std::wstring ramName = getStr("ram_name");
+    if (!ramName.empty()) g_ramDisplayName = ramName;
+    
+    // Initialize display modules with default config
+    InitDefaultDisplayModules();
+    
+    // Load display_modules configuration from JSON
+    {
+        size_t dmPos = content.find("\"display_modules\"");
+        if (dmPos != std::string::npos) {
+            // 找到 display_modules 数组（新格式）
+            size_t arrStart = content.find('[', dmPos);
+            if (arrStart != std::string::npos) {
+                // 找到匹配的数组结束括号
+                int bracketCount = 1;
+                size_t arrEnd = arrStart + 1;
+                while (arrEnd < content.size() && bracketCount > 0) {
+                    if (content[arrEnd] == '[') bracketCount++;
+                    else if (content[arrEnd] == ']') bracketCount--;
+                    arrEnd++;
+                }
+                
+                std::string arrContent = content.substr(arrStart, arrEnd - arrStart);
+                
+                // 解析每个模块对象
+                std::vector<DisplayModule> loadedModules;
+                size_t searchPos = 0;
+                
+                while ((searchPos = arrContent.find("{", searchPos)) != std::string::npos) {
+                    // 找到模块对象的结束
+                    int braceCount = 1;
+                    size_t objEnd = searchPos + 1;
+                    while (objEnd < arrContent.size() && braceCount > 0) {
+                        if (arrContent[objEnd] == '{') braceCount++;
+                        else if (arrContent[objEnd] == '}') braceCount--;
+                        objEnd++;
+                    }
+                    
+                    std::string modContent = arrContent.substr(searchPos, objEnd - searchPos);
+                    
+                    // 解析 key
+                    DisplayModule mod;
+                    size_t keyPos = modContent.find("\"key\"");
+                    if (keyPos != std::string::npos) {
+                        size_t keyStart = modContent.find('"', keyPos + 6);
+                        if (keyStart != std::string::npos) {
+                            size_t keyEnd = modContent.find('"', keyStart + 1);
+                            if (keyEnd != std::string::npos) {
+                                std::string keyVal = modContent.substr(keyStart + 1, keyEnd - keyStart - 1);
+                                int wlen = MultiByteToWideChar(CP_UTF8, 0, keyVal.c_str(), -1, nullptr, 0);
+                                if (wlen > 0) {
+                                    std::wstring wkey(wlen - 1, 0);
+                                    MultiByteToWideChar(CP_UTF8, 0, keyVal.c_str(), -1, &wkey[0], wlen);
+                                    mod.key = wkey;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 解析 enabled
+                    size_t enabledPos = modContent.find("\"enabled\"");
+                    if (enabledPos != std::string::npos) {
+                        mod.enabled = modContent.find("true", enabledPos) < modContent.find("false", enabledPos);
+                    }
+                    
+                    // 解析 sub_modules 数组
+                    size_t subArrPos = modContent.find("\"sub_modules\"");
+                    if (subArrPos != std::string::npos) {
+                        size_t subArrStart = modContent.find('[', subArrPos);
+                        if (subArrStart != std::string::npos) {
+                            int subBracketCount = 1;
+                            size_t subArrEnd = subArrStart + 1;
+                            while (subArrEnd < modContent.size() && subBracketCount > 0) {
+                                if (modContent[subArrEnd] == '[') subBracketCount++;
+                                else if (modContent[subArrEnd] == ']') subBracketCount--;
+                                subArrEnd++;
+                            }
+                            
+                            std::string subArr = modContent.substr(subArrStart, subArrEnd - subArrStart);
+                            
+                            size_t subSearchPos = 0;
+                            while ((subSearchPos = subArr.find("{", subSearchPos)) != std::string::npos) {
+                                size_t subObjEnd = subArr.find("}", subSearchPos);
+                                if (subObjEnd == std::string::npos) break;
+                                
+                                std::string subObj = subArr.substr(subSearchPos, subObjEnd - subSearchPos + 1);
+                                
+                                SubModuleInfo subMod;
+                                size_t typePos = subObj.find("\"type\"");
+                                if (typePos != std::string::npos) {
+                                    size_t typeStart = subObj.find('"', typePos + 6);
+                                    if (typeStart != std::string::npos) {
+                                        size_t typeEnd = subObj.find('"', typeStart + 1);
+                                        if (typeEnd != std::string::npos) {
+                                            std::string typeVal = subObj.substr(typeStart + 1, typeEnd - typeStart - 1);
+                                            if (typeVal == "usage") subMod.type = SUBMOD_USAGE;
+                                            else if (typeVal == "temp") subMod.type = SUBMOD_TEMP;
+                                            else if (typeVal == "vram") subMod.type = SUBMOD_VRAM;
+                                        }
+                                    }
+                                }
+                                
+                                size_t subEnabledPos = subObj.find("\"enabled\"");
+                                if (subEnabledPos != std::string::npos) {
+                                    subMod.enabled = subObj.find("true", subEnabledPos) < subObj.find("false", subEnabledPos);
+                                }
+                                
+                                switch (subMod.type) {
+                                    case SUBMOD_USAGE: subMod.name = L"使用率"; break;
+                                    case SUBMOD_TEMP: subMod.name = L"温度"; break;
+                                    case SUBMOD_VRAM: subMod.name = L"显存"; break;
+                                }
+                                
+                                mod.subModules.push_back(subMod);
+                                subSearchPos = subObjEnd + 1;
+                            }
+                        }
+                    }
+                    
+                    if (!mod.key.empty()) {
+                        loadedModules.push_back(mod);
+                    }
+                    
+                    searchPos = objEnd + 1;
+                }
+                
+                if (!loadedModules.empty()) {
+                    g_displayModules = loadedModules;
+                }
+            }
+        }
+    }
+    
+    // 同步名称到模块
+    for (auto& mod : g_displayModules) {
+        if (mod.key == L"cpu") mod.name = g_cpuDisplayName;
+        else if (mod.key == L"gpu") mod.name = g_gpuDisplayName;
+        else if (mod.key == L"ram") mod.name = g_ramDisplayName;
+    }
     
     // Initialize system info expand animation based on performance mode
     if (g_performanceMode == 1) {
@@ -2053,8 +2425,33 @@ void SaveConfig(const wchar_t* path) {
             g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
             g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
             "true", g_autoStart ? "true" : "false", g_runAsAdmin ? "true" : "false", g_performanceMode);  // g_darkMode固定为true
-    fprintf(f, "  \"cpu_name\": \"%ls\",\n  \"gpu_name\": \"%ls\",\n",
-            g_cpuDisplayName.c_str(), g_gpuDisplayName.c_str());
+    fprintf(f, "  \"cpu_name\": \"%ls\",\n  \"gpu_name\": \"%ls\",\n  \"ram_name\": \"%ls\",\n",
+            g_cpuDisplayName.c_str(), g_gpuDisplayName.c_str(), g_ramDisplayName.c_str());
+    
+    // Save display_modules
+    fprintf(f, "  \"display_modules\": [\n");
+    for (size_t i = 0; i < g_displayModules.size(); i++) {
+        const auto& mod = g_displayModules[i];
+        fprintf(f, "    {\n");
+        fprintf(f, "      \"key\": \"%ls\",\n", mod.key.c_str());
+        fprintf(f, "      \"enabled\": %s,\n", mod.enabled ? "true" : "false");
+        fprintf(f, "      \"sub_modules\": [\n");
+        for (size_t j = 0; j < mod.subModules.size(); j++) {
+            const char* subName = "";
+            switch (mod.subModules[j].type) {
+                case SUBMOD_USAGE: subName = "usage"; break;
+                case SUBMOD_TEMP: subName = "temp"; break;
+                case SUBMOD_VRAM: subName = "vram"; break;
+            }
+            fprintf(f, "        {\"type\": \"%s\", \"enabled\": %s}", subName, mod.subModules[j].enabled ? "true" : "false");
+            if (j < mod.subModules.size() - 1) fprintf(f, ",\n");
+            else fprintf(f, "\n");
+        }
+        fprintf(f, "      ]\n");
+        fprintf(f, "    }%s\n", (i < g_displayModules.size() - 1) ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+    
     fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
     fprintf(f, "  \"osc_pause_hotkey\": %d,\n  \"osc_pause_hotkey_mods\": %d,\n",
@@ -2526,14 +2923,70 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
                 msg += tbuf;
             }
             
-            // Line 3: System info compact
-            wchar_t buf3[40];
-            if (g_latestPerfData.gpuUsageValid) {
-                swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG G:%d%%", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0, g_latestPerfData.gpuUsage);
-            } else {
-                swprintf_s(buf3, L"\nC:%.0f%% R:%.0fG", g_sysCpuUsage, g_sysMemUsed/1024.0/1024.0);
+            // Line 3: System info using display_modules configuration
+            std::wstring perfLine = L"\n";
+            bool firstModule = true;
+            
+            for (const auto& mod : g_displayModules) {
+                if (!mod.enabled) continue;
+                
+                if (!firstModule) perfLine += L" | ";
+                firstModule = false;
+                
+                // 获取模块名称
+                std::wstring modName = mod.name;
+                if (modName.empty()) {
+                    modName = mod.key == L"cpu" ? L"C" : (mod.key == L"gpu" ? L"G" : L"R");
+                } else if (modName.length() > 4) {
+                    // 名称过长时截断
+                    modName = modName.substr(0, 4);
+                }
+                
+                perfLine += modName + L":";
+                
+                bool firstSub = true;
+                for (const auto& sub : mod.subModules) {
+                    if (!sub.enabled || !sub.available) continue;
+                    
+                    if (!firstSub) perfLine += L" ";
+                    firstSub = false;
+                    
+                    if (mod.key == L"cpu") {
+                        if (sub.type == SUBMOD_USAGE) {
+                            wchar_t buf[16];
+                            swprintf_s(buf, L"%.0f%%", g_sysCpuUsage);
+                            perfLine += buf;
+                        } else if (sub.type == SUBMOD_TEMP && g_latestPerfData.cpuTempValid) {
+                            wchar_t buf[16];
+                            swprintf_s(buf, L"%d°C", g_latestPerfData.cpuTemp);
+                            perfLine += buf;
+                        }
+                    } else if (mod.key == L"gpu") {
+                        if (sub.type == SUBMOD_USAGE && g_latestPerfData.gpuUsageValid) {
+                            wchar_t buf[16];
+                            swprintf_s(buf, L"%d%%", g_latestPerfData.gpuUsage);
+                            perfLine += buf;
+                        } else if (sub.type == SUBMOD_VRAM) {
+                            double vramUsedGB = (double)g_gpuMemUsed / 1024.0;
+                            wchar_t buf[16];
+                            swprintf_s(buf, L"%.1fG", vramUsedGB);
+                            perfLine += buf;
+                        } else if (sub.type == SUBMOD_TEMP) {
+                            // GPU温度暂未实现
+                        }
+                    } else if (mod.key == L"ram") {
+                        if (sub.type == SUBMOD_USAGE) {
+                            double ramUsedGB = g_sysMemUsed / 1024.0 / 1024.0;
+                            wchar_t buf[16];
+                            swprintf_s(buf, L"%.1fG", ramUsedGB);
+                            perfLine += buf;
+                        } else if (sub.type == SUBMOD_TEMP) {
+                            // RAM温度暂未实现
+                        }
+                    }
+                }
             }
-            msg += buf3;
+            msg += perfLine;
             
             // Line 4: Stats + clock + quote merged
             time_t n = time(nullptr);
@@ -3358,18 +3811,24 @@ int ShowCustomDialog(const DialogConfig& config) {
     SetForegroundWindow(g_dialogHwnd);
     UpdateWindow(g_dialogHwnd);
     
-    // Message loop - only process messages for this dialog
+    // Message loop - process messages for this dialog
     MSG msg;
     g_dialogClosed = false;
-    while (!g_dialogClosed) {
-        // Use GetMessage with dialog hwnd to only get dialog messages
-        BOOL ret = GetMessageW(&msg, g_dialogHwnd, 0, 0);
-        if (ret == 0 || ret == -1) {
-            // WM_QUIT received or error - exit loop
-            break;
+    while (!g_dialogClosed && g_dialogHwnd) {
+        // 使用 PeekMessage 避免阻塞，确保定时器消息能被处理
+        if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
+            if (!IsDialogMessageW(g_dialogHwnd, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        } else {
+            // 没有消息时让出 CPU
+            WaitMessage();
         }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
     }
     
     // Ensure dialog is destroyed
@@ -5912,6 +6371,779 @@ void DestroyOverlayWindow() {
     }
 }
 
+// ==================== Display Order Configuration Dialog ====================
+
+// 计算弹窗内容高度（支持动画）
+int CalculateDisplayOrderContentHeight() {
+    int baseH = 68;  // 标题栏
+    const int moduleItemH = 56;  // 每个模块项的基础高度
+    const int subItemH = 40;     // 每个子项的高度
+    const int moduleGap = 8;     // 模块间距
+    
+    for (size_t i = 0; i < g_displayModules.size(); i++) {
+        const auto& mod = g_displayModules[i];
+        baseH += moduleItemH + moduleGap;  // 模块高度 + 间距
+        // 根据动画值计算子项高度
+        if (i < g_moduleExpandAnims.size()) {
+            double expandAnim = g_moduleExpandAnims[i].value;
+            if (expandAnim > 0.01) {
+                baseH += (int)(mod.subModules.size() * subItemH * expandAnim);
+            }
+        }
+    }
+    baseH += 70;  // 底部按钮区域
+    return baseH;
+}
+
+// 绘制显示顺序配置弹窗
+void DrawDisplayOrderContent(HDC hdc, int w, int h) {
+    Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeHighQuality);
+    
+    // 毛玻璃风格背景 - 更明显的半透明效果
+    SolidBrush bgGlassBrush(Color(220, 18, 20, 30));  // 更透明的背景
+    graphics.FillRectangle(&bgGlassBrush, 0, 0, w, h);
+    
+    // 第一层毛玻璃 - 主色调
+    LinearGradientBrush glassLayer1(Rect(0, 0, w, h),
+        Color(200, 35, 40, 55),    // 顶部蓝灰色
+        Color(200, 20, 25, 35),    // 底部深色
+        LinearGradientModeVertical);
+    graphics.FillRectangle(&glassLayer1, 0, 0, w, h);
+    
+    // 第二层毛玻璃 - 增强模糊感
+    LinearGradientBrush glassLayer2(Rect(0, 0, w, h),
+        Color(150, 25, 30, 45),    // 轻微高光
+        Color(150, 10, 12, 20),    // 深色渐变
+        LinearGradientModeVertical);
+    graphics.FillRectangle(&glassLayer2, 0, 0, w, h);
+    
+    // 顶部标题栏背景 - 可拖动区域
+    SolidBrush titleBarBrush(Color(255, 42, 46, 62));
+    graphics.FillRectangle(&titleBarBrush, 0, 0, w, 55);
+    
+    // 标题
+    SolidBrush titleBrush(Color(255, GetRValue(COLOR_TEXT), GetGValue(COLOR_TEXT), GetBValue(COLOR_TEXT)));
+    Font titleFont(L"Microsoft YaHei UI", 16, FontStyleBold);
+    PointF titlePt(24.0f, 14.0f);
+    graphics.DrawString(L"显示顺序配置", -1, &titleFont, titlePt, &titleBrush);
+    
+    // 关闭按钮 - 带悬停效果
+    int closeX = w - 46;
+    int closeY = 12;
+    int closeSize = 32;
+    bool closeHover = (g_displayOrderCloseBtnHover);
+    
+    if (closeHover) {
+        SolidBrush closeBgBrush(Color(255, 90, 45, 50));
+        graphics.FillRectangle(&closeBgBrush, closeX, closeY, closeSize, closeSize);
+    }
+    
+    Pen closePen(Color(255, closeHover ? 255 : GetRValue(COLOR_TEXT_DIM), 
+                           closeHover ? 100 : GetGValue(COLOR_TEXT_DIM), 
+                           closeHover ? 100 : GetBValue(COLOR_TEXT_DIM)), 2.5f);
+    graphics.DrawLine(&closePen, closeX + 10, closeY + 10, closeX + closeSize - 10, closeY + closeSize - 10);
+    graphics.DrawLine(&closePen, closeX + closeSize - 10, closeY + 10, closeX + 10, closeY + closeSize - 10);
+    
+    // 绘制模块列表
+    int moduleY = 68;
+    const int moduleItemH = 56;
+    const int subItemH = 40;
+    const int padding = 24;
+    const int moduleGap = 8;  // 模块之间的间距
+    
+    for (size_t modIdx = 0; modIdx < g_displayModules.size(); modIdx++) {
+        auto& mod = g_displayModules[modIdx];
+        bool isHover = (g_displayOrderModuleHover == (int)modIdx && g_displayOrderSubModHover == -1 && !g_isDraggingModule);
+        bool isDragging = (g_draggingModuleIdx == (int)modIdx && g_isDraggingModule);
+        
+        // 模块背景
+        Color modBgColor = isDragging ? Color(255, 60, 80, 110) : 
+                           isHover ? Color(255, 45, 50, 70) : Color(255, 35, 40, 55);
+        
+        SolidBrush modBgBrush(modBgColor);
+        RectF modRect((REAL)padding, (REAL)moduleY, (REAL)(w - padding * 2), (REAL)moduleItemH);
+        GraphicsPath modPath;
+        CreateRoundRectPath(&modPath, modRect, 10);
+        graphics.FillPath(&modBgBrush, &modPath);
+        
+        // 边框
+        Pen modBorderPen(Color(255, isHover || isDragging ? 100 : 60, isHover || isDragging ? 120 : 80, isHover || isDragging ? 160 : 110));
+        graphics.DrawPath(&modBorderPen, &modPath);
+        
+        // 拖拽手柄 (⋮⋮)
+        SolidBrush handleBrush(Color(255, isHover ? 180 : 120, isHover ? 180 : 120, isHover ? 180 : 120));
+        Font handleFont(L"Segoe UI", 16);
+        StringFormat handleFormat;
+        handleFormat.SetAlignment(StringAlignmentCenter);
+        handleFormat.SetLineAlignment(StringAlignmentCenter);
+        RectF handleRect((REAL)padding, (REAL)moduleY, (REAL)40, (REAL)moduleItemH);
+        graphics.DrawString(L"⋮⋮", -1, &handleFont, handleRect, &handleFormat, &handleBrush);
+        
+        // 模块名称
+        std::wstring modName = mod.name;
+        if (modName.empty()) modName = mod.key == L"cpu" ? L"CPU" : (mod.key == L"gpu" ? L"GPU" : L"RAM");
+        
+        SolidBrush modNameBrush(Color(255, GetRValue(COLOR_TEXT), GetGValue(COLOR_TEXT), GetBValue(COLOR_TEXT)));
+        Font modNameFont(L"Microsoft YaHei UI", 14, FontStyleBold);
+        RectF modNameRect((REAL)(padding + 45), (REAL)moduleY, (REAL)(w - padding * 2 - 180), (REAL)moduleItemH);
+        StringFormat modNameFormat;
+        modNameFormat.SetLineAlignment(StringAlignmentCenter);
+        modNameFormat.SetFormatFlags(StringFormatFlagsNoWrap);
+        graphics.DrawString(modName.c_str(), -1, &modNameFont, modNameRect, &modNameFormat, &modNameBrush);
+        
+        // 启用复选框 - 带悬停效果
+        int checkboxX = w - padding - 130;
+        int checkboxY = moduleY + (moduleItemH - 22) / 2;  // 垂直居中
+        int checkboxSize = 22;
+        bool cbHover = (isHover && g_displayOrderCheckboxHover);
+        
+        Color cbColor = mod.enabled ? Color(255, GetRValue(COLOR_ACCENT), GetGValue(COLOR_ACCENT), GetBValue(COLOR_ACCENT)) : 
+                                      Color(255, cbHover ? 80 : 60, cbHover ? 80 : 60, cbHover ? 90 : 70);
+        SolidBrush cbBrush(cbColor);
+        RectF cbRect((REAL)checkboxX, (REAL)checkboxY, (REAL)checkboxSize, (REAL)checkboxSize);
+        GraphicsPath cbPath;
+        CreateRoundRectPath(&cbPath, cbRect, 5);
+        graphics.FillPath(&cbBrush, &cbPath);
+        
+        // 复选框边框
+        if (!mod.enabled) {
+            Pen cbBorderPen(Color(255, cbHover ? 120 : 80, cbHover ? 120 : 80, cbHover ? 140 : 100));
+            graphics.DrawPath(&cbBorderPen, &cbPath);
+        }
+        
+        if (mod.enabled) {
+            Pen tickPen(Color(255, 255, 255), 3.0f);
+            graphics.DrawLine(&tickPen, checkboxX + 5, checkboxY + 11, checkboxX + 10, checkboxY + 16);
+            graphics.DrawLine(&tickPen, checkboxX + 10, checkboxY + 16, checkboxX + 17, checkboxY + 7);
+        }
+        
+        // 展开/折叠箭头 - 带悬停效果
+        bool isExpanded = (modIdx < g_moduleExpandAnims.size() && g_moduleExpandAnims[modIdx].value > 0.5);
+        int arrowX = w - padding - 35;
+        int arrowY = moduleY + moduleItemH / 2;
+        bool arrowHover = (isHover && g_displayOrderArrowHover);
+        
+        Pen arrowPen(Color(255, arrowHover ? 200 : GetRValue(COLOR_TEXT_DIM), 
+                               arrowHover ? 200 : GetGValue(COLOR_TEXT_DIM), 
+                               arrowHover ? 200 : GetBValue(COLOR_TEXT_DIM)), 2.5f);
+        if (isExpanded) {
+            graphics.DrawLine(&arrowPen, arrowX, arrowY - 4, arrowX + 7, arrowY + 4);
+            graphics.DrawLine(&arrowPen, arrowX + 14, arrowY - 4, arrowX + 7, arrowY + 4);
+        } else {
+            graphics.DrawLine(&arrowPen, arrowX, arrowY + 4, arrowX + 7, arrowY - 4);
+            graphics.DrawLine(&arrowPen, arrowX + 7, arrowY - 4, arrowX + 14, arrowY + 4);
+        }
+        
+        // 更新模块Y位置
+        moduleY += moduleItemH;
+        
+        // 绘制子项（如果展开）- 渐隐挤压效果
+        if (modIdx < g_moduleExpandAnims.size()) {
+            double expandAnim = g_moduleExpandAnims[modIdx].value;
+            if (expandAnim > 0.01) {
+                // 计算子项透明度 (0-255)
+                BYTE subAlpha = (BYTE)(expandAnim * 255);
+                
+                for (size_t subIdx = 0; subIdx < mod.subModules.size(); subIdx++) {
+                    auto& sub = mod.subModules[subIdx];
+                    // 子项位置随动画挤压
+                    int subY = moduleY + (int)(subIdx * subItemH * expandAnim);
+                    // 子项高度随动画变化
+                    int subH = (int)(subItemH * expandAnim);
+                    if (subH < 4) subH = 4;  // 最小高度
+                    
+                    bool subHover = (g_displayOrderSubModHover == (int)subIdx && g_displayOrderModuleHover == (int)modIdx);
+                    
+                    // 子项背景 - 使用透明度
+                    Color subBgColor(subAlpha, subHover ? 45 : 32, subHover ? 50 : 38, subHover ? 68 : 52);
+                    SolidBrush subBgBrush(subBgColor);
+                    graphics.FillRectangle(&subBgBrush, padding + 24, subY, w - padding * 2 - 48, subH - 2);
+                    
+                    // 子项复选框 - 带悬停效果
+                    int subCbX = padding + 48;
+                    int subCbY = subY + (subH - 20) / 2;
+                    int subCbSize = 20;
+                    bool subCbHover = subHover && sub.available;
+                    
+                    Color subCbColor;
+                    if (!sub.available) {
+                        subCbColor = Color(subAlpha, 50, 50, 60);
+                    } else if (sub.enabled) {
+                        subCbColor = Color(subAlpha, GetRValue(COLOR_ACCENT), GetGValue(COLOR_ACCENT), GetBValue(COLOR_ACCENT));
+                    } else {
+                        subCbColor = Color(subAlpha, subCbHover ? 85 : 60, subCbHover ? 85 : 60, subCbHover ? 100 : 75);
+                    }
+                    
+                    SolidBrush subCbBrush(subCbColor);
+                    RectF subCbRect((REAL)subCbX, (REAL)subCbY, (REAL)subCbSize, (REAL)subCbSize);
+                    GraphicsPath subCbPath;
+                    CreateRoundRectPath(&subCbPath, subCbRect, 4);
+                    graphics.FillPath(&subCbBrush, &subCbPath);
+                    
+                    if (!sub.enabled && sub.available) {
+                        Pen subCbBorderPen(Color(subAlpha, subCbHover ? 120 : 80, subCbHover ? 120 : 80, subCbHover ? 140 : 100));
+                        graphics.DrawPath(&subCbBorderPen, &subCbPath);
+                    }
+                    
+                    if (sub.enabled && sub.available) {
+                        Pen subTickPen(Color(subAlpha, 255, 255, 255), 2.5f);
+                        graphics.DrawLine(&subTickPen, subCbX + 4, subCbY + 10, subCbX + 9, subCbY + 15);
+                        graphics.DrawLine(&subTickPen, subCbX + 9, subCbY + 15, subCbX + 16, subCbY + 6);
+                    }
+                    
+                    // 子项名称 - 使用透明度渐隐，垂直居中
+                    SolidBrush subNameBrush(Color(subAlpha, sub.available ? GetRValue(COLOR_TEXT) : 120, 
+                                                         sub.available ? GetGValue(COLOR_TEXT) : 120, 
+                                                         sub.available ? GetBValue(COLOR_TEXT) : 120));
+                    Font subNameFont(L"Microsoft YaHei UI", 13);
+                    RectF subNameRect((REAL)(subCbX + 30), (REAL)subY, (REAL)(w - subCbX - 160), (REAL)subH);
+                    StringFormat subNameFormat;
+                    subNameFormat.SetLineAlignment(StringAlignmentCenter);
+                    graphics.DrawString(sub.name.c_str(), -1, &subNameFont, subNameRect, &subNameFormat, &subNameBrush);
+                    
+                    // 不可用标记 - 调整位置不超出边框
+                    if (!sub.available) {
+                        SolidBrush naBrush(Color(subAlpha, 110, 110, 120));
+                        Font naFont(L"Microsoft YaHei UI", 11);
+                        // 位置调整到子项名称右侧，不超出边框
+                        RectF naRect((REAL)(w - padding - 90), (REAL)subY, (REAL)70, (REAL)subH);
+                        StringFormat naFormat;
+                        naFormat.SetLineAlignment(StringAlignmentCenter);
+                        naFormat.SetAlignment(StringAlignmentFar);
+                        graphics.DrawString(L"[不可用]", -1, &naFont, naRect, &naFormat, &naBrush);
+                    }
+                }
+                
+                moduleY += (int)(mod.subModules.size() * subItemH * expandAnim);
+            }
+        }
+        
+        // 添加模块间距
+        moduleY += moduleGap;
+    }
+    
+    // 底部按钮区域
+    int btnY = h - 60;
+    int btnW = 100;
+    int btnH = 40;
+    
+    StringFormat centerFormat;
+    centerFormat.SetAlignment(StringAlignmentCenter);
+    centerFormat.SetLineAlignment(StringAlignmentCenter);
+    Font btnFont(L"Microsoft YaHei UI", 12);
+    
+    // 恢复默认按钮 - 带悬停效果
+    bool resetHover = g_displayOrderResetBtnHover;
+    Color resetBtnColor(resetHover ? 255 : 255, resetHover ? 55 : 45, resetHover ? 60 : 50, resetHover ? 75 : 60);
+    SolidBrush resetBtnBrush(resetBtnColor);
+    RectF resetRect(padding, btnY, btnW, btnH);
+    GraphicsPath resetPath;
+    CreateRoundRectPath(&resetPath, resetRect, 8);
+    graphics.FillPath(&resetBtnBrush, &resetPath);
+    Pen resetPen(Color(255, resetHover ? 100 : 60, resetHover ? 110 : 75, resetHover ? 130 : 95), 1.5f);
+    graphics.DrawPath(&resetPen, &resetPath);
+    
+    SolidBrush resetTextBrush(Color(255, resetHover ? 220 : 170, resetHover ? 220 : 170, resetHover ? 230 : 180));
+    graphics.DrawString(L"恢复默认", -1, &btnFont, resetRect, &centerFormat, &resetTextBrush);
+    
+    // 确定按钮 - 带悬停效果
+    bool okHover = g_displayOrderOkBtnHover;
+    Color okBtnColor(okHover ? 255 : 255, 
+                     okHover ? (GetRValue(COLOR_ACCENT) + 30) : GetRValue(COLOR_ACCENT), 
+                     okHover ? (GetGValue(COLOR_ACCENT) + 30) : GetGValue(COLOR_ACCENT), 
+                     okHover ? (GetBValue(COLOR_ACCENT) + 30) : GetBValue(COLOR_ACCENT));
+    // 限制颜色值
+    int okR = min(255, okHover ? (GetRValue(COLOR_ACCENT) + 40) : GetRValue(COLOR_ACCENT));
+    int okG = min(255, okHover ? (GetGValue(COLOR_ACCENT) + 40) : GetGValue(COLOR_ACCENT));
+    int okB = min(255, okHover ? (GetBValue(COLOR_ACCENT) + 40) : GetBValue(COLOR_ACCENT));
+    SolidBrush okBtnBrush(Color(255, okR, okG, okB));
+    RectF okRect((REAL)(w - padding - btnW * 2 - 12), btnY, btnW, btnH);
+    GraphicsPath okPath;
+    CreateRoundRectPath(&okPath, okRect, 8);
+    graphics.FillPath(&okBtnBrush, &okPath);
+    
+    SolidBrush okTextBrush(Color(255, 255, 255));
+    graphics.DrawString(L"确定", -1, &btnFont, okRect, &centerFormat, &okTextBrush);
+    
+    // 取消按钮 - 带悬停效果
+    bool cancelHover = g_displayOrderCancelBtnHover;
+    Color cancelBtnColor(cancelHover ? 255 : 255, cancelHover ? 55 : 45, cancelHover ? 60 : 50, cancelHover ? 75 : 60);
+    SolidBrush cancelBtnBrush(cancelBtnColor);
+    RectF cancelRect((REAL)(w - padding - btnW), btnY, btnW, btnH);
+    GraphicsPath cancelPath;
+    CreateRoundRectPath(&cancelPath, cancelRect, 8);
+    graphics.FillPath(&cancelBtnBrush, &cancelPath);
+    Pen cancelPen(Color(255, cancelHover ? 100 : 60, cancelHover ? 110 : 75, cancelHover ? 130 : 95), 1.5f);
+    graphics.DrawPath(&cancelPen, &cancelPath);
+    
+    SolidBrush cancelTextBrush(Color(255, cancelHover ? 220 : 170, cancelHover ? 220 : 170, cancelHover ? 230 : 180));
+    graphics.DrawString(L"取消", -1, &btnFont, cancelRect, &centerFormat, &cancelTextBrush);
+}
+
+// 显示顺序配置窗口过程
+LRESULT CALLBACK DisplayOrderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            // 双缓冲
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+            
+            DrawDisplayOrderContent(memDC, w, h);
+            
+            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        
+        case WM_MOUSEMOVE: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            const int moduleItemH = 50;
+            const int subItemH = 36;
+            const int padding = 20;
+            const int btnW = 90;
+            const int btnH = 36;
+            int btnY = h - 55;
+            
+            // 处理窗口拖动
+            if (g_displayOrderIsDraggingWindow) {
+                POINT screenPt;
+                GetCursorPos(&screenPt);
+                SetWindowPos(hwnd, nullptr, 
+                    screenPt.x - g_displayOrderDragOffset.x,
+                    screenPt.y - g_displayOrderDragOffset.y,
+                    0, 0, SWP_NOSIZE | SWP_NOZORDER);
+                return 0;
+            }
+            
+            // 处理模块拖拽
+            if (g_isDraggingModule && g_draggingModuleIdx >= 0) {
+                int moduleY = 60;
+                for (size_t i = 0; i < g_displayModules.size(); i++) {
+                    int itemH = moduleItemH;
+                    if (i < g_moduleExpandAnims.size() && g_moduleExpandAnims[i].value > 0.01) {
+                        itemH += (int)(g_displayModules[i].subModules.size() * subItemH * g_moduleExpandAnims[i].value);
+                    }
+                    
+                    if (y >= moduleY && y < moduleY + itemH) {
+                        if (g_dragOverIdx != (int)i && (int)i != g_draggingModuleIdx) {
+                            g_dragOverIdx = (int)i;
+                            int dragIdx = g_draggingModuleIdx;
+                            int overIdx = g_dragOverIdx;
+                            if (dragIdx >= 0 && overIdx >= 0 && dragIdx < (int)g_displayModules.size() && overIdx < (int)g_displayModules.size()) {
+                                std::swap(g_displayModules[dragIdx], g_displayModules[overIdx]);
+                                std::swap(g_moduleExpandAnims[dragIdx], g_moduleExpandAnims[overIdx]);
+                                g_draggingModuleIdx = overIdx;
+                                g_dragOverIdx = -1;
+                            }
+                        }
+                        break;
+                    }
+                    moduleY += itemH;
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            
+            // 保存旧的悬停状态
+            int oldModuleHover = g_displayOrderModuleHover;
+            int oldSubModHover = g_displayOrderSubModHover;
+            bool oldCloseHover = g_displayOrderCloseBtnHover;
+            bool oldResetHover = g_displayOrderResetBtnHover;
+            bool oldOkHover = g_displayOrderOkBtnHover;
+            bool oldCancelHover = g_displayOrderCancelBtnHover;
+            
+            // 重置悬停状态
+            g_displayOrderModuleHover = -1;
+            g_displayOrderSubModHover = -1;
+            g_displayOrderCloseBtnHover = false;
+            g_displayOrderCheckboxHover = false;
+            g_displayOrderArrowHover = false;
+            g_displayOrderResetBtnHover = false;
+            g_displayOrderOkBtnHover = false;
+            g_displayOrderCancelBtnHover = false;
+            
+            // 检查关闭按钮悬停
+            if (x >= w - 42 && x <= w - 12 && y >= 10 && y <= 40) {
+                g_displayOrderCloseBtnHover = true;
+            }
+            
+            // 检查底部按钮悬停
+            if (y >= btnY && y <= btnY + btnH) {
+                if (x >= padding && x <= padding + btnW) {
+                    g_displayOrderResetBtnHover = true;
+                } else if (x >= w - padding - btnW * 2 - 12 && x <= w - padding - btnW - 12) {
+                    g_displayOrderOkBtnHover = true;
+                } else if (x >= w - padding - btnW && x <= w - padding) {
+                    g_displayOrderCancelBtnHover = true;
+                }
+            }
+            
+            // 检查模块悬停
+            int moduleY = 60;
+            for (size_t modIdx = 0; modIdx < g_displayModules.size(); modIdx++) {
+                auto& mod = g_displayModules[modIdx];
+                
+                if (y >= moduleY && y < moduleY + moduleItemH) {
+                    g_displayOrderModuleHover = (int)modIdx;
+                    // 检查复选框区域悬停
+                    int checkboxX = w - padding - 130;
+                    if (x >= checkboxX && x <= checkboxX + 22) {
+                        g_displayOrderCheckboxHover = true;
+                    }
+                    // 检查箭头区域悬停
+                    int arrowX = w - padding - 35;
+                    if (x >= arrowX && x <= arrowX + 20) {
+                        g_displayOrderArrowHover = true;
+                    }
+                    break;
+                }
+                
+                moduleY += moduleItemH;
+                
+                // 检查子项悬停
+                if (modIdx < g_moduleExpandAnims.size()) {
+                    double expandAnim = g_moduleExpandAnims[modIdx].value;
+                    if (expandAnim > 0.01) {
+                        for (size_t subIdx = 0; subIdx < mod.subModules.size(); subIdx++) {
+                            int subY = moduleY + (int)(subIdx * subItemH * expandAnim);
+                            if (y >= subY && y < subY + subItemH * expandAnim) {
+                                g_displayOrderModuleHover = (int)modIdx;
+                                g_displayOrderSubModHover = (int)subIdx;
+                                break;
+                            }
+                        }
+                        moduleY += (int)(mod.subModules.size() * subItemH * expandAnim);
+                    }
+                }
+            }
+            
+            // 检查是否有变化需要重绘
+            bool needsRedraw = (oldModuleHover != g_displayOrderModuleHover || 
+                               oldSubModHover != g_displayOrderSubModHover ||
+                               oldCloseHover != g_displayOrderCloseBtnHover ||
+                               oldResetHover != g_displayOrderResetBtnHover ||
+                               oldOkHover != g_displayOrderOkBtnHover ||
+                               oldCancelHover != g_displayOrderCancelBtnHover);
+            
+            if (needsRedraw) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            
+            return 0;
+        }
+        
+        case WM_LBUTTONDOWN: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            
+            const int moduleItemH = 50;
+            const int subItemH = 36;
+            const int padding = 20;
+            const int btnW = 90;
+            const int btnH = 36;
+            int btnY = h - 55;
+            
+            // 检查标题栏拖动区域 (y < 50)
+            if (y < 50) {
+                // 检查关闭按钮
+                if (x >= w - 42 && x <= w - 12 && y >= 10 && y <= 40) {
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                
+                // 拖动窗口
+                g_displayOrderIsDraggingWindow = true;
+                POINT screenPt;
+                GetCursorPos(&screenPt);
+                RECT winRect;
+                GetWindowRect(hwnd, &winRect);
+                g_displayOrderDragOffset.x = screenPt.x - winRect.left;
+                g_displayOrderDragOffset.y = screenPt.y - winRect.top;
+                SetCapture(hwnd);
+                return 0;
+            }
+            
+            // 检查底部按钮
+            if (y >= btnY && y <= btnY + btnH) {
+                // 恢复默认
+                if (x >= padding && x <= padding + btnW) {
+                    InitDefaultDisplayModules();
+                    g_moduleExpandAnims.resize(g_displayModules.size());
+                    for (auto& anim : g_moduleExpandAnims) {
+                        anim.value = 0.0;
+                        anim.target = 0.0;
+                    }
+                    UpdateDisplayModuleAvailability();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                // 确定
+                if (x >= w - padding - btnW * 2 - 12 && x <= w - padding - btnW - 12) {
+                    SaveConfig(g_configPath);
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+                // 取消
+                if (x >= w - padding - btnW && x <= w - padding) {
+                    LoadConfig(g_configPath);
+                    DestroyWindow(hwnd);
+                    return 0;
+                }
+            }
+            
+            // 检查模块点击
+            int moduleY = 60;
+            for (size_t modIdx = 0; modIdx < g_displayModules.size(); modIdx++) {
+                auto& mod = g_displayModules[modIdx];
+                
+                if (y >= moduleY && y < moduleY + moduleItemH) {
+                    // 检查是否点击拖拽手柄区域
+                    if (x >= padding && x <= padding + 45) {
+                        g_isDraggingModule = true;
+                        g_draggingModuleIdx = (int)modIdx;
+                        SetCapture(hwnd);
+                    }
+                    // 检查是否点击复选框
+                    else if (x >= w - padding - 130 && x <= w - padding - 108) {
+                        mod.enabled = !mod.enabled;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                    // 检查是否点击展开箭头
+                    else if (x >= w - padding - 40 && x <= w - padding - 15) {
+                        // 手风琴模式：关闭其他展开的
+                        for (size_t i = 0; i < g_moduleExpandAnims.size(); i++) {
+                            if (i != modIdx) {
+                                g_moduleExpandAnims[i].target = 0.0;
+                                g_displayModules[i].expanded = false;
+                            }
+                        }
+                        
+                        mod.expanded = !mod.expanded;
+                        if (modIdx < g_moduleExpandAnims.size()) {
+                            g_moduleExpandAnims[modIdx].target = mod.expanded ? 1.0 : 0.0;
+                            g_moduleExpandAnims[modIdx].speed = 0.12;
+                        }
+                    }
+                    break;
+                }
+                
+                moduleY += moduleItemH;
+                
+                // 检查子项点击
+                if (modIdx < g_moduleExpandAnims.size()) {
+                    double expandAnim = g_moduleExpandAnims[modIdx].value;
+                    if (expandAnim > 0.5) {
+                        for (size_t subIdx = 0; subIdx < mod.subModules.size(); subIdx++) {
+                            auto& sub = mod.subModules[subIdx];
+                            int subY = moduleY + (int)(subIdx * subItemH);
+                            
+                            if (y >= subY && y < subY + subItemH) {
+                                // 检查是否点击子项复选框
+                                int subCbX = padding + 40;
+                                if (x >= subCbX && x <= subCbX + 18 && sub.available) {
+                                    // 计算当前已启用的数量
+                                    int enabledCount = 0;
+                                    for (const auto& s : mod.subModules) {
+                                        if (s.enabled) enabledCount++;
+                                    }
+                                    
+                                    // 硬性限制：最多2个
+                                    if (!sub.enabled && enabledCount >= 2) {
+                                        // 已达上限，不允许再启用
+                                    } else {
+                                        sub.enabled = !sub.enabled;
+                                        InvalidateRect(hwnd, nullptr, FALSE);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        moduleY += (int)(mod.subModules.size() * subItemH);
+                    }
+                }
+            }
+            
+            return 0;
+        }
+        
+        case WM_LBUTTONUP: {
+            if (g_isDraggingModule) {
+                g_isDraggingModule = false;
+                g_draggingModuleIdx = -1;
+                g_dragOverIdx = -1;
+                ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            if (g_displayOrderIsDraggingWindow) {
+                g_displayOrderIsDraggingWindow = false;
+                ReleaseCapture();
+            }
+            return 0;
+        }
+        
+        case WM_TIMER: {
+            if (wParam == 3) {  // 显示顺序窗口定时器
+                bool needsRepaint = false;
+                
+                // 窗口淡入动画
+                BYTE alpha = (BYTE)GetPropW(hwnd, L"FadeAlpha");
+                if (alpha < 255) {
+                    alpha = min(255, alpha + 20);
+                    SetPropW(hwnd, L"FadeAlpha", (HANDLE)alpha);
+                    SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                    needsRepaint = true;
+                }
+                
+                // 更新展开动画
+                bool animating = false;
+                for (size_t i = 0; i < g_moduleExpandAnims.size(); i++) {
+                    if (g_moduleExpandAnims[i].isActive()) {
+                        g_moduleExpandAnims[i].update();
+                        needsRepaint = true;
+                        animating = true;
+                    }
+                }
+                
+                // 窗口高度跟随动画变化
+                if (animating) {
+                    int newH = CalculateDisplayOrderContentHeight();
+                    SetWindowPos(hwnd, nullptr, 0, 0, 420, newH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                } else if (needsRepaint) {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            return 0;
+        }
+        
+        case WM_DESTROY:
+            KillTimer(hwnd, 3);
+            g_displayOrderHwnd = nullptr;
+            g_displayOrderVisible = false;
+            g_isDraggingModule = false;
+            g_draggingModuleIdx = -1;
+            g_displayOrderModuleHover = -1;
+            g_displayOrderSubModHover = -1;
+            MainDebugLog("[DisplayOrder] Dialog closed");
+            return 0;
+        
+        default:
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
+
+// 创建显示顺序配置弹窗
+void CreateDisplayOrderDialog() {
+    if (g_displayOrderHwnd) {
+        SetForegroundWindow(g_displayOrderHwnd);
+        return;
+    }
+    
+    // 更新模块可用性
+    UpdateDisplayModuleAvailability();
+    
+    // 同步名称
+    for (auto& mod : g_displayModules) {
+        if (mod.key == L"cpu") mod.name = g_cpuDisplayName;
+        else if (mod.key == L"gpu") mod.name = g_gpuDisplayName;
+        else if (mod.key == L"ram") mod.name = g_ramDisplayName;
+    }
+    
+    HINSTANCE hInst = GetModuleHandle(nullptr);
+    
+    // 注册窗口类
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = DisplayOrderWndProc;
+        wc.hInstance = hInst;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hbrBackground = CreateSolidBrush(RGB(18, 18, 24));  // 深色背景
+        wc.lpszClassName = L"VRCLyricsDisplayOrder_Class";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    
+    // 计算窗口尺寸 - 增大尺寸
+    int winW = 480;
+    int winH = CalculateDisplayOrderContentHeight();
+    
+    // 居中显示
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int winX = (screenW - winW) / 2;
+    int winY = (screenH - winH) / 2;
+    
+    // 创建无边框窗口 - 移除 WS_EX_TOPMOST 使其不始终置顶
+    g_displayOrderHwnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+        L"VRCLyricsDisplayOrder_Class", L"",
+        WS_POPUP,
+        winX, winY, winW, winH,
+        nullptr, nullptr, hInst, nullptr);
+    
+    // 设置圆角 (Windows 11)
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (hDwm) {
+        typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
+        auto fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        if (fn) {
+            int corner = 2;  // DWMWCP_ROUND
+            fn(g_displayOrderHwnd, 33, &corner, sizeof(corner));
+        }
+        FreeLibrary(hDwm);
+    }
+    
+    // 设置初始透明度（用于淡入动画）
+    SetPropW(g_displayOrderHwnd, L"FadeAlpha", (HANDLE)0);
+    SetLayeredWindowAttributes(g_displayOrderHwnd, 0, 0, LWA_ALPHA);
+    
+    // 设置定时器用于动画
+    SetTimer(g_displayOrderHwnd, 3, 16, nullptr);
+    
+    // 重置展开状态
+    for (auto& anim : g_moduleExpandAnims) {
+        anim.value = 0.0;
+        anim.target = 0.0;
+    }
+    for (auto& mod : g_displayModules) {
+        mod.expanded = false;
+    }
+    
+    ShowWindow(g_displayOrderHwnd, SW_SHOWNORMAL);
+    UpdateWindow(g_displayOrderHwnd);
+    g_displayOrderVisible = true;
+    
+    MainDebugLog("[DisplayOrder] Dialog created");
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
@@ -6753,19 +7985,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // Auto Detect and Show Order buttons
             int btnW = leftColW - 36;
             int btnH = 36;
-            int btnY = showSystemInfo ? (modeBtnY + modeBtnH + 20 + 140 + 20) : (modeBtnY + modeBtnH + 20);
+            // 按钮位置与绘制时同步（考虑动画）
+            double btnExpandAnim = showSystemInfo ? g_systemInfoExpandAnim.value : 0.0;
+            int baseBtnY = modeBtnY + modeBtnH + 20;
+            int expandedBtnY = baseBtnY + 140 + 20;
+            int btnY = (int)(baseBtnY + (expandedBtnY - baseBtnY) * btnExpandAnim);
 
             if (IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH)) {
                 // Auto Detect button clicked - 静默检测并更新
                 g_cpuDisplayName = DetectCpuName();
                 g_gpuDisplayName = DetectGpuName();
                 SaveConfig(g_configPath);
+                InvalidateRect(hwnd, nullptr, FALSE);  // 刷新界面显示新名称
+                return 0;
             }
 
             btnY += 44;
             if (IsInRect(x, y, CARD_PADDING + 18, btnY, btnW, btnH)) {
-                // Show Order button clicked
-                ShowInfoDialog(L"\x63D0\x793A", L"\x663E\x793A\x987A\x5E8F\x529F\x80FD\x5F85\x5B9E\x73B0");
+                // Show Order button clicked - 打开显示顺序配置弹窗
+                CreateDisplayOrderDialog();
                 return 0;
             }
 
