@@ -8664,6 +8664,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_platformMenuOpen = false;
                         g_menuExpandAnim.value = 1.0;
                         g_menuExpandAnim.target = 0.0;  // 触发收起动画
+                        // 触发箭头旋转动画
+                        g_arrowRotationAnim.value = 1.0;
+                        g_arrowRotationAnim.target = 0.0;
+                        g_arrowRotationAnim.speed = 0.15;
                         InvalidateRect(hwnd, nullptr, FALSE);
                         return 0;
                     }

@@ -274,10 +274,26 @@ void SMTCClient::processMediaUpdate() {
         auto sessions = manager.GetSessions();
         GlobalSystemMediaTransportControlsSession current = nullptr;
         
+        // Log all sessions for debugging
+        char sessionCountMsg[64];
+        sprintf_s(sessionCountMsg, "[SMTC] Processing %d sessions", sessions.Size());
+        LOG_INFO(sessionCountMsg);
+        
         // Find a music player session (prefer QQ Music if filter is set)
         for (auto session : sessions) {
             auto appId = session.SourceAppUserModelId();
             std::wstring appIdStr = appId.c_str();
+            
+            // Log appId in hex for debugging non-ASCII characters
+            std::string appIdHex;
+            for (wchar_t c : appIdStr) {
+                char hex[8];
+                sprintf_s(hex, "%04X ", (unsigned short)c);
+                appIdHex += hex;
+            }
+            char appLogMsg[512];
+            sprintf_s(appLogMsg, "[SMTC] Session appId (hex): %s", appIdHex.c_str());
+            LOG_INFO(appLogMsg);
             
             // Check if this is a music player
             bool isMusicPlayer = false;
