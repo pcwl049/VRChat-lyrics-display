@@ -357,6 +357,13 @@ void SMTCClient::processMediaUpdate() {
             info.artist = mediaProps.Artist().c_str();
             info.album = mediaProps.AlbumTitle().c_str();
             info.trackNumber = mediaProps.TrackNumber();
+            
+            // Log media properties
+            char titleLog[256];
+            sprintf_s(titleLog, "[SMTC] Media: title=%ls, artist=%ls", info.title.c_str(), info.artist.c_str());
+            LOG_INFO(titleLog);
+        } else {
+            LOG_WARNING("[SMTC] Failed to get media properties");
         }
         
         // Get playback info
@@ -369,6 +376,10 @@ void SMTCClient::processMediaUpdate() {
             if (rate) {
                 info.playbackRate = rate.Value();
             }
+            
+            char playLog[64];
+            sprintf_s(playLog, "[SMTC] Playing: %s", info.isPlaying ? "true" : "false");
+            LOG_INFO(playLog);
         }
         
         // Get timeline properties
@@ -376,6 +387,10 @@ void SMTCClient::processMediaUpdate() {
         if (timeline) {
             info.position = TimeSpanToSeconds(timeline.Position());
             info.duration = TimeSpanToSeconds(timeline.EndTime() - timeline.StartTime());
+            
+            char timeLog[128];
+            sprintf_s(timeLog, "[SMTC] Timeline: position=%.1f, duration=%.1f", info.position, info.duration);
+            LOG_INFO(timeLog);
         }
         
         // Update current media

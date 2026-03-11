@@ -1490,6 +1490,12 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) return lyrics;
     
+    // 设置超时
+    DWORD timeout = 10000;  // 10秒
+    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+    
     // 使用 HTTPS
     HINTERNET hConnect = WinHttpConnect(hSession, L"api.qishui.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
@@ -1503,7 +1509,16 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     headers += L"Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n";
     headers += L"Referer: https://www.douyin.com/\r\n";
     headers += L"Origin: https://www.douyin.com\r\n";
-    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    
+    BOOL sent = WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!sent) {
+        DWORD err = GetLastError();
+        LOG_INFO("Qishui Music", "WinHttpSendRequest failed: %d", err);
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return lyrics;
+    }
     
     DWORD statusCode = 0;
     DWORD statusCodeSize = sizeof(statusCode);
@@ -1516,6 +1531,10 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     } else {
         DWORD err = GetLastError();
         LOG_INFO("Qishui Music", "WinHttpReceiveResponse failed: %d", err);
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return lyrics;
     }
     
     std::string searchResp;
