@@ -1682,22 +1682,22 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     }
     msg += L"\n";
     
-    // CPU进度条（双标记：占用率+温度）
+    // CPU进度条（双标记：占用率+温度）- 5格
     {
-        int cpuFilled = (int)(g_cpuUsage / 100.0 * 7);  // 7格进度条
+        int cpuFilled = (int)(g_cpuUsage / 100.0 * 5);
         int tempPos = -1;
         if (g_latestPerfData.cpuTempValid && g_latestPerfData.cpuTemp > 0) {
-            tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 7);  // 温度按100°C上限
-            if (tempPos > 7) tempPos = 7;
+            tempPos = (int)(g_latestPerfData.cpuTemp / 100.0 * 5);
+            if (tempPos > 5) tempPos = 5;
         }
         msg += L"[";
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 5; i++) {
             if (i == tempPos && tempPos >= 0) {
-                msg += L"│";  // 温度标记
+                msg += L"│";
             } else if (i < cpuFilled) {
-                msg += L"█";  // 占用率填充
+                msg += L"█";
             } else {
-                msg += L"░";  // 空格
+                msg += L"░";
             }
         }
         msg += L"]\n";
@@ -1716,11 +1716,11 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     }
     msg += L"\n";
     
-    // RAM进度条（单标记）
+    // RAM进度条（单标记）- 5格
     {
-        int ramFilled = (int)(g_ramUsage / 100.0 * 7);
+        int ramFilled = (int)(g_ramUsage / 100.0 * 5);
         msg += L"[";
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 5; i++) {
             msg += (i < ramFilled) ? L"█" : L"░";
         }
         msg += L"]\n";
@@ -1746,31 +1746,156 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     }
     msg += L"\n";
     
-    // GPU进度条（双标记：占用率+显存）
+    // GPU进度条（双标记：占用率+显存）- 5格
     if (g_latestPerfData.gpuUsageValid) {
-        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 7);
+        int gpuFilled = (int)(g_latestPerfData.gpuUsage / 100.0 * 5);
         int vramPos = -1;
         if (g_gpuMemTotal > 0 && g_gpuMemUsed > 0) {
             double vramPercent = (double)g_gpuMemUsed / (double)g_gpuMemTotal * 100.0;
-            vramPos = (int)(vramPercent / 100.0 * 7);
-            if (vramPos > 7) vramPos = 7;
+            vramPos = (int)(vramPercent / 100.0 * 5);
+            if (vramPos > 5) vramPos = 5;
         }
         msg += L"[";
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 5; i++) {
             if (i == vramPos && vramPos >= 0) {
-                msg += L"│";  // 显存标记
+                msg += L"│";
             } else if (i < gpuFilled) {
-                msg += L"█";  // 占用率填充
+                msg += L"█";
             } else {
-                msg += L"░";  // 空格
+                msg += L"░";
             }
         }
         msg += L"]\n";
     } else {
-        msg += L"[░░░░░░░]\n";
+        msg += L"[░░░░░]\n";
     }
     
     return msg;
+}
+
+// 自动检测系统信息（CPU、GPU名称），限制名称长度
+std::wstring DetectCpuName() {
+    std::wstring cpuName = L"CPU";
+    
+    // 从注册表读取CPU名称
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, 
+        L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 
+        0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t value[256] = {0};
+        DWORD size = sizeof(value);
+        if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, nullptr, 
+                             (LPBYTE)value, &size) == ERROR_SUCCESS) {
+            cpuName = value;
+        }
+        RegCloseKey(hKey);
+    }
+    
+    // 清理名称：移除常见前缀
+    std::wstring prefixes[] = {
+        L"Intel(R) ", L"Intel ", L"AMD ", L"AMD Ryzen ", 
+        L"CPU ", L"Processor ", L"(R) ", L"(TM) "
+    };
+    for (const auto& prefix : prefixes) {
+        if (cpuName.find(prefix) == 0) {
+            cpuName = cpuName.substr(prefix.length());
+        }
+    }
+    
+    // 提取核心型号（如 i5-12600K -> i5-12600K）
+    // 查找第一个数字作为起始点
+    size_t firstDigit = cpuName.find_first_of(L"0123456789");
+    if (firstDigit != std::wstring::npos && firstDigit > 0) {
+        // 检查数字前面是否有 i3/i5/i7/i9 或 R3/R5/R7/R9
+        std::wstring prefix = cpuName.substr(0, firstDigit);
+        if (prefix.find(L"i") != std::wstring::npos || 
+            prefix.find(L"R") != std::wstring::npos ||
+            prefix.find(L"r") != std::wstring::npos) {
+            // 保留 i5-12600K 格式
+        } else {
+            // 从数字开始截取
+            cpuName = cpuName.substr(firstDigit);
+        }
+    }
+    
+    // 移除空格
+    std::wstring result;
+    for (wchar_t c : cpuName) {
+        if (c != L' ') result += c;
+    }
+    
+    // 限制长度：最多8个字符（约2-3个中文字或8个英文字）
+    if (result.length() > 8) {
+        result = result.substr(0, 8);
+    }
+    
+    return result.empty() ? L"CPU" : result;
+}
+
+std::wstring DetectGpuName() {
+    std::wstring gpuName = L"GPU";
+    
+    // 使用DXGI获取GPU名称（已有DXGI依赖）
+    IDXGIFactory1* pFactory = nullptr;
+    if (CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory) == S_OK) {
+        IDXGIAdapter1* pAdapter = nullptr;
+        for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; i++) {
+            DXGI_ADAPTER_DESC1 desc;
+            if (pAdapter->GetDesc1(&desc) == S_OK) {
+                // 跳过软件渲染器（Microsoft Basic Render）
+                if (desc.VendorId != 0x1414) {
+                    gpuName = desc.Description;
+                    pAdapter->Release();
+                    break;
+                }
+            }
+            pAdapter->Release();
+        }
+        pFactory->Release();
+    }
+    
+    // 清理名称：移除常见前缀和后缀
+    std::wstring prefixes[] = {
+        L"NVIDIA ", L"AMD ", L"ATI ", L"Intel(R) ", L"Intel "
+    };
+    for (const auto& prefix : prefixes) {
+        if (gpuName.find(prefix) == 0) {
+            gpuName = gpuName.substr(prefix.length());
+        }
+    }
+    
+    // 移除常见后缀
+    std::wstring suffixes[] = {
+        L" with DirectX 11.0", L" with DirectX 12.0", L" with DirectX 12.1"
+    };
+    for (const auto& suffix : suffixes) {
+        size_t pos = gpuName.find(suffix);
+        if (pos != std::wstring::npos) {
+            gpuName = gpuName.substr(0, pos);
+        }
+    }
+    
+    // 提取型号（RTX 4070 SUPER -> RTX4070S）
+    // 简化：移除空格，截断长名称
+    std::wstring result;
+    bool lastWasAlpha = false;
+    for (wchar_t c : gpuName) {
+        if (c != L' ') {
+            // 如果是字母且上一个也是字母，直接添加
+            // 如果是数字，直接添加
+            if (iswalnum(c)) {
+                result += c;
+                lastWasAlpha = iswalpha(c) != 0;
+            }
+        }
+    }
+    
+    // 限制长度：最多10个字符
+    if (result.length() > 10) {
+        result = result.substr(0, 10);
+    }
+    
+    return result.empty() ? L"GPU" : result;
 }
 
 std::vector<std::wstring> LoadNoLyricMessages(const wchar_t* configPath) {
@@ -1891,6 +2016,12 @@ void LoadConfig(const wchar_t* path) {
     g_oscPauseHotkey = getInt("osc_pause_hotkey", VK_F10);
     g_oscPauseHotkeyMods = getInt("osc_pause_hotkey_mods", 0);
     
+    // Load CPU/GPU display names
+    std::wstring cpuName = getStr("cpu_name");
+    if (!cpuName.empty()) g_cpuDisplayName = cpuName;
+    std::wstring gpuName = getStr("gpu_name");
+    if (!gpuName.empty()) g_gpuDisplayName = gpuName;
+    
     // Initialize system info expand animation based on performance mode
     if (g_performanceMode == 1) {
         // Performance mode: fully expanded
@@ -1912,6 +2043,8 @@ void SaveConfig(const wchar_t* path) {
             g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
             g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
             "true", g_autoStart ? "true" : "false", g_runAsAdmin ? "true" : "false", g_performanceMode);  // g_darkMode固定为true
+    fprintf(f, "  \"cpu_name\": \"%ls\",\n  \"gpu_name\": \"%ls\",\n",
+            g_cpuDisplayName.c_str(), g_gpuDisplayName.c_str());
     fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
             g_winW, g_winH, g_winX, g_winY);
     fprintf(f, "  \"osc_pause_hotkey\": %d,\n  \"osc_pause_hotkey_mods\": %d,\n",
@@ -7927,6 +8060,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     
     LoadConfig(g_configPath);
     UpdateThemeColors();  // 根据配置重新加载主题颜色
+    
+    // 首次运行时自动检测CPU/GPU名称
+    if (isFirstRun) {
+        g_cpuDisplayName = DetectCpuName();
+        g_gpuDisplayName = DetectGpuName();
+        MainDebugLog("[WinMain] Auto-detected CPU name:");
+        MainDebugLog(WstringToUtf8(g_cpuDisplayName).c_str());
+        MainDebugLog("[WinMain] Auto-detected GPU name:");
+        MainDebugLog(WstringToUtf8(g_gpuDisplayName).c_str());
+        SaveConfig(g_configPath);  // 保存检测到的名称
+    }
     
     // 检查是否需要以管理员身份重启
     if (g_runAsAdmin && !IsRunningAsAdmin()) {
