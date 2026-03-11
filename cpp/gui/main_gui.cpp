@@ -10287,13 +10287,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     // 确保毛玻璃效果生效
     EnableBlurBehind(g_hwnd);
     
-    g_osc = new moekoe::OSCSender(WstringToUtf8(g_oscIp), g_oscPort);
+    // 初始化 OSC 连接
+    OSCManager::instance().connect(WstringToUtf8(g_oscIp), g_oscPort);
+    OSCManager::instance().setEnabled(g_oscEnabled);
+    g_osc = OSCManager::instance().getSender();  // 兼容层
+    
     Connect();
     SetTimer(g_hwnd, 1, 16, nullptr);
     
     // 启动时发送测试消息，确保OSC连接正常
     if (OSCManager::instance().isConnected() && OSCManager::instance().isEnabled()) {
-        OSCManager::instance().sendSystemMessage(L"VRCLyricsDisplay\n\x5DF2\x542F\x52A8\x5E76\x8FDE\x63A5\x6210\x529F");
+        OSCManager::instance().sendSystemMessage(L"VRChatlyricsdisplay\n这是一条测试消息哦~\n用于确保OSC消息正常使用");
         LOG_INFO("Main", "Startup test message sent");
     }
     
