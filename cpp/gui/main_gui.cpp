@@ -560,6 +560,7 @@ int g_selectEnd = 0;           // Selection end
 bool g_cursorVisible = true;   // Cursor blink state
 DWORD g_lastCursorBlink = 0;   // Last cursor blink time
 std::wstring g_editingText;    // Current editing text
+std::wstring g_editingOriginalText;  // Original text before editing (for cancel)
 bool g_mouseDragging = false;  // Mouse drag for selection
 int g_platformMenuHover = -1;  // Which menu item is hovered (-1 = none)
 bool g_platformBoxHover = false;  // Platform status box hover
@@ -7685,6 +7686,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_LBUTTONDOWN: {
             int x = LOWORD(lParam), y = HIWORD(lParam);
             
+            // 如果正在编辑系统信息名称，点击其他区域时保存并退出编辑
+            if (g_editingField != EDIT_NONE) {
+                g_editingField = EDIT_NONE;
+                SyncDisplayModuleNames();
+                SaveConfig(g_configPath);
+                g_lastOscMessage.clear();  // 清除缓存，确保新消息发送
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            
             // Theme toggle button (sun/moon)
             if (IsInRect(x, y, g_winW - 210, 14, 38, 38)) {
                 // 触发主题切换过渡动画
@@ -8147,6 +8157,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (IsInRect(x, y, infoX + 50, inputY, infoW - 50, inputH)) {
                     g_editingField = EDIT_CPU_NAME;
                     g_editingText = g_cpuDisplayName;
+                    g_editingOriginalText = g_cpuDisplayName;  // 保存原始值
                     g_cursorPos = (int)g_editingText.length();
                     g_selectStart = g_selectEnd = g_cursorPos;
                     g_lastCursorBlink = GetTickCount();
@@ -8159,6 +8170,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (IsInRect(x, y, infoX + 50, inputY, infoW - 50, inputH)) {
                     g_editingField = EDIT_RAM_NAME;
                     g_editingText = g_ramDisplayName;
+                    g_editingOriginalText = g_ramDisplayName;  // 保存原始值
                     g_cursorPos = (int)g_editingText.length();
                     g_selectStart = g_selectEnd = g_cursorPos;
                     g_lastCursorBlink = GetTickCount();
@@ -8171,6 +8183,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (IsInRect(x, y, infoX + 50, inputY, infoW - 50, inputH)) {
                     g_editingField = EDIT_GPU_NAME;
                     g_editingText = g_gpuDisplayName;
+                    g_editingOriginalText = g_gpuDisplayName;  // 保存原始值
                     g_cursorPos = (int)g_editingText.length();
                     g_selectStart = g_selectEnd = g_cursorPos;
                     g_lastCursorBlink = GetTickCount();
@@ -8481,15 +8494,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_lastCursorBlink = GetTickCount();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (wParam == VK_RETURN) {
-                    // Enter: finish editing
+                    // Enter: finish editing and save
                     g_editingField = EDIT_NONE;
+                    SyncDisplayModuleNames();
+                    SaveConfig(g_configPath);
+                    g_lastOscMessage.clear();  // 清除缓存，确保新消息发送
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (wParam == VK_ESCAPE) {
-                    // Escape: cancel editing
+                    // Escape: cancel editing, restore original value
                     switch (g_editingField) {
-                        case EDIT_CPU_NAME: g_cpuDisplayName = g_editingText; break;
-                        case EDIT_RAM_NAME: g_ramDisplayName = g_editingText; break;
-                        case EDIT_GPU_NAME: g_gpuDisplayName = g_editingText; break;
+                        case EDIT_CPU_NAME: g_cpuDisplayName = g_editingOriginalText; break;
+                        case EDIT_RAM_NAME: g_ramDisplayName = g_editingOriginalText; break;
+                        case EDIT_GPU_NAME: g_gpuDisplayName = g_editingOriginalText; break;
                     }
                     g_editingField = EDIT_NONE;
                     InvalidateRect(hwnd, nullptr, FALSE);
