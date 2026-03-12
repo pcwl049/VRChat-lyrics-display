@@ -7398,17 +7398,11 @@ void DrawOverlayNow(HWND hwnd) {
 
 // 动画线程：独立驱动 overlay 绘制，绕过 Windows 消息队列
 DWORD WINAPI OverlayAnimThread(LPVOID param) {
-    LOG_INFO("OverlayAnim", "Animation thread started");
-    
-    static DWORD lastLogTime = 0;
-    static int frameCount = 0;
-    
     while (g_overlayAnimRunning) {
         DWORD now = GetTickCount();
         
         // 检查暂停是否自然结束（只在非关闭状态下检查）
         if (!g_overlayClosing && g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
-            LOG_INFO("OverlayAnim", "Pause ended naturally, starting close animation");
             g_oscPaused = false;
             g_oscPauseEndTime = 0;
             
@@ -7449,20 +7443,20 @@ DWORD WINAPI OverlayAnimThread(LPVOID param) {
         if (g_overlayClosing) {
             if (g_overlayShrinking) {
                 // 阶段1：收缩成一条竖线
-                g_overlayExpandAnim -= 0.08f;  // 加快收缩速度
+                g_overlayExpandAnim -= 0.08f;
                 if (g_overlayExpandAnim <= 0.0f) {
                     g_overlayExpandAnim = 0.0f;
                     g_overlayShrinking = false;  // 进入下落阶段
-                    LOG_INFO("OverlayAnim", "Shrink complete, starting fall animation");
                 }
-                            } else {
-                                // 阶段2：竖线向下移动消失
-                                g_overlayFallOffset += 5.0f;  // 加快下落速度
-                                if (g_overlayFallOffset > 250.0f) {  // 缩短下落距离
-                                    g_overlayAnimRunning = false;
-                                    PostMessage(g_hwnd, WM_USER + 500, 0, 0);
-                                }
-                            }        }
+            } else {
+                // 阶段2：竖线向下移动消失
+                g_overlayFallOffset += 5.0f;
+                if (g_overlayFallOffset > 250.0f) {
+                    g_overlayAnimRunning = false;
+                    PostMessage(g_hwnd, WM_USER + 500, 0, 0);
+                }
+            }
+        }
         
         // 更新粒子
         UpdateParticles();
@@ -7472,20 +7466,10 @@ DWORD WINAPI OverlayAnimThread(LPVOID param) {
             DrawOverlayNow(g_overlayHwnd);
         }
         
-        // 日志
-        frameCount++;
-        if (now - lastLogTime >= 1000) {
-            LOG_INFO("OverlayAnim", "Running at %d fps, expand=%.2f, active=%d, closing=%d, fall=%.1f", 
-                     frameCount, g_overlayExpandAnim, g_overlayActive, g_overlayClosing, g_overlayFallOffset);
-            frameCount = 0;
-            lastLogTime = now;
-        }
-        
         // 16ms 帧间隔 (~60fps)
         Sleep(16);
     }
     
-    LOG_INFO("OverlayAnim", "Animation thread stopped");
     return 0;
 }
 
@@ -7497,7 +7481,6 @@ void StartOverlayAnimThread() {
     
     g_overlayAnimRunning = true;
     g_overlayAnimThread = CreateThread(nullptr, 0, OverlayAnimThread, nullptr, 0, nullptr);
-    LOG_INFO("Overlay", "Started animation thread, handle=%p", g_overlayAnimThread);
 }
 
 // 停止动画线程
@@ -7508,30 +7491,12 @@ void StopOverlayAnimThread() {
     WaitForSingleObject(g_overlayAnimThread, 500);  // 等待最多500ms
     CloseHandle(g_overlayAnimThread);
     g_overlayAnimThread = nullptr;
-    LOG_INFO("Overlay", "Stopped animation thread");
 }
 
 // 覆盖层窗口过程
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    // 全面日志：记录所有消息
-    static DWORD lastMsgLog = 0;
-    static int msgCount = 0;
-    DWORD msgNow = GetTickCount();
-    if (msg != WM_PAINT && msg != WM_TIMER && msg != WM_NCHITTEST && msg != WM_SETCURSOR) {
-        if (msgNow - lastMsgLog >= 100 || msgCount < 50) {
-            lastMsgLog = msgNow;
-            LOG_INFO("OverlayMsg", "msg=0x%04X, count=%d", msg, ++msgCount);
-        }
-    }
-    
     switch (msg) {
         case WM_PAINT: {
-            static DWORD lastPaintLog = 0;
-            DWORD paintNow = GetTickCount();
-            if (paintNow - lastPaintLog >= 1000) {
-                lastPaintLog = paintNow;
-                LOG_INFO("OverlayPaint", "WM_PAINT start, hwnd=%p", (void*)hwnd);
-            }
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             
@@ -8603,18 +8568,6 @@ void CreateDisplayOrderDialog() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    // 全面日志：记录所有消息（排除高频消息）
-    static DWORD lastMainMsgLog = 0;
-    static int mainMsgCount = 0;
-    DWORD mainMsgNow = GetTickCount();
-    if (msg != WM_PAINT && msg != WM_NCHITTEST && msg != WM_SETCURSOR && 
-        msg != WM_MOUSEMOVE && msg != WM_NCMOUSEMOVE && msg != WM_ERASEBKGND) {
-        if (mainMsgNow - lastMainMsgLog >= 100 || mainMsgCount < 50) {
-            lastMainMsgLog = mainMsgNow;
-            LOG_INFO("MainMsg", "msg=0x%04X, count=%d", msg, ++mainMsgCount);
-        }
-    }
-    
     switch (msg) {
         case WM_CREATE: {
             LOG_INFO("Main", "WM_CREATE - Application starting");
@@ -9969,15 +9922,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER: {
             // 主定时器逻辑（timer ID = 1）
             if (wParam == 1) {
-                // 诊断：每秒记录一次定时器状态
-                static DWORD lastTimerLog = 0;
-                static int timerCount = 0;
-                DWORD timerNow = GetTickCount();
-                if (timerNow - lastTimerLog >= 1000) {
-                    lastTimerLog = timerNow;
-                    LOG_INFO("TimerMain", "Timer running, count=%d, overlay_hwnd=%p", ++timerCount, (void*)g_overlayHwnd);
-                }
-                
                 UpdateAnimations();
                 UpdatePerfStats();
                 
@@ -10022,22 +9966,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_pendingProgress = g_pendingDuration > 0 ? g_pendingCurrentTime / g_pendingDuration : 0;
                 }
 
-                // 检查OSC暂停状态是否过期（自然结束）
-                // 暂停状态检查已移至覆盖层的WM_TIMER，避免冲突
-                
                 // === 主窗口定时器驱动 overlay 更新（唯一处理点）===
                 static DWORD lastOverlayUpdate = 0;
-                static DWORD lastOverlayLog = 0;
-                
-                // 诊断：每秒记录一次 overlay 状态
-                if (now - lastOverlayLog >= 1000) {
-                    lastOverlayLog = now;
-                    int remaining = g_oscPauseEndTime > now ? (int)((g_oscPauseEndTime - now) / 1000) : 0;
-                    LOG_INFO("OverlayMain", "hwnd=%p, active=%d, IsWindow=%d, expand=%.2f, remaining=%ds, closing=%d, g_oscPaused=%d",
-                             (void*)g_overlayHwnd, g_overlayActive, 
-                             g_overlayHwnd ? IsWindow(g_overlayHwnd) : 0,
-                             g_overlayExpandAnim, remaining, g_overlayClosing, g_oscPaused);
-                }
                 
                 if (g_overlayHwnd && IsWindow(g_overlayHwnd) && g_overlayActive && (now - lastOverlayUpdate) >= 16) {
                     lastOverlayUpdate = now;
@@ -10063,14 +9993,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             g_overlayCloseDelayTime = 0;
                             g_particles.clear();
                             g_sandParticles.clear();
-                            LOG_INFO("OverlayMain", "Overlay closed (close animation complete)");
                         }
                     }
                     // 4. 检查延迟关闭时间
                     else if (g_overlayCloseDelayTime > 0 && now >= g_overlayCloseDelayTime) {
                         g_overlayCloseDelayTime = 0;
                         g_overlayClosing = true;
-                        LOG_INFO("OverlayMain", "Delay ended, starting close animation");
                     }
                     // 5. 检查暂停是否自然结束
                     else if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
@@ -10083,7 +10011,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_overlayClosing = false;
                         g_particles.clear();
                         g_sandParticles.clear();
-                        LOG_INFO("OverlayMain", "OSC pause ended naturally");
                     }
                     // 6. 安全检查
                     else if (g_overlayExpandAnim >= 1.0f) {
@@ -10091,7 +10018,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                                 (g_overlayCloseDelayTime > 0);
                         if (!hasValidProgress) {
                             g_overlayClosing = true;
-                            LOG_INFO("OverlayMain", "No valid progress, auto-closing");
                         }
                     }
                     
