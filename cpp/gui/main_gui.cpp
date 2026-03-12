@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.4.0-beta"
-#define APP_VERSION_NUM 400  // 0.4.0-beta -> 0*10000 + 4*100 + 0 = 400
+#define APP_VERSION "0.4.0"
+#define APP_VERSION_NUM 400  // 0.4.0 -> 0*10000 + 4*100 + 0 = 400
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
@@ -221,11 +221,16 @@ public:
     
     bool isConnected() const { return m_sender != nullptr; }
     
-    // 状态控制
+    // 状态控制 - 同步全局变量
     void pause(int seconds = 30) {
         m_paused = true;
         m_pauseEndTime = GetTickCount() + seconds * 1000;
         m_overlayClosing = false;
+        // 同步全局变量
+        extern bool g_oscPaused;
+        extern DWORD g_oscPauseEndTime;
+        g_oscPaused = true;
+        g_oscPauseEndTime = m_pauseEndTime;
         char msg[64];
         sprintf_s(msg, "[OSCManager] Paused for %d seconds", seconds);
         LOG_INFO("OSCManager", "%s", msg);
@@ -234,30 +239,41 @@ public:
     void resume() {
         m_paused = false;
         m_pauseEndTime = 0;
+        // 同步全局变量
+        extern bool g_oscPaused;
+        extern DWORD g_oscPauseEndTime;
+        g_oscPaused = false;
+        g_oscPauseEndTime = 0;
         LOG_INFO("OSCManager", "Resumed");
     }
     
     bool isPaused() const {
-        // 只读检查，不修改状态
-        if (m_paused && m_pauseEndTime > 0) {
-            return GetTickCount() < m_pauseEndTime;
+        // 使用全局变量进行检查，确保与 overlay 窗口一致
+        extern bool g_oscPaused;
+        extern DWORD g_oscPauseEndTime;
+        if (g_oscPaused && g_oscPauseEndTime > 0) {
+            return GetTickCount() < g_oscPauseEndTime;
         }
-        return m_paused;
+        return g_oscPaused;
     }
     
     // 获取剩余暂停时间（秒）
     int getRemainingPauseTime() {
-        if (!m_paused || m_pauseEndTime == 0) return 0;
-        DWORD remaining = m_pauseEndTime - GetTickCount();
+        extern bool g_oscPaused;
+        extern DWORD g_oscPauseEndTime;
+        if (!g_oscPaused || g_oscPauseEndTime == 0) return 0;
+        DWORD remaining = g_oscPauseEndTime - GetTickCount();
         return remaining > 0 ? (int)(remaining / 1000) : 0;
     }
     
     // 获取暂停进度（1.0 = 刚开始，0.0 = 结束）
     float getPauseProgress() {
-        if (!m_paused || m_pauseEndTime == 0) return 0.0f;
+        extern bool g_oscPaused;
+        extern DWORD g_oscPauseEndTime;
+        if (!g_oscPaused || g_oscPauseEndTime == 0) return 0.0f;
         DWORD now = GetTickCount();
-        if (now >= m_pauseEndTime) return 0.0f;
-        return (float)(m_pauseEndTime - now) / (30.0f * 1000.0f);  // 30秒总时长
+        if (now >= g_oscPauseEndTime) return 0.0f;
+        return (float)(g_oscPauseEndTime - now) / (30.0f * 1000.0f);  // 30秒总时长
     }
     
     // Overlay 控制
@@ -2470,6 +2486,10 @@ float g_overlayExpandAnim = 0.0f;  // 展开动画进度 (0=收缩, 1=完全展�
 bool g_overlayClosing = false;     // 是否正在关闭（播放收缩动画）
 DWORD g_overlayCloseDelayTime = 0; // 延迟关闭的时间戳（等待粒子效果完成）
 float g_closeProgress = 0.0f;       // 关闭时的进度值（用于粒子效果位置）
+HANDLE g_overlayAnimThread = nullptr;  // 动画线程句柄
+volatile bool g_overlayAnimRunning = false;  // 动画线程运行标志
+float g_overlayFallOffset = 0.0f;  // 下落动画偏移量
+bool g_overlayShrinking = false;   // 是否正在收缩阶段
 
 // 粒子系统
 struct Particle {
@@ -7032,8 +7052,9 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         // 发送暂停消息提示
                         OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
                         
-                        // Create overlay window
-                        CreateOverlayWindow();
+                        // 使用 PostMessage 异步创建 overlay 窗口
+                        // 在低级钩子中直接调用 CreateWindowExW 可能会阻塞消息循环
+                        PostMessage(g_hwnd, WM_USER + 201, 0, 0);
                     }
                     
                     // Redraw main window
@@ -7177,10 +7198,340 @@ COLORREF GetProgressColor(float progress) {
     }
 }
 
+// 直接绘制 overlay 内容（绕过 WM_PAINT 消息队列）
+void DrawOverlayNow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return;
+    
+    HDC hdc = GetDC(hwnd);
+    if (!hdc) return;
+    
+    int w, h;
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        w = rc.right - rc.left;
+        h = rc.bottom - rc.top;
+    }
+    
+    // 创建双缓冲
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
+    HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+    
+    // 先填充透明背景
+    {
+        RECT bgRect = {0, 0, w, h};
+        HBRUSH bgBrush = CreateSolidBrush(RGB(1, 1, 1));
+        FillRect(memDC, &bgRect, bgBrush);
+        DeleteObject(bgBrush);
+    }
+    
+    SetBkMode(memDC, TRANSPARENT);
+    
+    int barW = 260;
+    int barH = 10;
+    int barX = (w - barW) / 2;
+    int barY = h - barH - 22;
+    
+    DWORD now = GetTickCount();
+    
+    // === 正常状态：显示进度条和倒计时 ===
+    if (!g_overlayClosing) {
+        // 计算展开动画裁剪区域
+        int clipW = (int)(w * g_overlayExpandAnim);
+        int clipX = (w - clipW) / 2;
+        
+        if (clipW > 0) {
+            HRGN clipRgn = CreateRectRgn(clipX, 0, clipX + clipW, h);
+            SelectClipRgn(memDC, clipRgn);
+            
+            float progress = 0;
+            bool showProgressBar = false;
+            
+            if (g_oscPaused && g_oscPauseEndTime > now) {
+                progress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+                showProgressBar = true;
+            }
+            
+            if (showProgressBar && progress > 0) {
+                DrawRoundRect(memDC, barX, barY, barW, barH, barH / 2, RGB(60, 60, 65));
+                
+                int progressW = (int)(barW * progress);
+                if (progressW > barH) {
+                    COLORREF progressColor = GetProgressColor(progress);
+                    DrawRoundRect(memDC, barX, barY, progressW, barH, barH / 2, progressColor);
+                    
+                    if ((rand() % 4) == 0 && g_overlayExpandAnim >= 1.0f) {
+                        SandParticle sp;
+                        sp.x = (float)(barX + progressW);
+                        sp.y = -5.0f;
+                        sp.vy = 0.5f + (rand() % 10) / 10.0f;
+                        sp.size = 2 + rand() % 2;
+                        sp.color = progressColor;
+                        g_sandParticles.push_back(sp);
+                    }
+                }
+            }
+            
+            // 绘制沙漏粒子
+            for (const auto& sp : g_sandParticles) {
+                HBRUSH sandBrush = CreateSolidBrush(sp.color);
+                int py = (int)(barY - sp.y);
+                RECT sandRect = {
+                    (int)(sp.x - sp.size/2),
+                    py - sp.size/2,
+                    (int)(sp.x + sp.size/2),
+                    py + sp.size/2
+                };
+                FillRect(memDC, &sandRect, sandBrush);
+                DeleteObject(sandBrush);
+            }
+            
+            // 绘制倒计时文本
+            if (g_oscPaused && g_oscPauseEndTime > now) {
+                int remaining = (int)((g_oscPauseEndTime - now) / 1000);
+                wchar_t timeText[32];
+                swprintf_s(timeText, L"%ds", remaining);
+                
+                SetTextColor(memDC, RGB(255, 255, 255));
+                HFONT font = CreateFontW(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+                HFONT oldFont = (HFONT)SelectObject(memDC, font);
+                
+                SIZE textSize;
+                GetTextExtentPoint32W(memDC, timeText, (int)wcslen(timeText), &textSize);
+                int textX = barX + barW - textSize.cx;
+                int textY = barY - textSize.cy - 5;
+                TextOutW(memDC, textX, textY, timeText, (int)wcslen(timeText));
+                
+                SelectObject(memDC, oldFont);
+                DeleteObject(font);
+            }
+            
+            // 绘制爆发粒子
+            for (const auto& p : g_particles) {
+                HBRUSH particleBrush = CreateSolidBrush(p.color);
+                RECT pRect = {
+                    (int)(p.x - p.size/2),
+                    (int)(p.y - p.size/2),
+                    (int)(p.x + p.size/2),
+                    (int)(p.y + p.size/2)
+                };
+                FillRect(memDC, &pRect, particleBrush);
+                DeleteObject(particleBrush);
+            }
+            
+            SelectClipRgn(memDC, nullptr);
+            DeleteObject(clipRgn);
+        }
+    }
+    
+    // === 收缩阶段：进度条从两边向中间收缩成一条竖线 ===
+    if (g_overlayClosing && g_overlayShrinking) {
+        // 竖线位置（居中）
+        int lineX = w / 2;
+        int lineH = 10;  // 线的高度
+        int lineY = h - 32;  // 进度条位置
+        
+        // 收缩动画：宽度从 260 收缩到 4
+        int shrinkW = (int)(260 * g_overlayExpandAnim);
+        if (shrinkW < 4) shrinkW = 4;  // 最小宽度（竖线）
+        
+        int lineW = shrinkW;
+        int startX = lineX - lineW / 2;
+        
+        // 颜色渐变：逐渐变成淡蓝色
+        float t = 1.0f - g_overlayExpandAnim;  // 0 -> 1（收缩进度）
+        int r = (int)(180 - 80 * t);   // 180 -> 100（减少红色）
+        int g2 = (int)(180 - 30 * t);  // 180 -> 150（稍微减少绿色）
+        int b = (int)(200 + 55 * t);   // 200 -> 255（增加蓝色）
+        
+        // 绘制发光效果（更淡的蓝色光晕）
+        COLORREF glowColor = RGB(r * 60 / 255, g2 * 80 / 255, b * 100 / 255);
+        DrawRoundRect(memDC, startX - 3, lineY - 2, lineW + 6, lineH + 4, 3, glowColor);
+        
+        // 绘制竖线（淡蓝色）
+        COLORREF lineColor = RGB(r, g2, b);
+        DrawRoundRect(memDC, startX, lineY, lineW, lineH, 2, lineColor);
+    }
+    
+    // === 下落阶段：竖线向下移动消失 ===
+    if (g_overlayClosing && !g_overlayShrinking && g_overlayFallOffset > 0) {
+        int lineX = w / 2;
+        int lineW = 4;  // 细竖线
+        int lineH = 10;
+        
+        // 从进度条位置开始下落，向下移动
+        int startY = h - 32;
+        int lineY = startY + (int)g_overlayFallOffset;
+        
+        // 颜色渐变：粉 -> 橙 -> 黄
+        float fallProgress = g_overlayFallOffset / 250.0f;
+        int alpha = (int)(255 * (1.0f - fallProgress * 0.6f));
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+        
+        int r = alpha;
+        int g2 = (int)(alpha * (0.3f + 0.7f * fallProgress));  // 增加绿色成分
+        int b = (int)(alpha * (0.8f - 0.6f * fallProgress));   // 减少蓝色
+        
+        int startX = lineX - lineW / 2;
+        
+        // 绘制发光效果
+        COLORREF glowColor = RGB(r * 80 / 255, g2 * 80 / 255, b * 80 / 255);
+        DrawRoundRect(memDC, startX - 3, lineY - 2, lineW + 6, lineH + 4, 3, glowColor);
+        
+        // 绘制竖线
+        COLORREF lineColor = RGB(r, g2, b);
+        DrawRoundRect(memDC, startX, lineY, lineW, lineH, 2, lineColor);
+    }
+    
+    // 复制到屏幕
+    BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+    SelectObject(memDC, oldBmp);
+    DeleteObject(memBmp);
+    DeleteDC(memDC);
+    
+    ReleaseDC(hwnd, hdc);
+}
+
+// 动画线程：独立驱动 overlay 绘制，绕过 Windows 消息队列
+DWORD WINAPI OverlayAnimThread(LPVOID param) {
+    LOG_INFO("OverlayAnim", "Animation thread started");
+    
+    static DWORD lastLogTime = 0;
+    static int frameCount = 0;
+    
+    while (g_overlayAnimRunning) {
+        DWORD now = GetTickCount();
+        
+        // 检查暂停是否自然结束（只在非关闭状态下检查）
+        if (!g_overlayClosing && g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
+            LOG_INFO("OverlayAnim", "Pause ended naturally, starting close animation");
+            g_oscPaused = false;
+            g_oscPauseEndTime = 0;
+            
+            // 开始关闭动画（收缩 -> 下落）
+            g_overlayClosing = true;
+            g_overlayShrinking = true;  // 先进入收缩阶段
+            g_overlayFallOffset = 0.0f;
+            g_closeProgress = 0.0f;
+            
+            // 触发粒子爆发
+            g_particleBurst = true;
+            
+            // 在进度条位置生成爆发粒子
+            int screenW = GetSystemMetrics(SM_CXSCREEN);
+            int barW = 260;
+            int barX = (screenW - barW) / 2;
+            for (int i = 0; i < 30; i++) {
+                Particle p;
+                p.x = (float)(barX + barW / 2 + (rand() % 60 - 30));
+                p.y = 50.0f;
+                p.vx = (rand() % 100 - 50) / 10.0f;
+                p.vy = (rand() % 100 - 80) / 10.0f;
+                p.life = 1.0f;
+                p.maxLife = 1.0f + (rand() % 10) / 10.0f;
+                p.size = 3 + rand() % 4;
+                p.color = RGB(100 + rand() % 100, 200 + rand() % 55, 255);
+                g_particles.push_back(p);
+            }
+        }
+        
+        // 更新展开动画
+        if (!g_overlayClosing && g_overlayExpandAnim < 1.0f) {
+            g_overlayExpandAnim += 0.08f;
+            if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
+        }
+        
+        // 关闭动画：收缩 -> 下落
+        if (g_overlayClosing) {
+            if (g_overlayShrinking) {
+                // 阶段1：收缩成一条竖线
+                g_overlayExpandAnim -= 0.08f;  // 加快收缩速度
+                if (g_overlayExpandAnim <= 0.0f) {
+                    g_overlayExpandAnim = 0.0f;
+                    g_overlayShrinking = false;  // 进入下落阶段
+                    LOG_INFO("OverlayAnim", "Shrink complete, starting fall animation");
+                }
+                            } else {
+                                // 阶段2：竖线向下移动消失
+                                g_overlayFallOffset += 5.0f;  // 加快下落速度
+                                if (g_overlayFallOffset > 250.0f) {  // 缩短下落距离
+                                    g_overlayAnimRunning = false;
+                                    PostMessage(g_hwnd, WM_USER + 500, 0, 0);
+                                }
+                            }        }
+        
+        // 更新粒子
+        UpdateParticles();
+        
+        // 直接绘制
+        if (g_overlayHwnd && IsWindow(g_overlayHwnd) && g_overlayActive) {
+            DrawOverlayNow(g_overlayHwnd);
+        }
+        
+        // 日志
+        frameCount++;
+        if (now - lastLogTime >= 1000) {
+            LOG_INFO("OverlayAnim", "Running at %d fps, expand=%.2f, active=%d, closing=%d, fall=%.1f", 
+                     frameCount, g_overlayExpandAnim, g_overlayActive, g_overlayClosing, g_overlayFallOffset);
+            frameCount = 0;
+            lastLogTime = now;
+        }
+        
+        // 16ms 帧间隔 (~60fps)
+        Sleep(16);
+    }
+    
+    LOG_INFO("OverlayAnim", "Animation thread stopped");
+    return 0;
+}
+
+// 启动动画线程
+void StartOverlayAnimThread() {
+    if (g_overlayAnimThread && g_overlayAnimRunning) {
+        return;  // 已经在运行
+    }
+    
+    g_overlayAnimRunning = true;
+    g_overlayAnimThread = CreateThread(nullptr, 0, OverlayAnimThread, nullptr, 0, nullptr);
+    LOG_INFO("Overlay", "Started animation thread, handle=%p", g_overlayAnimThread);
+}
+
+// 停止动画线程
+void StopOverlayAnimThread() {
+    if (!g_overlayAnimThread) return;
+    
+    g_overlayAnimRunning = false;
+    WaitForSingleObject(g_overlayAnimThread, 500);  // 等待最多500ms
+    CloseHandle(g_overlayAnimThread);
+    g_overlayAnimThread = nullptr;
+    LOG_INFO("Overlay", "Stopped animation thread");
+}
+
 // 覆盖层窗口过程
 LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // 全面日志：记录所有消息
+    static DWORD lastMsgLog = 0;
+    static int msgCount = 0;
+    DWORD msgNow = GetTickCount();
+    if (msg != WM_PAINT && msg != WM_TIMER && msg != WM_NCHITTEST && msg != WM_SETCURSOR) {
+        if (msgNow - lastMsgLog >= 100 || msgCount < 50) {
+            lastMsgLog = msgNow;
+            LOG_INFO("OverlayMsg", "msg=0x%04X, count=%d", msg, ++msgCount);
+        }
+    }
+    
     switch (msg) {
         case WM_PAINT: {
+            static DWORD lastPaintLog = 0;
+            DWORD paintNow = GetTickCount();
+            if (paintNow - lastPaintLog >= 1000) {
+                lastPaintLog = paintNow;
+                LOG_INFO("OverlayPaint", "WM_PAINT start, hwnd=%p", (void*)hwnd);
+            }
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             
@@ -7328,66 +7679,22 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         
         case WM_TIMER: {
+            static DWORD lastOverlayTimerLog = 0;
+            DWORD otNow = GetTickCount();
+            if (otNow - lastOverlayTimerLog >= 1000) {
+                lastOverlayTimerLog = otNow;
+                LOG_INFO("OverlayTimer", "WM_TIMER, wParam=%llu", wParam);
+            }
             if (wParam == 2) {
-                DWORD now = GetTickCount();
-                
-                // 如果正在关闭，快速收缩并销毁
-                if (g_overlayClosing) {
-                    g_overlayExpandAnim -= 0.15f;  // 更快的收缩速度
-                    if (g_overlayExpandAnim <= 0.0f) {
-                        g_overlayExpandAnim = 0.0f;
-                        KillTimer(hwnd, 2);
-                        DestroyWindow(hwnd);
-                        // 注意：销毁窗口后 g_overlayHwnd 会被设为 nullptr
-                        // 这里不要 return，让 WM_DESTROY 处理清理
-                    }
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
-                }
-                
-                // 检查延迟关闭时间（等待粒子效果播放完毕）
-                if (g_overlayCloseDelayTime > 0 && now >= g_overlayCloseDelayTime) {
-                    g_overlayCloseDelayTime = 0;
-                    g_overlayClosing = true;
-                    LOG_INFO("Overlay", "Delay ended, starting close animation");
-                }
-                
-                // 更新粒子系统
-                UpdateParticles();
-                
-                // 更新展开动画
-                if (g_overlayExpandAnim < 1.0f) {
-                    g_overlayExpandAnim += 0.08f;
-                    if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
-                }
-                
-                // 检查暂停是否自然结束
-                if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
-                    g_oscPaused = false;
-                    g_oscPauseEndTime = 0;
-                    // 自然结束时直接销毁窗口，不需要关闭动画
-                    KillTimer(hwnd, 2);
-                    DestroyWindow(hwnd);
-                    LOG_INFO("Overlay", "OSC pause ended naturally, window destroyed");
-                    return 0;
-                }
-                
-                // 安全检查：如果窗口存在但没有有效的进度条显示条件，关闭窗口
-                // 这可以处理各种边缘情况，防止窗口卡住
-                bool hasValidProgress = (g_oscPaused && g_oscPauseEndTime > now) || 
-                                        (g_overlayCloseDelayTime > 0) || 
-                                        (g_overlayClosing);
-                if (!hasValidProgress && g_overlayExpandAnim >= 1.0f) {
-                    LOG_INFO("Overlay", "No valid progress condition, auto-closing");
-                    g_overlayClosing = true;
-                }
-                
+                // 只负责触发重绘，所有动画逻辑由主窗口 WM_TIMER 处理
+                // 这样避免两个定时器竞争，确保状态一致
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
         
         case WM_DESTROY:
+            LOG_INFO("Overlay", "WM_DESTROY start");
             KillTimer(hwnd, 2);
             g_overlayHwnd = nullptr;
             g_overlayActive = false;
@@ -7407,8 +7714,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 // 创建覆盖层窗口
 void CreateOverlayWindow() {
+    LOG_INFO("Overlay", "CreateOverlayWindow: Starting");
+    
     // 如果窗口已存在，先销毁（支持快速重复启动）
     if (g_overlayHwnd) {
+        LOG_INFO("Overlay", "CreateOverlayWindow: Destroying existing window");
         DestroyWindow(g_overlayHwnd);
         g_overlayHwnd = nullptr;
         g_overlayActive = false;
@@ -7422,16 +7732,17 @@ void CreateOverlayWindow() {
     
     // 进度条窗口尺寸（扩大以显示粒子效果）
     int winW = 500;   // 扩大宽度
-    int winH = 200;   // 扩大高度以显示粒子
+    int winH = 300;   // 扩大高度以显示下落动画
     int winX = (screenW - winW) / 2;  // 水平居中
-    int winY = screenH - winH - 10;   // 距离底部10像素，让粒子有空间向上飞
+    int winY = screenH - winH - 10;   // 距离底部10像素
     
     // 注册窗口类（只注册一次）
     static bool registered = false;
     if (!registered) {
+        LOG_INFO("Overlay", "CreateOverlayWindow: Registering window class");
         WNDCLASSEXW wc = {};
         wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.style = 0;  // 移除 CS_HREDRAW | CS_VREDRAW，避免频繁重绘消息
         wc.lpfnWndProc = OverlayWndProc;
         wc.hInstance = hInst;
         wc.hCursor = nullptr;
@@ -7441,34 +7752,50 @@ void CreateOverlayWindow() {
         registered = true;
     }
     
+    LOG_INFO("Overlay", "CreateOverlayWindow: Calling CreateWindowExW");
     // 创建顶层窗口，点击穿透，不抢焦点，不显示在任务栏
+    // 使用 WS_VISIBLE 直接创建可见窗口，避免 ShowWindow 调用
     g_overlayHwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
         L"VRCLyricsOverlay_Class", L"",
-        WS_POPUP,
+        WS_POPUP | WS_VISIBLE,
         winX, winY, winW, winH,
         nullptr, nullptr, hInst, nullptr);
+    LOG_INFO("Overlay", "CreateOverlayWindow: CreateWindowExW returned, hwnd=%p", (void*)g_overlayHwnd);
     
+    LOG_INFO("Overlay", "CreateOverlayWindow: Calling SetLayeredWindowAttributes");
     // 使用颜色键透明：RGB(1,1,1) 将变为透明，这样收缩动画时未绘制区域会自动透明
     SetLayeredWindowAttributes(g_overlayHwnd, RGB(1, 1, 1), 0, LWA_COLORKEY);
+    LOG_INFO("Overlay", "CreateOverlayWindow: SetLayeredWindowAttributes returned");
     
-    // 设置覆盖层自己的定时器（16ms，约60fps）
-    SetTimer(g_overlayHwnd, 2, 16, nullptr);
+    // 不设置独立定时器，由主窗口定时器驱动重绘
+    // SetTimer(g_overlayHwnd, 2, 16, nullptr);
     
     // 初始化展开动画：从中间向两边展开
     g_overlayExpandAnim = 0.0f;
     g_overlayClosing = false;
     g_overlayCloseDelayTime = 0;
     
-    ShowWindow(g_overlayHwnd, SW_SHOWNOACTIVATE);
-    UpdateWindow(g_overlayHwnd);
+    // 不调用 ShowWindow（窗口已在创建时可见 WS_VISIBLE）
+    // 不调用 UpdateWindow（它会阻塞消息循环）
+    // 窗口会由定时器触发的 InvalidateRect 来重绘
     g_overlayActive = true;
+    
+    // 确保 main window timer 仍然运行
+    LOG_INFO("Overlay", "Created overlay window, re-ensuring main timer");
+    SetTimer(g_hwnd, 1, 16, nullptr);
+    
+    // 启动动画线程
+    StartOverlayAnimThread();
     
     LOG_INFO("Overlay", "Created overlay window at bottom center of screen");
 }
 
 // 销毁覆盖层窗口
 void DestroyOverlayWindow() {
+    // 先停止动画线程
+    StopOverlayAnimThread();
+    
     if (g_overlayHwnd) {
         // 定时器会在WM_DESTROY中清理
         DestroyWindow(g_overlayHwnd);
@@ -7476,6 +7803,8 @@ void DestroyOverlayWindow() {
         g_overlayActive = false;
         g_overlayClosing = false;
         g_overlayCloseDelayTime = 0;
+        g_overlayShrinking = false;
+        g_overlayFallOffset = 0.0f;
         g_particles.clear();
         g_sandParticles.clear();
         g_particleBurst = false;
@@ -8274,6 +8603,18 @@ void CreateDisplayOrderDialog() {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // 全面日志：记录所有消息（排除高频消息）
+    static DWORD lastMainMsgLog = 0;
+    static int mainMsgCount = 0;
+    DWORD mainMsgNow = GetTickCount();
+    if (msg != WM_PAINT && msg != WM_NCHITTEST && msg != WM_SETCURSOR && 
+        msg != WM_MOUSEMOVE && msg != WM_NCMOUSEMOVE && msg != WM_ERASEBKGND) {
+        if (mainMsgNow - lastMainMsgLog >= 100 || mainMsgCount < 50) {
+            lastMainMsgLog = mainMsgNow;
+            LOG_INFO("MainMsg", "msg=0x%04X, count=%d", msg, ++mainMsgCount);
+        }
+    }
+    
     switch (msg) {
         case WM_CREATE: {
             LOG_INFO("Main", "WM_CREATE - Application starting");
@@ -9628,6 +9969,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER: {
             // 主定时器逻辑（timer ID = 1）
             if (wParam == 1) {
+                // 诊断：每秒记录一次定时器状态
+                static DWORD lastTimerLog = 0;
+                static int timerCount = 0;
+                DWORD timerNow = GetTickCount();
+                if (timerNow - lastTimerLog >= 1000) {
+                    lastTimerLog = timerNow;
+                    LOG_INFO("TimerMain", "Timer running, count=%d, overlay_hwnd=%p", ++timerCount, (void*)g_overlayHwnd);
+                }
+                
                 UpdateAnimations();
                 UpdatePerfStats();
                 
@@ -9674,6 +10024,82 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 // 检查OSC暂停状态是否过期（自然结束）
                 // 暂停状态检查已移至覆盖层的WM_TIMER，避免冲突
+                
+                // === 主窗口定时器驱动 overlay 更新（唯一处理点）===
+                static DWORD lastOverlayUpdate = 0;
+                static DWORD lastOverlayLog = 0;
+                
+                // 诊断：每秒记录一次 overlay 状态
+                if (now - lastOverlayLog >= 1000) {
+                    lastOverlayLog = now;
+                    int remaining = g_oscPauseEndTime > now ? (int)((g_oscPauseEndTime - now) / 1000) : 0;
+                    LOG_INFO("OverlayMain", "hwnd=%p, active=%d, IsWindow=%d, expand=%.2f, remaining=%ds, closing=%d, g_oscPaused=%d",
+                             (void*)g_overlayHwnd, g_overlayActive, 
+                             g_overlayHwnd ? IsWindow(g_overlayHwnd) : 0,
+                             g_overlayExpandAnim, remaining, g_overlayClosing, g_oscPaused);
+                }
+                
+                if (g_overlayHwnd && IsWindow(g_overlayHwnd) && g_overlayActive && (now - lastOverlayUpdate) >= 16) {
+                    lastOverlayUpdate = now;
+                    
+                    // 1. 更新展开动画
+                    if (!g_overlayClosing && g_overlayExpandAnim < 1.0f) {
+                        g_overlayExpandAnim += 0.08f;
+                        if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
+                    }
+                    
+                    // 2. 更新粒子系统
+                    UpdateParticles();
+                    
+                    // 3. 关闭动画处理
+                    if (g_overlayClosing) {
+                        g_overlayExpandAnim -= 0.15f;
+                        if (g_overlayExpandAnim <= 0.0f) {
+                            g_overlayExpandAnim = 0.0f;
+                            DestroyWindow(g_overlayHwnd);
+                            g_overlayHwnd = nullptr;
+                            g_overlayActive = false;
+                            g_overlayClosing = false;
+                            g_overlayCloseDelayTime = 0;
+                            g_particles.clear();
+                            g_sandParticles.clear();
+                            LOG_INFO("OverlayMain", "Overlay closed (close animation complete)");
+                        }
+                    }
+                    // 4. 检查延迟关闭时间
+                    else if (g_overlayCloseDelayTime > 0 && now >= g_overlayCloseDelayTime) {
+                        g_overlayCloseDelayTime = 0;
+                        g_overlayClosing = true;
+                        LOG_INFO("OverlayMain", "Delay ended, starting close animation");
+                    }
+                    // 5. 检查暂停是否自然结束
+                    else if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
+                        OSCManager::instance().resume();
+                        g_oscPaused = false;
+                        g_oscPauseEndTime = 0;
+                        DestroyWindow(g_overlayHwnd);
+                        g_overlayHwnd = nullptr;
+                        g_overlayActive = false;
+                        g_overlayClosing = false;
+                        g_particles.clear();
+                        g_sandParticles.clear();
+                        LOG_INFO("OverlayMain", "OSC pause ended naturally");
+                    }
+                    // 6. 安全检查
+                    else if (g_overlayExpandAnim >= 1.0f) {
+                        bool hasValidProgress = (g_oscPaused && g_oscPauseEndTime > now) || 
+                                                (g_overlayCloseDelayTime > 0);
+                        if (!hasValidProgress) {
+                            g_overlayClosing = true;
+                            LOG_INFO("OverlayMain", "No valid progress, auto-closing");
+                        }
+                    }
+                    
+                    // 触发 overlay 重绘
+                    if (g_overlayHwnd && IsWindow(g_overlayHwnd)) {
+                        InvalidateRect(g_overlayHwnd, nullptr, FALSE);
+                    }
+                }
                 
                 // 更新光标闪烁状态
                 if (g_editingField != EDIT_NONE && (now - g_lastCursorBlink) >= 500) {
@@ -10028,6 +10454,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DestroyWindow(hwnd);
             return 0;
         
+        case WM_USER + 201: {
+            // 异步创建 overlay 窗口（从低级键盘钩子中 PostMessage 触发）
+            if (!g_overlayHwnd && g_oscPaused) {
+                CreateOverlayWindow();
+                LOG_INFO("Main", "Overlay window created asynchronously via PostMessage");
+            }
+            return 0;
+        }
+        
         case WM_USER + 102: {
             // OSC接收器回调 - 切换暂停状态
             bool isReallyPaused = OSCManager::instance().isPaused();
@@ -10085,6 +10520,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 CreateOverlayWindow();
             }
             InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        
+        case WM_USER + 500: {
+            // 动画线程请求关闭 overlay 窗口
+            LOG_INFO("Overlay", "Received close request from animation thread");
+            DestroyOverlayWindow();
             return 0;
         }
         
