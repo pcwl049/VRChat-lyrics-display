@@ -22,6 +22,29 @@ static std::string GetDebugLogPath(const char* filename) {
     return std::string(tempPath);
 }
 
+// Check and rotate log if too large (max 1MB)
+static void CheckLogSize(const std::string& logPath) {
+    FILE* f = fopen(logPath.c_str(), "r");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        fclose(f);
+        if (size > 1024 * 1024) {
+            DeleteFileA(logPath.c_str());
+        }
+    }
+}
+
+// Clean all moekoe debug logs (called at program startup)
+static void CleanMoekoeLogs() {
+    std::string debugLog = GetDebugLogPath("moekoe_debug.log");
+    std::string krcLog = GetDebugLogPath("moekoe_krc.log");
+    std::string oscLog = GetDebugLogPath("moekoe_osc.log");
+    DeleteFileA(debugLog.c_str());
+    DeleteFileA(krcLog.c_str());
+    DeleteFileA(oscLog.c_str());
+}
+
 static std::string base64Encode(const std::string& input) {
     static const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string result;
@@ -98,6 +121,8 @@ bool MoeKoeWS::connect() {
     GetTempPathA(MAX_PATH, tempPath);
     strcat_s(tempPath, "\\moekoe_debug.log");
     
+    // Check log size before writing
+    CheckLogSize(tempPath);
     FILE* f = fopen(tempPath, "a");
     if (f) fprintf(f, "=== CONNECT START ===\n");
     

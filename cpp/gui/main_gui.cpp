@@ -7331,16 +7331,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == 2) {
                 DWORD now = GetTickCount();
                 
-                // 调试日志：每秒输出一次状态
-                static DWORD lastDebugLog = 0;
-                if (now - lastDebugLog > 1000) {
-                    lastDebugLog = now;
-                    LOG_INFO("Overlay", "Timer: g_oscPaused=%d, g_oscPauseEndTime=%u, now=%u, remaining=%dms, g_overlayClosing=%d, g_overlayCloseDelayTime=%u",
-                             g_oscPaused, g_oscPauseEndTime, now, 
-                             (g_oscPauseEndTime > now) ? (int)(g_oscPauseEndTime - now) : 0,
-                             g_overlayClosing, g_overlayCloseDelayTime);
-                }
-                
                 // 如果正在关闭，快速收缩并销毁
                 if (g_overlayClosing) {
                     g_overlayExpandAnim -= 0.15f;  // 更快的收缩速度
@@ -9680,14 +9670,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // 更新显示数据
                     g_pendingTime = FormatTime(g_pendingCurrentTime) + L" / " + FormatTime(g_pendingDuration);
                     g_pendingProgress = g_pendingDuration > 0 ? g_pendingCurrentTime / g_pendingDuration : 0;
-                    
-                    // 每2秒输出进度条日志
-                    static DWORD lastProgressLog = 0;
-                    if (now - lastProgressLog > 2000) {
-                        lastProgressLog = now;
-                        LOG_INFO("Progress", "isPlaying=%d, smtcPos=%.1f, lastUpdate=%.1f, elapsed=%.1f, displayPos=%.1f, duration=%.1f",
-                                 g_pendingIsPlaying, g_smtcPosition, g_smtcLastUpdateTime, elapsed, g_pendingCurrentTime, g_pendingDuration);
-                    }
                 }
 
                 // 检查OSC暂停状态是否过期（自然结束）
@@ -9706,8 +9688,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     lastPauseUpdate = now;
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
-                
-                // 覆盖层窗口有自己的定时器更新，这里不需要更新
 
                 // Smart redraw: only redraw when needed
                 
@@ -10954,7 +10934,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     
     // 启动时发送测试消息，确保OSC连接正常
     if (OSCManager::instance().isConnected() && OSCManager::instance().isEnabled()) {
-        OSCManager::instance().sendSystemMessage(L"VRChatlyricsdisplay\n这是一条测试消息哦~\n用于确保OSC消息正常使用");
+        OSCManager::instance().sendSystemMessage(L"VRChatlyricsdisplay\n这是一条测试消息哦~\n用于确保OSC消息可以正常使用");
         LOG_INFO("Main", "Startup test message sent");
     }
     

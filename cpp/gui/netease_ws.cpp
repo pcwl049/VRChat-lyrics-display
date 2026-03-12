@@ -32,11 +32,24 @@ static bool isPortOpen(int port) {
     return (result == 0);
 }
 
-// Debug log to file - use temp directory
+// Debug log to file - use temp directory (with size limit)
 static void DebugLog(const char* msg) {
     char tempPath[MAX_PATH];
     GetTempPathA(MAX_PATH, tempPath);
     strcat_s(tempPath, "\\netease_debug.log");
+    
+    // Check file size and rotate if needed (max 1MB)
+    HANDLE hCheck = CreateFileA(tempPath, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hCheck != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER fileSize;
+        if (GetFileSizeEx(hCheck, &fileSize) && fileSize.QuadPart > 1024 * 1024) {
+            CloseHandle(hCheck);
+            // Delete old log when too large
+            DeleteFileA(tempPath);
+        } else {
+            CloseHandle(hCheck);
+        }
+    }
     
     HANDLE hFile = CreateFileA(tempPath, 
         FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -52,6 +65,18 @@ static void DebugLog(const wchar_t* msg) {
     char tempPath[MAX_PATH];
     GetTempPathA(MAX_PATH, tempPath);
     strcat_s(tempPath, "\\netease_debug.log");
+    
+    // Check file size and rotate if needed (max 1MB)
+    HANDLE hCheck = CreateFileA(tempPath, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hCheck != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER fileSize;
+        if (GetFileSizeEx(hCheck, &fileSize) && fileSize.QuadPart > 1024 * 1024) {
+            CloseHandle(hCheck);
+            DeleteFileA(tempPath);
+        } else {
+            CloseHandle(hCheck);
+        }
+    }
     
     HANDLE hFile = CreateFileA(tempPath, 
         FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
