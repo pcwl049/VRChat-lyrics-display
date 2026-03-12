@@ -237,18 +237,12 @@ public:
         LOG_INFO("OSCManager", "Resumed");
     }
     
-    bool isPaused() {
-        // 自动处理暂停过期
+    bool isPaused() const {
+        // 只读检查，不修改状态
         if (m_paused && m_pauseEndTime > 0) {
-            if (GetTickCount() >= m_pauseEndTime) {
-                m_paused = false;
-                m_pauseEndTime = 0;
-                // 开始关闭动画
-                m_overlayClosing = true;
-                return false;
-            }
+            return GetTickCount() < m_pauseEndTime;
         }
-        return m_paused && !m_overlayClosing;
+        return m_paused;
     }
     
     // 获取剩余暂停时间（秒）
@@ -1598,14 +1592,23 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
         return lyrics;
     }
     
-    // Parse track_id (number after "id":)
+    // Parse track_id - can be number or string format
+    // Number format: "id":123456
+    // String format: "id":"123456"
     size_t idStart = trackIdPos + 5;  // skip "id":
     // Skip whitespace
     while (idStart < searchResp.length() && (searchResp[idStart] == ' ' || searchResp[idStart] == '\t')) {
         idStart++;
     }
     
-    // Find end of number
+    // Check if it's a quoted string
+    bool isQuoted = false;
+    if (idStart < searchResp.length() && searchResp[idStart] == '"') {
+        isQuoted = true;
+        idStart++;  // skip opening quote
+    }
+    
+    // Find end of ID (number digits)
     size_t idEnd = idStart;
     while (idEnd < searchResp.length() && isdigit((unsigned char)searchResp[idEnd])) {
         idEnd++;
@@ -1655,9 +1658,15 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     
-    // Debug: log lyrics response (first 500 chars)
-    std::string lrcDbg = "[Qishui] Lyrics response: " + lyricsResp.substr(0, (std::min)((size_t)500, lyricsResp.length()));
+    // Debug: log lyrics response (first 1000 chars and search for key patterns)
+    std::string lrcDbg = "[Qishui] Lyrics response length: " + std::to_string(lyricsResp.length());
     LOG_INFO("Qishui Music", "%s", lrcDbg.c_str());
+    
+    // Look for _ROUTER_DATA which contains the actual lyrics
+    size_t routerPos = lyricsResp.find("_ROUTER_DATA");
+    if (routerPos != std::string::npos) {
+        LOG_INFO("Qishui Music", "Found _ROUTER_DATA at position %zu", routerPos);
+    }
     
     // Parse lyrics from HTML/JSON response
     // Format: "sentences":[{"startMs":0,"endMs":5000,"words":[{"text":"xxx","startMs":0}]}]
@@ -1667,86 +1676,122 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
         // Try alternative format: audioWithLyricsOption
         sentencesPos = lyricsResp.find("\"audioWithLyricsOption\"");
         if (sentencesPos != std::string::npos) {
+            LOG_INFO("Qishui Music", "Found audioWithLyricsOption, searching for sentences");
             sentencesPos = lyricsResp.find("\"sentences\":[", sentencesPos);
         }
     }
     
     if (sentencesPos == std::string::npos) {
         LOG_INFO("Qishui Music", "No sentences found in lyrics response");
+        // Log some content around potential lyrics markers
+        size_t lyricPos = lyricsResp.find("\"lyric");
+        if (lyricPos != std::string::npos) {
+            std::string sample = lyricsResp.substr(lyricPos, (std::min)((size_t)300, lyricsResp.length() - lyricPos));
+            LOG_INFO("Qishui Music", "Found 'lyric' marker: %s", sample.c_str());
+        }
         return lyrics;
     }
     
-    // Parse each sentence
-    size_t pos = sentencesPos + 13;  // skip "sentences":[
-    int bracketCount = 1;
-    size_t sentenceStart = pos;
+    // Log sentences content for debugging
+    std::string sentencesSample = lyricsResp.substr(sentencesPos, (std::min)((size_t)500, lyricsResp.length() - sentencesPos));
+    LOG_INFO("Qishui Music", "Sentences sample: %s", sentencesSample.c_str());
     
-    while (pos < lyricsResp.length() && bracketCount > 0) {
-        if (lyricsResp[pos] == '{') {
-            // Find startMs and text in this sentence object
-            size_t objStart = pos;
-            size_t objEnd = lyricsResp.find("},", pos);
-            if (objEnd == std::string::npos) {
-                objEnd = lyricsResp.find("}]", pos);
-            }
-            if (objEnd == std::string::npos) break;
-            
-            std::string sentenceObj = lyricsResp.substr(objStart, objEnd - objStart + 1);
-            
-            // Extract startMs
-            int startMs = 0;
-            size_t startMsPos = sentenceObj.find("\"startMs\":");
-            if (startMsPos != std::string::npos) {
-                size_t msStart = startMsPos + 10;
-                startMs = atoi(sentenceObj.c_str() + msStart);
-            }
-            
-            // Extract words text
-            std::string sentenceText;
-            size_t wordsPos = sentenceObj.find("\"words\":[");
-            if (wordsPos != std::string::npos) {
-                // Parse each word
-                size_t wordPos = wordsPos + 9;
-                while (wordPos < sentenceObj.length()) {
-                    size_t textPos = sentenceObj.find("\"text\":\"", wordPos);
-                    if (textPos == std::string::npos) break;
-                    
-                    size_t textStart = textPos + 8;
-                    size_t textEnd = sentenceObj.find("\"", textStart);
-                    if (textEnd == std::string::npos) break;
-                    
-                    sentenceText += sentenceObj.substr(textStart, textEnd - textStart);
-                    wordPos = textEnd + 1;
-                    
-                    // Move to next word
-                    size_t nextWord = sentenceObj.find("{", wordPos);
-                    if (nextWord == std::string::npos) break;
-                    wordPos = nextWord;
-                }
-            } else {
-                // Try direct "text" field
-                size_t textPos = sentenceObj.find("\"text\":\"");
-                if (textPos != std::string::npos) {
-                    size_t textStart = textPos + 8;
-                    size_t textEnd = sentenceObj.find("\"", textStart);
-                    if (textEnd != std::string::npos) {
-                        sentenceText = sentenceObj.substr(textStart, textEnd - textStart);
+    // Parse each sentence using bracket counting for proper JSON parsing
+    size_t pos = sentencesPos + 13;  // skip "sentences":[
+    
+    while (pos < lyricsResp.length()) {
+        // Skip whitespace and commas
+        while (pos < lyricsResp.length() && (lyricsResp[pos] == ' ' || lyricsResp[pos] == '\t' || lyricsResp[pos] == ',' || lyricsResp[pos] == '\n' || lyricsResp[pos] == '\r')) {
+            pos++;
+        }
+        
+        // Check for end of array
+        if (pos >= lyricsResp.length() || lyricsResp[pos] == ']') break;
+        
+        // Find start of sentence object
+        if (lyricsResp[pos] != '{') {
+            pos++;
+            continue;
+        }
+        
+        // Find end of sentence object using bracket counting
+        size_t objStart = pos;
+        int depth = 0;
+        bool inString = false;
+        while (pos < lyricsResp.length()) {
+            char c = lyricsResp[pos];
+            if (c == '"' && (pos == 0 || lyricsResp[pos-1] != '\\')) {
+                inString = !inString;
+            } else if (!inString) {
+                if (c == '{') depth++;
+                else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        pos++;  // include the closing }
+                        break;
                     }
                 }
             }
+            pos++;
+        }
+        
+        std::string sentenceObj = lyricsResp.substr(objStart, pos - objStart);
+        
+        // Extract startMs
+        int startMs = -1;
+        size_t startMsPos = sentenceObj.find("\"startMs\":");
+        if (startMsPos != std::string::npos) {
+            size_t msStart = startMsPos + 10;
+            // Skip whitespace
+            while (msStart < sentenceObj.length() && (sentenceObj[msStart] == ' ' || sentenceObj[msStart] == '\t')) {
+                msStart++;
+            }
+            startMs = atoi(sentenceObj.c_str() + msStart);
+        }
+        
+        // Extract sentence-level text (not from words array)
+        // Find "text":" that appears BEFORE "words":[
+        std::string sentenceText;
+        size_t wordsArrayPos = sentenceObj.find("\"words\":[");
+        
+        size_t textSearchPos = 0;
+        while (textSearchPos < sentenceObj.length()) {
+            size_t textPos = sentenceObj.find("\"text\":\"", textSearchPos);
+            if (textPos == std::string::npos) break;
             
-            if (!sentenceText.empty() && startMs >= 0) {
+            // Check if this text is inside words array
+            if (wordsArrayPos != std::string::npos && textPos > wordsArrayPos) {
+                // This text is inside words array, skip it
+                textSearchPos = textPos + 8;
+                continue;
+            }
+            
+            // This is the sentence-level text
+            size_t textStart = textPos + 8;
+            size_t textEnd = sentenceObj.find("\"", textStart);
+            if (textEnd != std::string::npos) {
+                sentenceText = sentenceObj.substr(textStart, textEnd - textStart);
+                break;
+            }
+            break;
+        }
+        
+        // Skip metadata lines (作曲, 作词, etc.)
+        if (!sentenceText.empty() && startMs >= 0) {
+            // Skip if it looks like metadata
+            bool isMetadata = (sentenceText.find("作曲") != std::string::npos ||
+                               sentenceText.find("作词") != std::string::npos ||
+                               sentenceText.find("编曲") != std::string::npos ||
+                               sentenceText.find("浣滄洸") != std::string::npos ||  // UTF-8 作曲
+                               sentenceText.find("浣滆瘝") != std::string::npos ||  // UTF-8 作词
+                               sentenceText.find("缂栨洸") != std::string::npos);   // UTF-8 编曲
+            
+            if (!isMetadata) {
                 moekoe::LyricLine line;
                 line.startTime = startMs;
                 line.text = Utf8ToWstring(sentenceText);
                 lyrics.push_back(line);
             }
-            
-            pos = objEnd + 1;
-        } else {
-            if (lyricsResp[pos] == '[') bracketCount++;
-            else if (lyricsResp[pos] == ']') bracketCount--;
-            pos++;
         }
     }
     
@@ -1756,6 +1801,12 @@ std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& ti
     });
     
     LOG_INFO("Qishui Music", "Parsed %zu lyric lines", lyrics.size());
+    
+    // Log first few lyrics for debugging
+    for (size_t i = 0; i < (std::min)((size_t)5, lyrics.size()); i++) {
+        LOG_INFO("Qishui Music", "Lyric[%zu]: time=%d ms, text='%s'", 
+                 i, lyrics[i].startTime, WstringToUtf8(lyrics[i].text).c_str());
+    }
     
     return lyrics;
 }
@@ -2136,8 +2187,11 @@ bool g_checkboxHover[7] = {false, false, false, false, false, false, false};  //
 // Song data
 std::wstring g_pendingTitle, g_pendingArtist, g_pendingTime;
 double g_pendingProgress = 0;
-double g_pendingCurrentTime = 0;
+double g_pendingCurrentTime = 0;       // 实时显示位置（由定时器更新）
+double g_smtcPosition = 0;             // SMTC 最后报告的 position
 double g_pendingDuration = 0;
+double g_smtcLastUpdateTime = 0;       // SMTC 提供的 UTC 时间戳（秒），记录 position 更新时的 UTC 时间
+DWORD g_pendingPositionTick = 0;       // 本地时间戳，记录 SMTC position 最后更新时间
 bool g_pendingIsPlaying = true;
 std::vector<moekoe::LyricLine> g_pendingLyrics;
 DWORD g_lastOscSendTime = 0;
@@ -2415,6 +2469,7 @@ bool g_overlayActive = false;
 float g_overlayExpandAnim = 0.0f;  // 展开动画进度 (0=收缩, 1=完全展开)
 bool g_overlayClosing = false;     // 是否正在关闭（播放收缩动画）
 DWORD g_overlayCloseDelayTime = 0; // 延迟关闭的时间戳（等待粒子效果完成）
+float g_closeProgress = 0.0f;       // 关闭时的进度值（用于粒子效果位置）
 
 // 粒子系统
 struct Particle {
@@ -4050,6 +4105,25 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
     
     std::wstring songKey = info.title + L" - " + info.artist;
     if (info.hasData && info.isPlaying && songKey != g_lastSongKey && !info.title.empty()) {
+        // 歌曲切换 - 重置 overlay 窗口的进度条状态，避免继承上一首歌的进度
+        if (g_oscPaused && g_overlayHwnd) {
+            LOG_INFO("Main", "Song changed while paused, resetting overlay progress");
+            g_closeProgress = 0.0f;
+            // 如果正在暂停，关闭 overlay 窗口
+            OSCManager::instance().resume();
+            g_oscPaused = false;
+            g_oscPauseEndTime = 0;
+            if (g_overlayHwnd) {
+                DestroyWindow(g_overlayHwnd);
+                g_overlayHwnd = nullptr;
+                g_overlayActive = false;
+                g_overlayClosing = false;
+                g_overlayCloseDelayTime = 0;
+                g_overlayExpandAnim = 0.0f;
+                g_particles.clear();
+                g_sandParticles.clear();
+            }
+        }
         g_lastSongKey = songKey;
         g_todayPlays++; g_totalSongs++; g_hasPlayedSong = true;
     }
@@ -4074,15 +4148,8 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
         }
     }
     
-    // 通过 OSCManager 检查暂停状态（自动处理过期）
-    // 同时同步全局变量用于 UI 显示
-    bool oscWasPaused = g_oscPaused;
-    g_oscPaused = OSCManager::instance().isPaused();
-    if (oscWasPaused && !g_oscPaused) {
-        // 暂停刚刚结束，开始关闭动画
-        g_overlayClosing = OSCManager::instance().isOverlayClosing();
-        LOG_INFO("OSC", "Pause ended naturally in send logic, closing animation");
-    }
+    // 暂停状态由 overlay 窗口的定时器和热键处理来管理
+    // 不要在这里修改 g_oscPaused，避免干扰 overlay 窗口
     
     // OSC发送条件：性能模式或有音乐数据时发送
     bool shouldSendOSC = !OSCManager::instance().isPaused();
@@ -6923,6 +6990,14 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         // 发送恢复消息提示
                         OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                         
+                        // 保存当前进度值（用于关闭动画期间的粒子效果）
+                        DWORD now = GetTickCount();
+                        if (g_oscPauseEndTime > now) {
+                            g_closeProgress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+                        } else {
+                            g_closeProgress = 0.0f;
+                        }
+                        
                         // 触发粒子爆炸（在进度条末端）
                         TriggerParticleBurstAtProgressEnd();
                         
@@ -6932,12 +7007,10 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         
                         // 延迟关闭动画（等待粒子效果播放）
                         // 粒子效果约 2-3 秒，延迟 1.5 秒后开始关闭
-                        if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
-                            OSCManager::instance().setOverlayClosing(true);
-                            g_overlayClosing = false;  // 先不开始关闭
+                        if (g_overlayHwnd && !g_overlayClosing) {
                             g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
                         }
-                    } else if (g_overlayHwnd && (OSCManager::instance().isOverlayClosing() || g_overlayCloseDelayTime > 0)) {
+                    } else if (g_overlayHwnd && (g_overlayClosing || g_overlayCloseDelayTime > 0)) {
                         // 正在关闭动画中或等待关闭，加速关闭
                         LOG_INFO("Hotkey", "Accelerating overlay close");
                         DestroyWindow(g_overlayHwnd);
@@ -6945,7 +7018,6 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                         g_overlayActive = false;
                         g_overlayClosing = false;
                         g_overlayCloseDelayTime = 0;
-                        OSCManager::instance().setOverlayClosing(false);
                         g_overlayExpandAnim = 0.0f;
                         g_particles.clear();
                         g_sandParticles.clear();
@@ -7069,9 +7141,9 @@ void TriggerParticleBurstAtProgressEnd() {
     int barX = (w - barW) / 2;  // 水平居中
     int barY = h - barH - 22;
     
-    // 计算当前进度
-    float progress = 0;
-    if (g_oscPauseEndTime > 0) {
+    // 计算当前进度 - 优先使用保存的进度值
+    float progress = g_closeProgress;  // 使用保存的进度值（强制恢复时）
+    if (progress <= 0 && g_oscPauseEndTime > 0) {
         DWORD now = GetTickCount();
         if (g_oscPauseEndTime > now) {
             progress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
@@ -7154,15 +7226,20 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 // 计算进度
                 DWORD now = GetTickCount();
                 float progress = 0;
+                bool showProgressBar = false;
+                
+                // 只在正常暂停状态下显示进度条
+                // 粒子爆发后（g_overlayCloseDelayTime > 0 或 g_overlayClosing）不显示进度条
                 if (g_oscPaused && g_oscPauseEndTime > now) {
                     progress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+                    showProgressBar = true;
                 }
                 
                 // 更新粒子
                 UpdateParticles();
                 
-                // 只有在暂停状态有效时才绘制进度条
-                if (g_oscPaused && g_oscPauseEndTime > now) {
+                // 绘制进度条
+                if (showProgressBar && progress > 0) {
                     // 绘制进度条背景（圆角）
                     DrawRoundRect(memDC, barX, barY, barW, barH, barH / 2, RGB(60, 60, 65));
                     
@@ -7254,6 +7331,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == 2) {
                 DWORD now = GetTickCount();
                 
+                // 调试日志：每秒输出一次状态
+                static DWORD lastDebugLog = 0;
+                if (now - lastDebugLog > 1000) {
+                    lastDebugLog = now;
+                    LOG_INFO("Overlay", "Timer: g_oscPaused=%d, g_oscPauseEndTime=%u, now=%u, remaining=%dms, g_overlayClosing=%d, g_overlayCloseDelayTime=%u",
+                             g_oscPaused, g_oscPauseEndTime, now, 
+                             (g_oscPauseEndTime > now) ? (int)(g_oscPauseEndTime - now) : 0,
+                             g_overlayClosing, g_overlayCloseDelayTime);
+                }
+                
                 // 如果正在关闭，快速收缩并销毁
                 if (g_overlayClosing) {
                     g_overlayExpandAnim -= 0.15f;  // 更快的收缩速度
@@ -7261,7 +7348,8 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         g_overlayExpandAnim = 0.0f;
                         KillTimer(hwnd, 2);
                         DestroyWindow(hwnd);
-                        return 0;
+                        // 注意：销毁窗口后 g_overlayHwnd 会被设为 nullptr
+                        // 这里不要 return，让 WM_DESTROY 处理清理
                     }
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
@@ -7287,8 +7375,21 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
                     g_oscPaused = false;
                     g_oscPauseEndTime = 0;
+                    // 自然结束时直接销毁窗口，不需要关闭动画
+                    KillTimer(hwnd, 2);
+                    DestroyWindow(hwnd);
+                    LOG_INFO("Overlay", "OSC pause ended naturally, window destroyed");
+                    return 0;
+                }
+                
+                // 安全检查：如果窗口存在但没有有效的进度条显示条件，关闭窗口
+                // 这可以处理各种边缘情况，防止窗口卡住
+                bool hasValidProgress = (g_oscPaused && g_oscPauseEndTime > now) || 
+                                        (g_overlayCloseDelayTime > 0) || 
+                                        (g_overlayClosing);
+                if (!hasValidProgress && g_overlayExpandAnim >= 1.0f) {
+                    LOG_INFO("Overlay", "No valid progress condition, auto-closing");
                     g_overlayClosing = true;
-                    LOG_INFO("Overlay", "OSC pause ended naturally, closing");
                 }
                 
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -8284,6 +8385,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // 发送恢复消息提示
                     OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                     
+                    // 保存当前进度值（用于关闭动画期间的粒子效果）
+                    if (g_oscPauseEndTime > now) {
+                        g_closeProgress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+                    } else {
+                        g_closeProgress = 0.0f;
+                    }
+                    
                     // 触发粒子爆炸（在进度条末端）
                     TriggerParticleBurstAtProgressEnd();
                     
@@ -8292,12 +8400,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_oscPauseEndTime = 0;
                     
                     // 延迟关闭动画（等待粒子效果播放）
-                    if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
-                        OSCManager::instance().setOverlayClosing(true);
-                        g_overlayClosing = false;  // 先不开始关闭
+                    if (g_overlayHwnd && !g_overlayClosing) {
                         g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
                     }
-                } else if (g_overlayHwnd && (OSCManager::instance().isOverlayClosing() || g_overlayCloseDelayTime > 0)) {
+                } else if (g_overlayHwnd && (g_overlayClosing || g_overlayCloseDelayTime > 0)) {
                     // 正在关闭动画中或等待关闭，加速关闭
                     LOG_INFO("Hotkey", "Accelerating overlay close");
                     DestroyWindow(g_overlayHwnd);
@@ -8305,7 +8411,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_overlayActive = false;
                     g_overlayClosing = false;
                     g_overlayCloseDelayTime = 0;
-                    OSCManager::instance().setOverlayClosing(false);
                     g_overlayExpandAnim = 0.0f;
                     g_particles.clear();
                     g_sandParticles.clear();
@@ -9535,9 +9640,57 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == 1) {
                 UpdateAnimations();
                 UpdatePerfStats();
+                
+                DWORD now = GetTickCount();  // 定义在前面，后续代码都需要
+                
+                // 实时推进进度条
+                // 方法：position 是截至 lastUpdateTime 时的值
+                // 实时位置 = position + (当前UTC时间 - lastUpdateTime)
+                // 这是 SMTC 推荐的准确计算方式
+                
+                if (g_pendingDuration > 0 && g_smtcLastUpdateTime > 0) {
+                    // 获取当前 UTC 时间（秒）
+                    FILETIME ft;
+                    GetSystemTimeAsFileTime(&ft);
+                    ULARGE_INTEGER ul;
+                    ul.LowPart = ft.dwLowDateTime;
+                    ul.HighPart = ft.dwHighDateTime;
+                    // 转换为 Unix 时间戳（秒）
+                    double currentUtcTime = (ul.QuadPart / 10000000.0) - 11644473600.0;
+                    
+                    // 计算从 SMTC 最后更新到现在经过的时间
+                    double elapsed = currentUtcTime - g_smtcLastUpdateTime;
+                    
+                    // 实时位置 = SMTC position + 经过时间（仅播放时累加）
+                    double newPos = g_smtcPosition;
+                    if (g_pendingIsPlaying && elapsed >= 0) {
+                        newPos += elapsed;
+                    }
+                    
+                    // 防止超出 duration
+                    if (newPos > g_pendingDuration) {
+                        newPos = g_pendingDuration;
+                    }
+                    // 防止负数（可能因为时钟不同步）
+                    if (newPos < 0) {
+                        newPos = 0;
+                    }
+                    g_pendingCurrentTime = newPos;
+                    
+                    // 更新显示数据
+                    g_pendingTime = FormatTime(g_pendingCurrentTime) + L" / " + FormatTime(g_pendingDuration);
+                    g_pendingProgress = g_pendingDuration > 0 ? g_pendingCurrentTime / g_pendingDuration : 0;
+                    
+                    // 每2秒输出进度条日志
+                    static DWORD lastProgressLog = 0;
+                    if (now - lastProgressLog > 2000) {
+                        lastProgressLog = now;
+                        LOG_INFO("Progress", "isPlaying=%d, smtcPos=%.1f, lastUpdate=%.1f, elapsed=%.1f, displayPos=%.1f, duration=%.1f",
+                                 g_pendingIsPlaying, g_smtcPosition, g_smtcLastUpdateTime, elapsed, g_pendingCurrentTime, g_pendingDuration);
+                    }
+                }
 
                 // 检查OSC暂停状态是否过期（自然结束）
-                DWORD now = GetTickCount();
                 // 暂停状态检查已移至覆盖层的WM_TIMER，避免冲突
                 
                 // 更新光标闪烁状态
@@ -9771,23 +9924,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_pendingTitle = smtcInfo.title;
                         g_pendingArtist = smtcInfo.artist;
                         g_pendingDuration = smtcInfo.duration;
-                        g_pendingCurrentTime = smtcInfo.position;
-                        g_pendingIsPlaying = smtcInfo.isPlaying;
-                        g_pendingTime = FormatTime(smtcInfo.position) + L" / " + FormatTime(smtcInfo.duration);
-                        g_pendingProgress = smtcInfo.duration > 0 ? smtcInfo.position / smtcInfo.duration : 0;
                         
-                        // Check if song changed - search lyrics
+                        // Check if song changed - search lyrics AND reset progress
                         static std::wstring lastSMTCTitle, lastSMTCArtist;
-                        if (smtcInfo.title != lastSMTCTitle || smtcInfo.artist != lastSMTCArtist) {
+                        static double lastDuration = 0;
+                        bool songChanged = (smtcInfo.title != lastSMTCTitle || smtcInfo.artist != lastSMTCArtist);
+                        bool durationChanged = (smtcInfo.duration > 0 && fabs(smtcInfo.duration - lastDuration) > 1.0);
+                        
+                        if (songChanged || durationChanged) {
                             lastSMTCTitle = smtcInfo.title;
                             lastSMTCArtist = smtcInfo.artist;
-                            g_pendingLyrics.clear();  // Clear old lyrics
+                            lastDuration = smtcInfo.duration;
+                            
+                            if (songChanged) {
+                                g_pendingLyrics.clear();  // Clear old lyrics
+                            }
+                            
+                            // 歌曲切换或时长变化时，使用 SMTC 的 position
+                            LOG_INFO("Main", "Song changed, position=%.1f, duration=%.1f", smtcInfo.position, smtcInfo.duration);
                             
                             // Search lyrics in background thread
                             // 根据平台选择不同的搜索 API
                             if (g_lyricsSearchThread.joinable()) {
                                 g_lyricsSearchRunning = false;
-                                g_lyricsSearchThread.join();
+                                // 使用 detach() 避免阻塞主线程
+                                // 旧线程会在后台自行完成
+                                g_lyricsSearchThread.detach();
                             }
                             g_lyricsSearchRunning = true;
                             g_lyricsSearchThread = std::thread([title = smtcInfo.title, artist = smtcInfo.artist, platform = smtcPlatform, hwnd]() {
@@ -9804,6 +9966,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                     InvalidateRect(hwnd, nullptr, FALSE);
                                 }
                             });
+                        }
+                        
+                        // 进度更新策略：
+                        // SMTC 的 position 是截至 lastUpdateTime 时的值
+                        // 我们直接接受这两个值，定时器会使用它们计算实时位置
+                        // 这样可以正确处理：
+                        // 1. 正常播放（position 随 lastUpdateTime 更新）
+                        // 2. seek（position 突变）
+                        // 3. 暂停（position 不变，但 lastUpdateTime 会更新）
+                        g_smtcPosition = smtcInfo.position;
+                        g_smtcLastUpdateTime = smtcInfo.lastUpdateTime;
+                        
+                        g_pendingIsPlaying = smtcInfo.isPlaying;
+                        g_pendingDuration = smtcInfo.duration;
+                        
+                        // Debug log for progress bar issues
+                        static DWORD lastPlayLog = 0;
+                        DWORD now = GetTickCount();
+                        if (now - lastPlayLog > 5000) {
+                            lastPlayLog = now;
+                            LOG_INFO("Main", "SMTC state: isPlaying=%d, smtcPos=%.1f, ourPos=%.1f, duration=%.1f",
+                                     smtcInfo.isPlaying, smtcInfo.position, g_pendingCurrentTime, smtcInfo.duration);
                         }
                         
                         // Send OSC message for SMTC platform (using OSCManager)
@@ -9875,6 +10059,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 发送恢复消息提示
                 OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
                 
+                // 保存当前进度值（用于关闭动画期间的粒子效果）
+                DWORD now = GetTickCount();
+                if (g_oscPauseEndTime > now) {
+                    g_closeProgress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+                } else {
+                    g_closeProgress = 0.0f;
+                }
+                
                 // 触发粒子爆炸（在进度条末端）
                 TriggerParticleBurstAtProgressEnd();
                 
@@ -9883,12 +10075,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_oscPauseEndTime = 0;
                 
                 // 延迟关闭动画（等待粒子效果播放）
-                if (g_overlayHwnd && !OSCManager::instance().isOverlayClosing()) {
-                    OSCManager::instance().setOverlayClosing(true);
-                    g_overlayClosing = false;  // 先不开始关闭
+                if (g_overlayHwnd && !g_overlayClosing) {
                     g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
                 }
-            } else if (g_overlayHwnd && (OSCManager::instance().isOverlayClosing() || g_overlayCloseDelayTime > 0)) {
+            } else if (g_overlayHwnd && (g_overlayClosing || g_overlayCloseDelayTime > 0)) {
                 // 正在关闭动画中或等待关闭，加速关闭
                 LOG_INFO("OSC Receiver", "Accelerating overlay close");
                 DestroyWindow(g_overlayHwnd);
@@ -9896,7 +10086,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_overlayActive = false;
                 g_overlayClosing = false;
                 g_overlayCloseDelayTime = 0;
-                OSCManager::instance().setOverlayClosing(false);
                 g_overlayExpandAnim = 0.0f;
                 g_particles.clear();
                 g_sandParticles.clear();

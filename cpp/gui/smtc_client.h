@@ -21,6 +21,7 @@ struct MediaInfo {
     std::wstring appName;        // Display name (e.g., "QQ音乐")
     double duration = 0;         // Total duration in seconds
     double position = 0;         // Current position in seconds
+    double lastUpdateTime = 0;   // UTC timestamp when position was last updated
     double playbackRate = 1.0;   // Playback speed
     bool isPlaying = false;
     bool hasData = false;

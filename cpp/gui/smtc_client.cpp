@@ -259,9 +259,7 @@ void SMTCClient::processMediaUpdate() {
         // Known music player app IDs (partial match)
         static const std::vector<std::wstring> musicPlayerIds = {
             L"QQMusic",           // QQ Music
-            L"SodaMusic",         // 汽水音乐 (字节跳动) - 进程名是 SodaMusic
-            L"Qishui",            // 汽水音乐 (备用匹配)
-            L"\x6C7D\x6C34\x97F3\x4E50",  // 汽水音乐 (中文 appId)
+            L"SodaMusic",         // 汽水音乐 - 进程名
             L"Spotify",           // Spotify
             L"CloudMusic",        // Netease Cloud Music
             L"Kugou",             // Kugou
@@ -271,6 +269,8 @@ void SMTCClient::processMediaUpdate() {
             L"Foobar2000",        // Foobar2000
             L"Music.UI",          // Windows Media Player
         };
+        // Chinese appId for 汽水音乐 (Qishui Music)
+        static const std::wstring qishuiChineseId = L"汽水音乐";
         
         auto sessions = manager.GetSessions();
         GlobalSystemMediaTransportControlsSession current = nullptr;
@@ -298,13 +298,23 @@ void SMTCClient::processMediaUpdate() {
             
             // Check if this is a music player
             bool isMusicPlayer = false;
-            for (const auto& musicId : musicPlayerIds) {
-                if (appIdStr.find(musicId) != std::wstring::npos) {
-                    isMusicPlayer = true;
-                    char matchMsg[128];
-                    sprintf_s(matchMsg, "[SMTC] Matched music player: %ls", musicId.c_str());
-                    LOG_INFO(matchMsg);
-                    break;
+            
+            // Special check for 汽水音乐
+            if (appIdStr == qishuiChineseId) {
+                isMusicPlayer = true;
+                LOG_INFO("[SMTC] Matched 汽水音乐");
+            }
+            
+            // Check other music players
+            if (!isMusicPlayer) {
+                for (const auto& musicId : musicPlayerIds) {
+                    if (appIdStr.find(musicId) != std::wstring::npos) {
+                        isMusicPlayer = true;
+                        char matchMsg[128];
+                        sprintf_s(matchMsg, "[SMTC] Matched music player: %ls", musicId.c_str());
+                        LOG_INFO(matchMsg);
+                        break;
+                    }
                 }
             }
             
@@ -388,8 +398,19 @@ void SMTCClient::processMediaUpdate() {
             info.position = TimeSpanToSeconds(timeline.Position());
             info.duration = TimeSpanToSeconds(timeline.EndTime() - timeline.StartTime());
             
-            char timeLog[128];
-            sprintf_s(timeLog, "[SMTC] Timeline: position=%.1f, duration=%.1f", info.position, info.duration);
+            // Get LastUpdatedTime as Unix timestamp (seconds since 1970)
+            // WinRT DateTime is 100-nanosecond intervals since Jan 1, 1601
+            auto lastUpdated = timeline.LastUpdatedTime();
+            // Convert to Unix timestamp
+            auto unixEpoch = winrt::Windows::Foundation::DateTime{};
+            // DateTime::time_since_epoch gives us 100ns intervals since 1601
+            // Unix epoch is 11644473600 seconds after 1601 epoch
+            auto ticks = lastUpdated.time_since_epoch().count();
+            info.lastUpdateTime = ticks / 10000000.0 - 11644473600.0;
+            
+            char timeLog[256];
+            sprintf_s(timeLog, "[SMTC] Timeline: position=%.1f, duration=%.1f, lastUpdate=%.1f", 
+                     info.position, info.duration, info.lastUpdateTime);
             LOG_INFO(timeLog);
         }
         
