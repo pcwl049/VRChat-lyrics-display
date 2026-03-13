@@ -2015,6 +2015,9 @@ void OnPaint(HWND hwnd) {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
     
+    // 重置字体缓存（每帧开始时）
+    ResetFontCache();
+    
     // 诊断：检查无效区域
     static int lastLoggedPaint = 0;
     paintCount++;

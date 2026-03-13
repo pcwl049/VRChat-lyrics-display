@@ -3,6 +3,9 @@
 #pragma comment(lib, "gdiplus.lib")
 using namespace Gdiplus;
 
+// 字体缓存 - 避免重复设置相同字体
+HFONT g_currentFont = nullptr;
+
 void DrawRoundRect(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color) {
     Graphics graphics(hdc);
     graphics.SetSmoothingMode(SmoothingModeHighQuality);
@@ -60,59 +63,53 @@ void DrawRoundRectAlpha(HDC hdc, int x, int y, int w, int h, int radius, COLORRE
 void DrawTextCentered(HDC hdc, const wchar_t* text, int cx, int y, COLORREF color, HFONT font) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SetFontCached(hdc, font);
     SIZE sz;
     GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
     TextOutW(hdc, cx - sz.cx / 2, y, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
 }
 
 void DrawTextLeft(HDC hdc, const wchar_t* text, int x, int y, COLORREF color, HFONT font) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SetFontCached(hdc, font);
     TextOutW(hdc, x, y, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
 }
 
 void DrawTextRight(HDC hdc, const wchar_t* text, int rightX, int y, COLORREF color, HFONT font) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SetFontCached(hdc, font);
     SIZE sz;
     GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
     TextOutW(hdc, rightX - sz.cx, y, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
 }
 
 void DrawTextVCentered(HDC hdc, const wchar_t* text, int x, int y, int h, COLORREF color, HFONT font) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SetFontCached(hdc, font);
     SIZE sz;
     GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
     TextOutW(hdc, x, y + (h - sz.cy) / 2, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
 }
 
 void DrawTextVCenteredRight(HDC hdc, const wchar_t* text, int rightX, int y, int h, COLORREF color, HFONT font) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SetFontCached(hdc, font);
     SIZE sz;
     GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
     TextOutW(hdc, rightX - sz.cx, y + (h - sz.cy) / 2, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
 }
 
 void DrawTextCenteredBoth(HDC hdc, const wchar_t* text, int x, int y, int w, int h, COLORREF color, HFONT font) {
     SetTextColor(hdc, color);
     SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
+    SetFontCached(hdc, font);
     SIZE sz;
     GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
     TextOutW(hdc, x + (w - sz.cx) / 2, y + (h - sz.cy) / 2, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
 }
 
 // ============================================================================

@@ -7,6 +7,22 @@
 // 绘制辅助函数 - GDI+ 圆角矩形和文本绘制
 // ============================================================================
 
+// 字体缓存 - 避免重复设置相同字体
+extern HFONT g_currentFont;
+
+// 设置字体（带缓存检查）
+inline void SetFontCached(HDC hdc, HFONT font) {
+    if (g_currentFont != font) {
+        SelectObject(hdc, font);
+        g_currentFont = font;
+    }
+}
+
+// 重置字体缓存（每帧开始时调用）
+inline void ResetFontCache() {
+    g_currentFont = nullptr;
+}
+
 // 绘制抗锯齿圆角矩形
 void DrawRoundRect(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color);
 
@@ -16,7 +32,7 @@ void DrawRoundRectWithBorder(HDC hdc, int x, int y, int w, int h, int radius, CO
 // 绘制半透明圆角矩形
 void DrawRoundRectAlpha(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color, int alpha);
 
-// 文本绘制辅助
+// 文本绘制辅助（使用字体缓存）
 void DrawTextCentered(HDC hdc, const wchar_t* text, int cx, int y, COLORREF color, HFONT font);
 void DrawTextLeft(HDC hdc, const wchar_t* text, int x, int y, COLORREF color, HFONT font);
 void DrawTextRight(HDC hdc, const wchar_t* text, int rightX, int y, COLORREF color, HFONT font);
