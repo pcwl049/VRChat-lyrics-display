@@ -1,0 +1,34 @@
+# 编译产物
+*.exe
+*.obj
+*.o
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# 编译中间文件
+build/
+*.log
+
+# 编译日志
+compile_err.txt
+compile_out.txt
+
+# 测试文件
+test_*.cpp
+test_*.exe
+kugou_mem.*
+
+# 用户配置（保留模板）
+config_gui.json
+
+# 备份目录
+backup/
+
+# IDE 文件
+.vs/
+.vscode/
+*.suo
+*.sln
+*.vcxproj*
