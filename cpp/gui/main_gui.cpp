@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.4.1"
-#define APP_VERSION_NUM 401  // 0.4.1 -> 0*10000 + 4*100 + 1 = 401
+#define APP_VERSION "0.4.3"
+#define APP_VERSION_NUM 403  // 0.4.3 -> 0*10000 + 4*100 + 3 = 403
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
@@ -35,133 +35,29 @@ using namespace Gdiplus;
 #include <fstream>
 #include <cstdarg>
 
-// Logger singleton class for unified logging
-class Logger {
-public:
-    enum Level { LOG_LVL_DEBUG, LOG_LVL_INFO, LOG_LVL_WARNING, LOG_LVL_ERROR };
-    
-    static Logger& instance() {
-        static Logger logger;
-        return logger;
-    }
-    
-    void setLevel(Level level) { m_level = level; }
-    
-    void setFile(const std::string& path) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_file.is_open()) m_file.close();
-        m_file.open(path, std::ios::app);
-        m_filePath = path;
-    }
-    
-    // Core logging method with format support
-    void log(Level level, const char* module, const char* fmt, ...) {
-        if (level < m_level) return;  // Level filtering first
-        
-        std::lock_guard<std::mutex> lock(m_mutex);
-        
-        // Timestamp
-        time_t now = time(nullptr);
-        struct tm t;
-        localtime_s(&t, &now);
-        char timestamp[32];
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &t);
-        
-        // Format message
-        char msg[4096];
-        va_list args;
-        va_start(args, fmt);
-        vsnprintf_s(msg, sizeof(msg), _TRUNCATE, fmt, args);
-        va_end(args);
-        
-        // Output format: [timestamp] [LEVEL] [module] message
-        char line[8192];
-        const char* levelStr[] = {"DEBUG", "INFO", "WARNING", "ERROR"};
-        sprintf_s(line, "[%s] [%s] [%s] %s", timestamp, levelStr[level], module, msg);
-        
-        // Write to file
-        if (m_file.is_open()) {
-            m_file << line << std::endl;
-            m_file.flush();
-        }
-        OutputDebugStringA(line);
-    }
-    
-    // Simple log without module (for compatibility)
-    void logSimple(Level level, const char* msg) {
-        log(level, "Main", "%s", msg);
-    }
-    
-    // Check and rotate log (called once at startup)
-    void checkRotate() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        rotateLogFile();
-    }
-    
-private:
-    Logger() {
-        // Default output to %TEMP%\vrclayrics_debug.log
-        char tempPath[MAX_PATH];
-        GetTempPathA(MAX_PATH, tempPath);
-        strcat_s(tempPath, "\\vrclayrics_debug.log");
-        m_filePath = tempPath;
-        m_file.open(m_filePath, std::ios::app);
-        rotateLogFile();
-    }
-    ~Logger() { if (m_file.is_open()) m_file.close(); }
-    
-    // Log rotation implementation
-    void rotateLogFile() {
-        static const long long MAX_LOG_SIZE = 10 * 1024 * 1024;  // 10MB
-        static const int MAX_LOG_FILES = 5;
-        
-        HANDLE hFile = CreateFileA(m_filePath.c_str(), 
-            FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        
-        if (hFile != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER fileSize;
-            if (GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart >= MAX_LOG_SIZE) {
-                CloseHandle(hFile);
-                if (m_file.is_open()) m_file.close();
-                
-                // Delete oldest log file (_5)
-                char oldPath[MAX_PATH];
-                sprintf_s(oldPath, "%s_5", m_filePath.c_str());
-                DeleteFileA(oldPath);
-                
-                // Rotate log files: _4 -> _5, _3 -> _4, _2 -> _3, _1 -> _2
-                for (int i = 4; i >= 1; i--) {
-                    char srcPath[MAX_PATH];
-                    char dstPath[MAX_PATH];
-                    sprintf_s(srcPath, "%s_%d", m_filePath.c_str(), i);
-                    sprintf_s(dstPath, "%s_%d", m_filePath.c_str(), i + 1);
-                    MoveFileA(srcPath, dstPath);
-                }
-                
-                // Move current log to _1
-                char rotatedPath[MAX_PATH];
-                sprintf_s(rotatedPath, "%s_1", m_filePath.c_str());
-                MoveFileA(m_filePath.c_str(), rotatedPath);
-                
-                // Reopen file
-                m_file.open(m_filePath, std::ios::app);
-            } else {
-                CloseHandle(hFile);
-            }
-        }
-    }
-    
-    std::mutex m_mutex;
-    std::ofstream m_file;
-    std::string m_filePath;
-    Level m_level = LOG_LVL_INFO;
-};
+// ============================================================================
+// 模块头文件引用
+// ============================================================================
+#include "common/types.h"
+#include "common/logger.h"
+#include "common/config.h"
+#include "common/string_utils.h"
+#include "common/utils.h"
+#include "common/theme.h"
+#include "common/config_manager.h"
+#include "ui/draw_helpers.h"
+#include "ui/custom_dialog.h"
+#include "ui/overlay_window.h"
+#include "ui/window_utils.h"
+#include "core/osc_manager.h"
+#include "core/perf_monitor.h"
+#include "core/hardware_detect.h"
+#include "core/update_checker.h"
+#include "core/lyrics_search.h"
 
-// Convenience macros for logging
-#define LOG_DEBUG(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_DEBUG, module, fmt, ##__VA_ARGS__)
-#define LOG_INFO(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_INFO, module, fmt, ##__VA_ARGS__)
-#define LOG_WARNING(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_WARNING, module, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(module, fmt, ...) Logger::instance().log(Logger::LOG_LVL_ERROR, module, fmt, ##__VA_ARGS__)
+// ============================================================================
+// Logger 类已移至 common/logger.h/cpp
+// ============================================================================
 
 #include <shellapi.h>
 #include <shlobj.h>
@@ -192,641 +88,31 @@ private:
 // ============================================================================
 const DWORD OSC_MIN_INTERVAL = 2000;    // 2s when playing (avoid VRChat rate limit)
 
-// ============================================================================
-// OSCManager - 统一 OSC 消息发送管理
-// ============================================================================
-class OSCManager {
-public:
-    static OSCManager& instance() {
-        static OSCManager mgr;
-        return mgr;
-    }
-    
-    // 连接管理
-    void connect(const std::string& ip, int port) {
-        disconnect();
-        m_sender = new moekoe::OSCSender(ip, port);
-        m_ip = ip;
-        m_port = port;
-        char msg[128];
-        sprintf_s(msg, "Connected to %s:%d", ip.c_str(), port);
-        LOG_INFO("OSCManager", "%s", msg);
-    }
-    
-    void disconnect() {
-        if (m_sender) {
-            delete m_sender;
-            m_sender = nullptr;
-            LOG_INFO("OSCManager", "Disconnected");
-        }
-    }
-    
-    bool isConnected() const { return m_sender != nullptr; }
-    
-    // 状态控制 - 同步全局变量
-    void pause(int seconds = 30) {
-        m_paused = true;
-        m_pauseEndTime = GetTickCount() + seconds * 1000;
-        m_overlayClosing = false;
-        // 同步全局变量
-        extern bool g_oscPaused;
-        extern DWORD g_oscPauseEndTime;
-        g_oscPaused = true;
-        g_oscPauseEndTime = m_pauseEndTime;
-        char msg[64];
-        sprintf_s(msg, "[OSCManager] Paused for %d seconds", seconds);
-        LOG_INFO("OSCManager", "%s", msg);
-    }
-    
-    void resume() {
-        m_paused = false;
-        m_pauseEndTime = 0;
-        // 同步全局变量
-        extern bool g_oscPaused;
-        extern DWORD g_oscPauseEndTime;
-        g_oscPaused = false;
-        g_oscPauseEndTime = 0;
-        LOG_INFO("OSCManager", "Resumed");
-    }
-    
-    bool isPaused() const {
-        // 使用全局变量进行检查，确保与 overlay 窗口一致
-        extern bool g_oscPaused;
-        extern DWORD g_oscPauseEndTime;
-        if (g_oscPaused && g_oscPauseEndTime > 0) {
-            return GetTickCount() < g_oscPauseEndTime;
-        }
-        return g_oscPaused;
-    }
-    
-    // 获取剩余暂停时间（秒）
-    int getRemainingPauseTime() {
-        extern bool g_oscPaused;
-        extern DWORD g_oscPauseEndTime;
-        if (!g_oscPaused || g_oscPauseEndTime == 0) return 0;
-        DWORD remaining = g_oscPauseEndTime - GetTickCount();
-        return remaining > 0 ? (int)(remaining / 1000) : 0;
-    }
-    
-    // 获取暂停进度（1.0 = 刚开始，0.0 = 结束）
-    float getPauseProgress() {
-        extern bool g_oscPaused;
-        extern DWORD g_oscPauseEndTime;
-        if (!g_oscPaused || g_oscPauseEndTime == 0) return 0.0f;
-        DWORD now = GetTickCount();
-        if (now >= g_oscPauseEndTime) return 0.0f;
-        return (float)(g_oscPauseEndTime - now) / (30.0f * 1000.0f);  // 30秒总时长
-    }
-    
-    // Overlay 控制
-    void setOverlayClosing(bool closing) { m_overlayClosing = closing; }
-    bool isOverlayClosing() const { return m_overlayClosing; }
-    
-    // 消息发送（统一入口）- 普通消息（有速率限制）
-    bool sendMessage(const std::wstring& msg) {
-        if (!canSend()) {
-            return false;
-        }
-        
-        DWORD now = GetTickCount();
-        
-        // 系统恢复后的额外等待
-        if (m_systemResumeTime > 0) {
-            DWORD timeSinceResume = now - m_systemResumeTime;
-            if (timeSinceResume < 3000) {
-                if (timeSinceResume < 100) {
-                    m_lastSendTime = now;
-                }
-                return false;
-            } else {
-                m_systemResumeTime = 0;
-            }
-        }
-        
-        // 速率限制
-        DWORD timeSinceLastSend = now - m_lastSendTime;
-        if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-            return false;
-        }
-        
-        // 去重
-        if (msg == m_lastMessage) {
-            return false;
-        }
-        
-        doSend(msg);
-        m_lastMessage = msg;
-        m_lastSendTime = now;
-        LOG_INFO("OSCManager", "Message sent successfully");
-        return true;
-    }
-    
-    // 强制发送（跳过去重检查）
-    bool sendMessageForce(const std::wstring& msg) {
-        if (!canSend()) return false;
-        
-        DWORD now = GetTickCount();
-        if (now - m_lastSendTime < OSC_MIN_INTERVAL) {
-            return false;
-        }
-        
-        doSend(msg);
-        m_lastMessage = msg;
-        m_lastSendTime = now;
-        return true;
-    }
-    
-    // 系统消息（通过队列串行发送，避免限流）
-    bool sendSystemMessage(const std::wstring& msg, bool clearQueue = true);
-    
-    // 告别消息（同步发送）
-    void sendGoodbye() {
-        if (!m_sender || !m_enabled) return;
-        
-        DWORD now = GetTickCount();
-        DWORD timeSinceLastSend = now - m_lastSendTime;
-        if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-            Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
-        }
-        // 根据极简模式发送不同的退出消息
-        extern bool g_minimalMode;
-        if (g_minimalMode) {
-            m_sender->sendChatbox(L"·");
-        } else {
-            m_sender->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
-        }
-        m_lastSendTime = GetTickCount();
-        LOG_INFO("OSCManager", "Goodbye message sent");
-    }
-    
-    // 配置
-    void setEnabled(bool enabled) { m_enabled = enabled; }
-    bool isEnabled() const { return m_enabled; }
-    
-    void setSystemResumeTime(DWORD time) { m_systemResumeTime = time; }
-    
-    // 兼容性访问
-    moekoe::OSCSender* getSender() { return m_sender; }
-    const std::string& getIp() const { return m_ip; }
-    int getPort() const { return m_port; }
-    
-    // 清除上次发送的消息（用于配置改变后强制发送新消息）
-    void clearLastMessage() { m_lastMessage.clear(); }
-    
-private:
-    OSCManager() = default;
-    ~OSCManager() { disconnect(); }
-    
-    bool canSend() {
-        if (!m_sender || !m_enabled) return false;
-        if (isPaused()) return false;
-        return true;
-    }
-    
-    void doSend(const std::wstring& msg) {
-        if (m_sender) {
-            m_sender->sendChatbox(msg);
-        }
-    }
-    
-    moekoe::OSCSender* m_sender = nullptr;
-    std::string m_ip;
-    int m_port = 9000;
-    bool m_enabled = true;
-    bool m_paused = false;
-    bool m_overlayClosing = false;
-    DWORD m_pauseEndTime = 0;
-    DWORD m_lastSendTime = 0;
-    DWORD m_systemResumeTime = 0;
-    std::wstring m_lastMessage;
-};
+// OSCManager 类已移至 core/osc_manager.h/cpp
 
 // 全局 OSC 暂停热键配置（保留在全局作用域以便 UI 访问）
 extern UINT g_oscPauseHotkey;
 extern UINT g_oscPauseHotkeyMods;
 
-// ============================================================================
-// PerfData - 性能数据结构（前置声明供 PerformanceMonitor 使用）
-// ============================================================================
-struct PerfData {
-    // CPU
-    int cpuUsage = 0;
-    int cpuTemp = 0;
-    bool cpuTempValid = false;
+// PerformanceMonitor 类已移至 core/perf_monitor.h/cpp
 
-    // RAM
-    int ramUsage = 0;
-    DWORD64 ramUsed = 0;
-    DWORD64 ramTotal = 0;
-
-    // GPU
-    int gpuUsage = 0;
-    bool gpuUsageValid = false;
-    DWORD64 gpuVramUsed = 0;
-    DWORD64 gpuVramTotal = 0;
-};
+// OSCManager 方法实现已移至 core/osc_manager.cpp
 
 // ============================================================================
-// PerformanceMonitor - 统一性能监控管理
+// PerformanceMonitor 方法实现已移至 core/perf_monitor.cpp
 // ============================================================================
-class PerformanceMonitor {
-public:
-    static PerformanceMonitor& instance() {
-        static PerformanceMonitor pm;
-        return pm;
-    }
-    
-    // 生命周期
-    void start();
-    void stop();
-    
-    // 线程安全的数据获取
-    int getCpuUsage() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.cpuUsage;
-    }
-    
-    int getRamUsage() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.ramUsage;
-    }
-    
-    int getGpuUsage() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.gpuUsage;
-    }
-    
-    int getCpuTemp() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.cpuTemp;
-    }
-    
-    DWORD64 getRamUsed() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.ramUsed;
-    }
-    
-    DWORD64 getRamTotal() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.ramTotal;
-    }
-    
-    DWORD64 getGpuVramUsed() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.gpuVramUsed;
-    }
-    
-    DWORD64 getGpuVramTotal() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.gpuVramTotal;
-    }
-    
-    // 可用性查询
-    bool isCpuTempAvailable() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.cpuTempValid && m_data.cpuTemp > 0;
-    }
-    
-    bool isGpuUsageAvailable() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data.gpuUsageValid;
-    }
-    
-    // 获取完整数据快照（用于批量访问）
-    PerfData getSnapshot() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_data;
-    }
-    
-    // 更新数据（内部使用）
-    void updateCpuUsage(int usage) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_data.cpuUsage = usage;
-    }
-    
-    void updateRamData(DWORD64 used, DWORD64 total) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_data.ramUsed = used;
-        m_data.ramTotal = total;
-        m_data.ramUsage = total > 0 ? (int)((total - used) * 100 / total) : 0;
-    }
-    
-    void updateGpuData(int usage, bool valid, DWORD64 vramUsed = 0, DWORD64 vramTotal = 0) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_data.gpuUsage = usage;
-        m_data.gpuUsageValid = valid;
-        if (vramTotal > 0) m_data.gpuVramTotal = vramTotal;
-        if (vramUsed > 0) m_data.gpuVramUsed = vramUsed;
-    }
-    
-    void updateCpuTemp(int temp, bool valid) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_data.cpuTemp = temp;
-        m_data.cpuTempValid = valid;
-    }
-    
-    bool isRunning() const { return m_running; }
-    
-private:
-    PerformanceMonitor() = default;
-    ~PerformanceMonitor() { stop(); }
-    
-    void workerThread();  // 监控线程主函数
-    
-    std::thread m_thread;
-    std::mutex m_mutex;
-    std::atomic<bool> m_running{false};
-    
-    PerfData m_data;
-    
-    // DXGI 资源
-    IDXGIFactory1* m_pDXGIFactory = nullptr;
-    IDXGIAdapter3* m_pDXGIAdapter = nullptr;
-    bool m_dxgiInitialized = false;
-    
-    // WMI 资源
-    IWbemLocator* m_pWmiLocator = nullptr;
-    IWbemServices* m_pWmiServices = nullptr;
-    IWbemServices* m_pLhmServices = nullptr;
-    bool m_wmiInitialized = false;
-    bool m_lhmInitialized = false;
-};
-
-// ============================================================================
-// OSCManager 方法实现
-// ============================================================================
-
-// 系统消息队列（内部使用）
-static std::queue<std::wstring> s_systemMsgQueue;
-static std::mutex s_systemMsgMutex;
-static std::atomic<bool> s_systemMsgRunning{false};
-
-bool OSCManager::sendSystemMessage(const std::wstring& message, bool clearQueue) {
-    if (!m_sender || !m_enabled) {
-        return false;
-    }
-    
-    // 将消息加入队列
-    {
-        std::lock_guard<std::mutex> lock(s_systemMsgMutex);
-        if (clearQueue) {
-            while (!s_systemMsgQueue.empty()) {
-                s_systemMsgQueue.pop();
-            }
-        }
-        s_systemMsgQueue.push(message);
-    }
-    
-    // 如果线程未运行，启动新线程处理队列
-    if (!s_systemMsgRunning.exchange(true)) {
-        std::thread([this]() {
-            while (true) {
-                std::wstring msg;
-                {
-                    std::lock_guard<std::mutex> lock(s_systemMsgMutex);
-                    if (s_systemMsgQueue.empty()) {
-                        s_systemMsgRunning = false;
-                        break;
-                    }
-                    msg = s_systemMsgQueue.front();
-                    s_systemMsgQueue.pop();
-                }
-                
-                // 等待足够时间，确保不触发限流
-                DWORD now = GetTickCount();
-                DWORD timeSinceLastSend = now - m_lastSendTime;
-                if (timeSinceLastSend < OSC_MIN_INTERVAL) {
-                    Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
-                }
-                
-                // 发送消息
-                if (m_sender && m_enabled) {
-                    m_sender->sendChatbox(msg);
-                    m_lastSendTime = GetTickCount();
-                    LOG_INFO("OSCManager", "Sent system message");
-                }
-            }
-        }).detach();
-    }
-    
-    return true;
-}
-
-// ============================================================================
-// PerformanceMonitor 方法实现
-// ============================================================================
-
-// 全局退出标志（用于线程同步）
-extern std::atomic<bool> g_threadRunning[];
-
-void PerformanceMonitor::start() {
-    if (m_running.exchange(true)) {
-        return;  // 已经在运行
-    }
-    
-    m_thread = std::thread(&PerformanceMonitor::workerThread, this);
-    LOG_INFO("PerformanceMonitor", "Started");
-}
-
-void PerformanceMonitor::stop() {
-    if (!m_running.exchange(false)) {
-        return;  // 已经停止
-    }
-    
-    if (m_thread.joinable()) {
-        m_thread.join();
-    }
-    
-    // 清理资源
-    if (m_pDXGIAdapter) {
-        m_pDXGIAdapter->Release();
-        m_pDXGIAdapter = nullptr;
-    }
-    if (m_pDXGIFactory) {
-        m_pDXGIFactory->Release();
-        m_pDXGIFactory = nullptr;
-    }
-    if (m_pLhmServices) {
-        m_pLhmServices->Release();
-        m_pLhmServices = nullptr;
-    }
-    if (m_pWmiServices) {
-        m_pWmiServices->Release();
-        m_pWmiServices = nullptr;
-    }
-    if (m_pWmiLocator) {
-        m_pWmiLocator->Release();
-        m_pWmiLocator = nullptr;
-    }
-    
-    LOG_INFO("PerformanceMonitor", "Stopped");
-}
-
-// PerformanceMonitor 工作线程（未完成实现，使用全局 WorkerThread_PerfMonitor 代替）
-void PerformanceMonitor::workerThread() {
-    // 这个方法目前未实现，使用全局函数 WorkerThread_PerfMonitor 代替
-    while (m_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-}
 
 // 从Git配置自动检测仓库地址（变量定义）
 std::string g_autoDetectedRepo = "";
 
-// 从Git配置自动检测仓库地址（函数实现）
-std::string GetRepoFromGitConfig() {
-    std::string repoPath = ".git/config";
-    
-    // 读取.git/config文件
-    FILE* f = fopen(repoPath.c_str(), "r");
-    if (!f) {
-        return GITHUB_REPO;  // 读取失败，使用默认值
-    }
-    
-    char line[512];
-    std::string originUrl = "";
-    
-    while (fgets(line, sizeof(line), f)) {
-        std::string str = line;
-        // 查找 [remote "origin"] 部分
-        if (str.find("[remote \"origin\"]") != std::string::npos) {
-            // 继续读取，直到找到url
-            while (fgets(line, sizeof(line), f)) {
-                std::string urlLine = line;
-                if (urlLine.find("[") != std::string::npos) {
-                    break;  // 遇到新的section，停止
-                }
-                if (urlLine.find("url") != std::string::npos) {
-                    // 提取url
-                    size_t pos = urlLine.find("=");
-                    if (pos != std::string::npos) {
-                        originUrl = urlLine.substr(pos + 1);
-                        // 去除前后空白
-                        size_t start = originUrl.find_first_not_of(" \t");
-                        size_t end = originUrl.find_last_not_of(" \t\r\n");
-                        if (start != std::string::npos && end != std::string::npos) {
-                            originUrl = originUrl.substr(start, end - start + 1);
-                        }
-                    }
-                    break;
-                }
-            }
-            break;
-        }
-    }
-    fclose(f);
-    
-    if (originUrl.empty()) {
-        return GITHUB_REPO;  // 未找到origin，使用默认值
-    }
-    
-    // 解析GitHub URL
-    // 支持格式：
-    // https://github.com/owner/repo.git
-    // git@github.com:owner/repo.git
-    std::string ownerRepo = "";
-    
-    if (originUrl.find("github.com") != std::string::npos) {
-        size_t startPos = originUrl.find("github.com");
-        if (startPos != std::string::npos) {
-            startPos += 11;  // 跳过"github.com"
-            
-            // 处理https://或git@开头
-            if (originUrl.find("https://") != std::string::npos) {
-                // https://github.com/owner/repo.git
-                startPos += 1;  // 跳过"/"
-            } else if (originUrl.find("git@") != std::string::npos) {
-                // git@github.com:owner/repo.git
-                startPos += 1;  // 跳过":"
-            } else {
-                startPos += 1;  // 跳过"/"
-            }
-            
-            // 提取 owner/repo
-            ownerRepo = originUrl.substr(startPos);
-            // 去除.git后缀
-            size_t gitPos = ownerRepo.find(".git");
-            if (gitPos != std::string::npos) {
-                ownerRepo = ownerRepo.substr(0, gitPos);
-            }
-        }
-    }
-    
-    if (ownerRepo.empty()) {
-        return GITHUB_REPO;  // 解析失败，使用默认值
-    }
-    
-    return ownerRepo;
-}
+// GetRepoFromGitConfig / GetGitHubApiUrl 已移至 common/utils.cpp
 
-std::string GetGitHubApiUrl(const std::string& repo) {
-    return "https://api.github.com/repos/" + repo + "/releases/latest";
-}
+// ThemeColors 结构体已移至 common/types.h
 
-// Theme colors (支持深浅色模式)
-bool g_darkMode = true;  // 固定深色模式
+// ThemeColors 结构体已移至 common/theme.h
+// UpdateThemeColors / 颜色宏已移至 common/theme.h
 
-// Dark theme colors
-struct ThemeColors {
-    COLORREF bgStart, bgEnd, bg, card, cardBorder, accent, accentGlow;
-    COLORREF text, textDim, border, titlebar, editBg, glassTint;
-    int glassAlpha;
-};
-
-ThemeColors g_colors;
-
-void UpdateThemeColors() {
-    // 固定使用深色主题 (毛玻璃深空蓝主题)
-    g_colors.bgStart = RGB(18, 18, 24);
-    g_colors.bgEnd = RGB(18, 18, 24);
-    g_colors.bg = RGB(18, 18, 24);
-    g_colors.card = RGB(30, 40, 60);
-    g_colors.cardBorder = RGB(50, 70, 100);
-    g_colors.accent = RGB(80, 180, 255);
-    g_colors.accentGlow = RGB(60, 140, 220);
-    g_colors.text = RGB(240, 245, 255);
-    g_colors.textDim = RGB(140, 150, 170);
-    g_colors.border = RGB(50, 70, 100);
-    g_colors.titlebar = RGB(20, 28, 45);
-    g_colors.editBg = RGB(35, 45, 65);
-    g_colors.glassTint = RGB(20, 30, 50);
-    g_colors.glassAlpha = 100;  // 大幅降低不透明度，让毛玻璃非常明显
-}
-
-// Color access macros (保持兼容性)
-#define COLOR_BG_START g_colors.bgStart
-#define COLOR_BG_END g_colors.bgEnd
-#define COLOR_BG g_colors.bg
-#define COLOR_CARD g_colors.card
-#define COLOR_CARD_BORDER g_colors.cardBorder
-#define COLOR_ACCENT g_colors.accent
-#define COLOR_ACCENT_GLOW g_colors.accentGlow
-#define COLOR_TEXT g_colors.text
-#define COLOR_TEXT_DIM g_colors.textDim
-#define COLOR_BORDER g_colors.border
-#define COLOR_TITLEBAR g_colors.titlebar
-#define COLOR_EDIT_BG g_colors.editBg
-#define COLOR_GLASS_TINT g_colors.glassTint
-#define GLASS_ALPHA g_colors.glassAlpha
-
-// Theme-dependent colors (根据主题自动选择)
-#define COLOR_BTN_BG RGB(40, 40, 55)
-#define COLOR_BTN_HOVER RGB(55, 55, 75)
-#define COLOR_MENU_BG RGB(35, 40, 50)
-#define COLOR_MENU_BORDER RGB(70, 75, 85)
-#define COLOR_MENU_HOVER RGB(50, 55, 65)
-#define COLOR_BOX_BG RGB(40, 45, 55)
-#define COLOR_BOX_HOVER RGB(50, 55, 65)
-#define COLOR_BOX_BORDER RGB(60, 65, 75)
-#define COLOR_BOX_BORDER_HOVER RGB(80, 90, 110)
-#define COLOR_CHECK_BG RGB(50, 50, 65)
-#define COLOR_CHECK_ACCENT COLOR_ACCENT
-#define COLOR_SUCCESS RGB(80, 200, 120)
-#define COLOR_WARNING RGB(255, 180, 50)
-#define COLOR_ERROR RGB(255, 100, 100)
-
-// Tray icon
-#define TRAY_ICON_ID 1
+// Tray icon - TRAY_ICON_ID 已移至 ui/window_utils.h
 #define WM_TRAYICON (WM_USER + 200)
 
 // OSC rate limits - aligned with preview refresh rate
@@ -844,11 +130,7 @@ int g_winY = -1;
 const int TITLEBAR_H = 60;
 const int CARD_PADDING = 25;
 
-// Forward declarations
-std::string WstringToUtf8(const std::wstring& wstr);
-std::wstring Utf8ToWstring(const std::string& str);
-int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length);
-std::wstring BuildProgressBar(double progress, int bars);
+// Forward declarations (辅助函数已移至 ui/draw_helpers.h)
 std::wstring BuildPerformanceOSCMessage(int type);  // type: 0=CPU, 1=RAM, 2=GPU
 void CreateOverlayWindow();    // OSC暂停覆盖层
 void DestroyOverlayWindow();   // 销毁OSC暂停覆盖层
@@ -862,29 +144,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param);
 void InitializePerfMonitoring();
 void ShutdownPerfMonitoring();
 
-// Animation helpers
-struct Animation {
-    double value = 0.0, target = 0.0, speed = 0.25;  // 提高默认速度
-    void update() { 
-        // 使用更平滑的缓动：速度与剩余距离成正比
-        double diff = target - value;
-        value += diff * speed; 
-        if (fabs(diff) < 0.001) value = target; 
-    }
-    void setTarget(double t) { target = t; }
-    bool isActive() const { return fabs(target - value) > 0.001; }
-    // 设置目标并重置value（用于需要从固定起点开始的动画）
-    void setFromTo(double from, double to) { value = from; target = to; }
-};
-
-// Smooth value for color transitions
-struct SmoothValue {
-    double value = 0.0, target = 0.0, speed = 0.15;  // 提高默认速度
-    void update() { value += (target - value) * speed; }
-    void setTarget(double t) { target = t; }
-    void setImmediate(double v) { value = target = v; }
-    bool isActive() const { return fabs(target - value) > 0.001; }
-};
+// Animation/SmoothValue 结构体已移至 common/types.h
 
 // Global animation state
 Animation g_windowFadeAnim;       // 窗口启动淡入
@@ -933,21 +193,15 @@ Animation g_oscPauseCloseAnim;  // 关闭动画进度
 // Global state
 CRITICAL_SECTION g_cs;
 HWND g_hwnd = nullptr;
-NOTIFYICONDATAW g_nid = {};
+// g_nid 已移至 ui/window_utils.cpp
 moekoe::OSCSender* g_osc = nullptr;
 moekoe::OSCReceiver* g_oscReceiver = nullptr;  // OSC receiver for VRChat pause commands
 moekoe::MoeKoeWS* g_moeKoeClient = nullptr;
 moekoe::NeteaseWS* g_neteaseClient = nullptr;
 smtc::SMTCClient* g_smtcClient = nullptr;  // QQ Music & other SMTC players
 const wchar_t* g_platformNames[] = { L"MoeKoeMusic", L"\x7F51\x6613\x4E91\x97F3\x4E50", L"QQ音乐", L"\x6C7D\x6C34\x97F3\x4E50" };  // 汽水音乐
-// Platform definition - easy to add new platforms
-struct PlatformInfo {
-    std::wstring name;           // Display name
-    std::wstring connectMethod;  // HTTP, SMTC, etc.
-    bool connected = false;
-    bool hover = false;
-    DWORD lastPlayTime = 0;
-};
+
+// PlatformInfo/SubModuleType/SubModuleInfo/DisplayModule 结构体已移至 common/types.h
 
 // Platform list - add new platforms here
 // Index: 0=MoeKoe, 1=Netease, 2=QQ Music, 3=Qishui Music
@@ -976,7 +230,7 @@ std::vector<PlatformInfo> g_platforms = {
 
 // 网易云进程检测
 bool g_neteaseRunningNoDebug = false;  // 网易云在运行但调试端口未开启
-bool IsNeteaseRunning();  // 前向声明
+bool IsNeteaseRunning();  // 前向声明 (已移至 common/utils.h)
 
 const wchar_t* g_oscPlatformNames[] = { L"\x9177\x72D7", L"\x7F51\x6613\x4E91", L"QQ音乐", L"\x6C7D\x6C34" };  // 酷狗, 网易云, QQ音乐, 汽水
 int g_currentPlatform = 0;  // 0=MoeKoe, 1=Netease, 2=QQ Music (user selected)
@@ -996,29 +250,6 @@ int g_performanceMode = 0;  // 0=Music info, 1=System performance
 std::wstring g_cpuDisplayName = L"CPU";
 std::wstring g_ramDisplayName = L"RAM";
 std::wstring g_gpuDisplayName = L"GPU";
-
-// Display Modules Configuration
-enum SubModuleType {
-    SUBMOD_USAGE,      // 使用率/使用量
-    SUBMOD_TEMP,       // 温度
-    SUBMOD_VRAM        // 显存占用 (GPU only)
-};
-
-struct SubModuleInfo {
-    SubModuleType type;
-    std::wstring name;         // 显示名称
-    bool available;            // 是否可用（检测到传感器）
-    bool enabled;              // 是否启用
-};
-
-struct DisplayModule {
-    std::wstring key;          // cpu, gpu, ram
-    std::wstring name;         // 显示名称（从系统信息同步）
-    bool enabled;              // 是否启用
-    bool expanded;             // 是否展开（子菜单）
-    std::vector<SubModuleInfo> subModules;
-    int enabledCount;          // 已启用的子项数量
-};
 
 // 全局显示模块配置
 std::vector<DisplayModule> g_displayModules;
@@ -1045,58 +276,7 @@ Animation g_displayOrderScaleAnim;
 std::vector<Animation> g_moduleExpandAnims;  // 每个模块的展开动画
 Animation g_moduleDragAnim;        // 拖拽挤压动画
 
-// 初始化默认显示模块配置
-void InitDefaultDisplayModules() {
-    g_displayModules.clear();
-    
-    // CPU 模块
-    DisplayModule cpuMod;
-    cpuMod.key = L"cpu";
-    cpuMod.name = g_cpuDisplayName;
-    cpuMod.enabled = true;
-    cpuMod.expanded = false;
-    cpuMod.enabledCount = 1;
-    cpuMod.subModules = {
-        {SUBMOD_USAGE, L"使用率", true, true},    // CPU使用率始终可用
-        {SUBMOD_TEMP, L"温度", false, false}      // 温度需要检测
-    };
-    g_displayModules.push_back(cpuMod);
-    
-    // GPU 模块
-    DisplayModule gpuMod;
-    gpuMod.key = L"gpu";
-    gpuMod.name = g_gpuDisplayName;
-    gpuMod.enabled = true;
-    gpuMod.expanded = false;
-    gpuMod.enabledCount = 2;
-    gpuMod.subModules = {
-        {SUBMOD_USAGE, L"使用率", false, true},   // 需要NVML/ADL
-        {SUBMOD_VRAM, L"显存占用", true, true},   // DXGI始终可用
-        {SUBMOD_TEMP, L"温度", false, false}      // 需要NVML
-    };
-    g_displayModules.push_back(gpuMod);
-    
-    // RAM 模块
-    DisplayModule ramMod;
-    ramMod.key = L"ram";
-    ramMod.name = g_ramDisplayName;
-    ramMod.enabled = true;
-    ramMod.expanded = false;
-    ramMod.enabledCount = 1;
-    ramMod.subModules = {
-        {SUBMOD_USAGE, L"使用量", true, true},    // RAM使用量始终可用
-        {SUBMOD_TEMP, L"温度", false, false}      // 温度需要检测
-    };
-    g_displayModules.push_back(ramMod);
-    
-    // 初始化展开动画
-    g_moduleExpandAnims.resize(g_displayModules.size());
-    for (auto& anim : g_moduleExpandAnims) {
-        anim.value = 0.0;
-        anim.target = 0.0;
-        anim.speed = 0.12;
-    }
-}
+// InitDefaultDisplayModules 已移至 common/config_manager.cpp
 
 // 前向声明 - UpdateDisplayModuleAvailability 定义在 g_latestPerfData 之后
 void UpdateDisplayModuleAvailability();
@@ -1120,40 +300,53 @@ bool g_platformBoxHover = false;  // Platform status box hover
 
 // Edit controls
 
-// Custom Dialog System
-enum DialogType { DIALOG_INFO, DIALOG_CONFIRM, DIALOG_ERROR, DIALOG_UPDATE };
-struct DialogConfig {
-    DialogType type = DIALOG_INFO;
-    std::wstring title;
-    std::wstring content;      // Main content (can be multi-line with \n)
-    std::wstring btn1Text;     // Primary button (accent)
-    std::wstring btn2Text;     // Secondary button (border)
-    std::wstring btn3Text;     // Third button (for update dialog: Skip)
-    bool hasBtn2 = false;
-    bool hasBtn3 = false;
-};
-// Dialog result: 0 = closed/cancel, 1 = btn1 (primary), 2 = btn2 (secondary), 3 = btn3 (skip)
-int g_dialogResult = 0;
-HWND g_dialogHwnd = nullptr;
-bool g_dialogClosed = false;
-int g_dialogBtnHover = -1;
-DialogConfig g_dialogConfig;
-int g_dialogWidth = 400;
-int g_dialogHeight = 200;
+// Custom Dialog System 已移至 ui/custom_dialog.h/cpp
+
+
+
+// Dialog animation state 已移至 ui/custom_dialog.cpp
+
+
+
+
+
+
 
 // Tray menu window
+
+
+
 HWND g_trayMenuHwnd = nullptr;
+
+
+
 int g_trayMenuHover = -1;
+
+
+
 bool g_trayMenuVisible = false;
+
+
+
 bool g_trayMenuClosing = false;
+
+
+
 bool g_trayMenuExitRequested = false;  // 退出程序请求标志
+
+
+
 Animation g_trayMenuFadeAnim;
+
+
+
 Animation g_trayMenuScaleAnim;
 
-// Dialog animation state
-Animation g_dialogFadeAnim;
-Animation g_dialogScaleAnim;
-bool g_dialogAnimComplete = false;
+
+
+
+
+
 
 // Fonts
 HFONT g_fontTitle = nullptr;
@@ -1163,14 +356,7 @@ HFONT g_fontSmall = nullptr;
 HFONT g_fontLyric = nullptr;
 HFONT g_fontLabel = nullptr;
 
-// Forward declarations for custom dialogs
-bool ShowInfoDialog(const std::wstring& title, const std::wstring& content);
-bool ShowErrorDialog(const std::wstring& title, const std::wstring& content);
-bool ShowConfirmDialog(const std::wstring& title, const std::wstring& content, const std::wstring& btnYes = L"确定", const std::wstring& btnNo = L"取消");
-
-// Forward declarations for auto-start
-bool CheckAutoStart();
-void SetAutoStart(bool enable);
+// CheckAutoStart / SetAutoStart 声明已移至 common/config_manager.h
 
 // Brushes
 HBRUSH g_brushBg = nullptr;
@@ -1181,1045 +367,30 @@ HBRUSH g_brushEditBg = nullptr;
 bool g_dragging = false;
 POINT g_dragStart = {0, 0};
 
-// Update checking
-std::wstring g_latestVersion = L"";
-std::wstring g_downloadUrl = L"";
-std::wstring g_downloadSha256Url = L"";  // URL to SHA256 checksum file
-std::wstring g_downloadSha256 = L"";  // Expected SHA256 checksum
-std::wstring g_latestChangelog = L"";  // Update changelog
+// Update checking - 变量已移至 core/update_checker.cpp
+// g_skipVersion 保留在此处（配置相关）
 std::wstring g_skipVersion = L"";      // Version to skip
-bool g_updateAvailable = false;
-bool g_checkingUpdate = false;
-bool g_downloadingUpdate = false;
-bool g_manualCheckUpdate = false;      // Is this a manual check?
-bool g_updateCheckComplete = false;    // Check completed (for manual check)
-DWORD g_lastUpdateCheck = 0;
-const DWORD UPDATE_CHECK_INTERVAL = 3600000;  // 1 hour
 
-// Parse version string like "1.2.3" to number
-int ParseVersion(const std::wstring& ver) {
-    int major = 0, minor = 0, patch = 0;
-    swscanf_s(ver.c_str(), L"%d.%d.%d", &major, &minor, &patch);
-    return major * 10000 + minor * 100 + patch;
-}
-
-// Calculate SHA256 hash of a file
-std::string CalculateSHA256(const wchar_t* filePath) {
-    std::string result;
-    HCRYPTPROV hProv = 0;
-    HCRYPTHASH hHash = 0;
-    HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return result;
-    
-    if (!CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-        CloseHandle(hFile);
-        return result;
-    }
-    
-    if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
-        CryptReleaseContext(hProv, 0);
-        CloseHandle(hFile);
-        return result;
-    }
-    
-    BYTE buffer[8192];
-    DWORD bytesRead;
-    while (ReadFile(hFile, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
-        if (!CryptHashData(hHash, buffer, bytesRead, 0)) {
-            CryptDestroyHash(hHash);
-            CryptReleaseContext(hProv, 0);
-            CloseHandle(hFile);
-            return result;
-        }
-    }
-    
-    DWORD hashLen = 0;
-    DWORD hashLenSize = sizeof(DWORD);
-    if (CryptGetHashParam(hHash, HP_HASHSIZE, (BYTE*)&hashLen, &hashLenSize, 0) && hashLen == 32) {
-        BYTE hashData[32];
-        if (CryptGetHashParam(hHash, HP_HASHVAL, hashData, &hashLen, 0)) {
-            char hex[65];
-            for (int i = 0; i < 32; i++) {
-                sprintf_s(hex + i * 2, 3, "%02x", hashData[i]);
-            }
-            hex[64] = '\0';
-            result = hex;
-        }
-    }
-    
-    CryptDestroyHash(hHash);
-    CryptReleaseContext(hProv, 0);
-    CloseHandle(hFile);
-    return result;
-}
-
-// Search lyrics from Netease API for QQ Music
-std::vector<moekoe::LyricLine> SearchLyricsForQQMusic(const std::wstring& title, const std::wstring& artist) {
-    std::vector<moekoe::LyricLine> lyrics;
-    if (title.empty()) return lyrics;
-    
-    std::string dbgMsg = "Searching lyrics for: " + WstringToUtf8(title) + " - " + WstringToUtf8(artist);
-    LOG_INFO("QQ Music", "%s", dbgMsg.c_str());
-    
-    // Build search query
-    std::string query = WstringToUtf8(title);
-    if (!artist.empty()) {
-        query += " ";
-        query += WstringToUtf8(artist);
-    }
-    
-    // URL encode
-    std::string encodedQuery;
-    for (char c : query) {
-        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            encodedQuery += c;
-        } else {
-            char buf[4];
-            sprintf_s(buf, "%%%02X", (unsigned char)c);
-            encodedQuery += buf;
-        }
-    }
-    
-    // === Step 1: Search QQ Music API ===
-    // API: https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=keyword&format=json
-    std::wstring whost = L"c.y.qq.com";
-    std::wstring wpath = L"/soso/fcgi-bin/client_search_cp?w=" + Utf8ToWstring(encodedQuery) + L"&format=json&p=1&n=5";
-    
-    HINTERNET hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) return lyrics;
-    
-    HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), INTERNET_DEFAULT_HTTP_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
-    
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, L"https://y.qq.com", WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
-    
-    std::wstring headers = L"Referer: https://y.qq.com\r\nCookie: guid=1234567890\r\n";
-    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    WinHttpReceiveResponse(hRequest, NULL);
-    
-    std::string searchResp;
-    DWORD dwSize = 0;
-    do {
-        dwSize = 0;
-        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
-        if (dwSize == 0) break;
-        char* buffer = new char[dwSize + 1];
-        ZeroMemory(buffer, dwSize + 1);
-        DWORD dwDownloaded = 0;
-        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
-            searchResp += buffer;
-        }
-        delete[] buffer;
-    } while (dwSize > 0);
-    
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
-    // Debug: log search response (first 500 chars)
-    std::string respDbg = "QQ Search response: " + searchResp.substr(0, 500);
-    LOG_INFO("QQ Music", "%s", respDbg.c_str());
-    
-    // Extract songmid from search result
-    // Format: "song":{"list":[{"songmid":"xxx",...}]}
-    size_t listPos = searchResp.find("\"list\":[");
-    if (listPos == std::string::npos) {
-        LOG_INFO("QQ Music", "No song list found");
-        return lyrics;
-    }
-    
-    // Find first songmid
-    size_t songmidPos = searchResp.find("\"songmid\":\"", listPos);
-    if (songmidPos == std::string::npos) {
-        LOG_INFO("QQ Music", "No songmid found");
-        return lyrics;
-    }
-    
-    size_t midStart = songmidPos + 11;
-    size_t midEnd = searchResp.find("\"", midStart);
-    if (midEnd == std::string::npos) return lyrics;
-    
-    std::string songmid = searchResp.substr(midStart, midEnd - midStart);
-    LOG_INFO("QQ Music", "Found songmid: %s", songmid.c_str());
-    
-    // === Step 2: Fetch Lyrics ===
-    // API: https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=xxx
-    wpath = L"/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" + Utf8ToWstring(songmid) + L"&format=json";
-    
-    hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) return lyrics;
-    
-    hConnect = WinHttpConnect(hSession, L"c.y.qq.com", INTERNET_DEFAULT_HTTP_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
-    
-    hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, L"https://y.qq.com", WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
-    
-    headers = L"Referer: https://y.qq.com\r\n";
-    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    WinHttpReceiveResponse(hRequest, NULL);
-    
-    std::string lyricsResp;
-    do {
-        dwSize = 0;
-        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
-        if (dwSize == 0) break;
-        char* buffer = new char[dwSize + 1];
-        ZeroMemory(buffer, dwSize + 1);
-        DWORD dwDownloaded = 0;
-        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
-            lyricsResp += buffer;
-        }
-        delete[] buffer;
-    } while (dwSize > 0);
-    
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
-    // Debug: log lyrics response
-    std::string lrcDbg = "QQ Lyrics response: " + lyricsResp.substr(0, 300);
-    LOG_INFO("QQ Music", "%s", lrcDbg.c_str());
-    
-    // Extract lyric - format: {"lyric":"BASE64_ENCODED_LRC"}
-    size_t lyricPos = lyricsResp.find("\"lyric\":\"");
-    if (lyricPos == std::string::npos) {
-        LOG_INFO("QQ Music", "No lyric field found");
-        return lyrics;
-    }
-    
-    size_t lrcStart = lyricPos + 9;
-    size_t lrcEnd = lyricsResp.find("\"", lrcStart);
-    if (lrcEnd == std::string::npos) return lyrics;
-    
-    std::string lrcBase64 = lyricsResp.substr(lrcStart, lrcEnd - lrcStart);
-    LOG_INFO("QQ Music", "Base64 length: %zu", lrcBase64.length());
-    
-    // Base64 decode
-    static const std::string base64_chars = 
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string unescaped;
-    std::vector<int> T(256, -1);
-    for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
-    
-    int val = 0, valb = -8;
-    for (unsigned char c : lrcBase64) {
-        if (T[c] == -1) break;
-        val = (val << 6) + T[c];
-        valb += 6;
-        if (valb >= 0) {
-            unescaped.push_back(char((val >> valb) & 0xFF));
-            valb -= 8;
-        }
-    }
-    
-    // Debug: log decoded content (first 200 chars)
-    std::string decodedDbg = "Decoded lyric: " + unescaped.substr(0, 200);
-    LOG_INFO("QQ Music", "%s", decodedDbg.c_str());
-    
-    // Parse LRC format
-    size_t pos = 0;
-    while ((pos = unescaped.find('[', pos)) != std::string::npos) {
-        size_t endBracket = unescaped.find(']', pos);
-        if (endBracket == std::string::npos) { pos++; continue; }
-        
-        std::string timeStr = unescaped.substr(pos + 1, endBracket - pos - 1);
-        
-        // Skip metadata tags like [ti:], [ar:], etc.
-        if (timeStr.find(':') != std::string::npos && !isdigit((unsigned char)timeStr[0])) {
-            pos = endBracket + 1;
-            continue;
-        }
-        
-        // Parse time: mm:ss.xx or mm:ss:xxx
-        int min = 0, sec = 0, ms = 0;
-        if (sscanf_s(timeStr.c_str(), "%d:%d.%d", &min, &sec, &ms) >= 2 ||
-            sscanf_s(timeStr.c_str(), "%d:%d:%d", &min, &sec, &ms) >= 2) {
-            double time = min * 60.0 + sec + ms / 1000.0;
-            
-            // Find lyric text
-            size_t nextBracket = unescaped.find('[', endBracket);
-            std::string text;
-            if (nextBracket != std::string::npos) {
-                text = unescaped.substr(endBracket + 1, nextBracket - endBracket - 1);
-            } else {
-                text = unescaped.substr(endBracket + 1);
-            }
-            
-            // Trim
-            size_t start = text.find_first_not_of(" \t\r\n");
-            size_t end = text.find_last_not_of(" \t\r\n");
-            if (start != std::string::npos && end != std::string::npos && start <= end) {
-                text = text.substr(start, end - start + 1);
-            } else {
-                text = "";
-            }
-            
-            if (!text.empty()) {
-                moekoe::LyricLine line;
-                line.startTime = (int)(time * 1000);  // Convert to ms
-                line.text = Utf8ToWstring(text);
-                lyrics.push_back(line);
-            }
-        }
-        
-        pos = endBracket + 1;
-    }
-    
-    // Sort by time
-    std::sort(lyrics.begin(), lyrics.end(), [](const moekoe::LyricLine& a, const moekoe::LyricLine& b) {
-        return a.startTime < b.startTime;
-    });
-    
-    LOG_INFO("QQ Music", "Parsed %zu lyric lines", lyrics.size());
-    
-    return lyrics;
-}
-
-// Search lyrics from Qishui Music (汽水音乐) API
-// API: 搜索 -> https://api.qishui.com/luna/pc/search/track?q=keyword
-//      歌词 -> https://music.douyin.com/qishui/share/track?track_id=xxx
-std::vector<moekoe::LyricLine> SearchLyricsForQishuiMusic(const std::wstring& title, const std::wstring& artist) {
-    std::vector<moekoe::LyricLine> lyrics;
-    if (title.empty()) return lyrics;
-    
-    std::string dbgMsg = "[Qishui] Searching lyrics for: " + WstringToUtf8(title) + " - " + WstringToUtf8(artist);
-    LOG_INFO("Qishui Music", "%s", dbgMsg.c_str());
-    
-    // Build search query
-    std::string query = WstringToUtf8(title);
-    if (!artist.empty()) {
-        query += " ";
-        query += WstringToUtf8(artist);
-    }
-    
-    // URL encode
-    std::string encodedQuery;
-    for (char c : query) {
-        if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            encodedQuery += c;
-        } else {
-            char buf[4];
-            sprintf_s(buf, "%%%02X", (unsigned char)c);
-            encodedQuery += buf;
-        }
-    }
-    
-    // === Step 1: Search Qishui Music API ===
-    // Build search URL with required parameters
-    std::string searchPath = "/luna/pc/search/track?";
-    searchPath += "aid=386088&app_name=luna_pc&region=cn&geo_region=cn&os_region=cn";
-    searchPath += "&device_id=1088932190113307&iid=2332504177791808";
-    searchPath += "&version_name=3.0.0&version_code=30000000&channel=official";
-    searchPath += "&ac=wifi&device_platform=windows&device_type=Windows";
-    searchPath += "&q=" + encodedQuery;
-    searchPath += "&cursor=0&search_method=input&search_scene=";
-    
-    LOG_INFO("Qishui Music", "Search path: %s", searchPath.c_str());
-    
-    // 使用简单的 WinHTTP 配置
-    HINTERNET hSession = WinHttpOpen(L"VRCLyricsDisplay", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) {
-        LOG_INFO("Qishui Music", "WinHttpOpen failed: %d", GetLastError());
-        return lyrics;
-    }
-    
-    // 设置超时
-    DWORD timeout = 15000;  // 15秒
-    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-    
-    // 忽略 SSL 证书错误（开发用）
-    DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID | SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-    
-    // 使用 HTTPS
-    HINTERNET hConnect = WinHttpConnect(hSession, L"api.qishui.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) {
-        LOG_INFO("Qishui Music", "WinHttpConnect failed: %d", GetLastError());
-        WinHttpCloseHandle(hSession);
-        return lyrics;
-    }
-    
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", Utf8ToWstring(searchPath).c_str(), 
-                                             NULL, NULL, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) {
-        LOG_INFO("Qishui Music", "WinHttpOpenRequest failed: %d", GetLastError());
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return lyrics;
-    }
-    
-    // 也设置请求级别的 SSL 忽略
-    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
-    
-    // 添加必要的 headers
-    std::wstring headers = L"Accept: application/json, text/plain, */*\r\n";
-    headers += L"Accept-Language: zh-CN,zh;q=0.9,en;q=0.8\r\n";
-    headers += L"Referer: https://www.douyin.com/\r\n";
-    headers += L"Origin: https://www.douyin.com\r\n";
-    
-    BOOL sent = WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (!sent) {
-        DWORD err = GetLastError();
-        LOG_INFO("Qishui Music", "WinHttpSendRequest failed: %d", err);
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return lyrics;
-    }
-    
-    DWORD statusCode = 0;
-    DWORD statusCodeSize = sizeof(statusCode);
-    BOOL received = WinHttpReceiveResponse(hRequest, NULL);
-    
-    if (received) {
-        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, 
-                           WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX);
-        LOG_INFO("Qishui Music", "Search HTTP status: %d", statusCode);
-    } else {
-        DWORD err = GetLastError();
-        LOG_INFO("Qishui Music", "WinHttpReceiveResponse failed: %d", err);
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return lyrics;
-    }
-    
-    std::string searchResp;
-    DWORD dwSize = 0;
-    do {
-        dwSize = 0;
-        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
-        if (dwSize == 0) break;
-        char* buffer = new char[dwSize + 1];
-        ZeroMemory(buffer, dwSize + 1);
-        DWORD dwDownloaded = 0;
-        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
-            searchResp += buffer;
-        }
-        delete[] buffer;
-    } while (dwSize > 0);
-    
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
-    // Debug: log search response (first 500 chars)
-    if (searchResp.empty()) {
-        LOG_INFO("Qishui Music", "Search response is empty");
-        return lyrics;
-    }
-    std::string respDbg = "[Qishui] Search response: " + searchResp.substr(0, (std::min)((size_t)500, searchResp.length()));
-    LOG_INFO("Qishui Music", "%s", respDbg.c_str());
-    
-    // Extract track_id from search result
-    // Format: "result_groups":[{"data":[{"entity":{"track":{"id":123456,...}}}]}]
-    size_t dataPos = searchResp.find("\"data\":[");
-    if (dataPos == std::string::npos) {
-        LOG_INFO("Qishui Music", "No data found in search response");
-        return lyrics;
-    }
-    
-    // Find first track id
-    size_t trackIdPos = searchResp.find("\"id\":", dataPos);
-    if (trackIdPos == std::string::npos) {
-        LOG_INFO("Qishui Music", "No track id found");
-        return lyrics;
-    }
-    
-    // Parse track_id - can be number or string format
-    // Number format: "id":123456
-    // String format: "id":"123456"
-    size_t idStart = trackIdPos + 5;  // skip "id":
-    // Skip whitespace
-    while (idStart < searchResp.length() && (searchResp[idStart] == ' ' || searchResp[idStart] == '\t')) {
-        idStart++;
-    }
-    
-    // Check if it's a quoted string
-    bool isQuoted = false;
-    if (idStart < searchResp.length() && searchResp[idStart] == '"') {
-        isQuoted = true;
-        idStart++;  // skip opening quote
-    }
-    
-    // Find end of ID (number digits)
-    size_t idEnd = idStart;
-    while (idEnd < searchResp.length() && isdigit((unsigned char)searchResp[idEnd])) {
-        idEnd++;
-    }
-    
-    if (idEnd <= idStart) {
-        LOG_INFO("Qishui Music", "Failed to parse track id");
-        return lyrics;
-    }
-    
-    std::string trackId = searchResp.substr(idStart, idEnd - idStart);
-    LOG_INFO("Qishui Music", "Found track_id: %s", trackId.c_str());
-    
-    // === Step 2: Fetch Lyrics ===
-    // API: https://music.douyin.com/qishui/share/track?track_id=xxx
-    std::wstring lyricPath = L"/qishui/share/track?track_id=" + Utf8ToWstring(trackId);
-    
-    hSession = WinHttpOpen(L"VRCLyricsDisplay/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) return lyrics;
-    
-    hConnect = WinHttpConnect(hSession, L"music.douyin.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return lyrics; }
-    
-    hRequest = WinHttpOpenRequest(hConnect, L"GET", lyricPath.c_str(), NULL, 
-                                   L"https://music.douyin.com", WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return lyrics; }
-    
-    headers = L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n";
-    WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    WinHttpReceiveResponse(hRequest, NULL);
-    
-    std::string lyricsResp;
-    do {
-        dwSize = 0;
-        if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) break;
-        if (dwSize == 0) break;
-        char* buffer = new char[dwSize + 1];
-        ZeroMemory(buffer, dwSize + 1);
-        DWORD dwDownloaded = 0;
-        if (WinHttpReadData(hRequest, buffer, dwSize, &dwDownloaded)) {
-            lyricsResp += buffer;
-        }
-        delete[] buffer;
-    } while (dwSize > 0);
-    
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
-    // Debug: log lyrics response (first 1000 chars and search for key patterns)
-    std::string lrcDbg = "[Qishui] Lyrics response length: " + std::to_string(lyricsResp.length());
-    LOG_INFO("Qishui Music", "%s", lrcDbg.c_str());
-    
-    // Look for _ROUTER_DATA which contains the actual lyrics
-    size_t routerPos = lyricsResp.find("_ROUTER_DATA");
-    if (routerPos != std::string::npos) {
-        LOG_INFO("Qishui Music", "Found _ROUTER_DATA at position %zu", routerPos);
-    }
-    
-    // Parse lyrics from HTML/JSON response
-    // Format: "sentences":[{"startMs":0,"endMs":5000,"words":[{"text":"xxx","startMs":0}]}]
-    // Also look for _ROUTER_DATA = {...}
-    size_t sentencesPos = lyricsResp.find("\"sentences\":[");
-    if (sentencesPos == std::string::npos) {
-        // Try alternative format: audioWithLyricsOption
-        sentencesPos = lyricsResp.find("\"audioWithLyricsOption\"");
-        if (sentencesPos != std::string::npos) {
-            LOG_INFO("Qishui Music", "Found audioWithLyricsOption, searching for sentences");
-            sentencesPos = lyricsResp.find("\"sentences\":[", sentencesPos);
-        }
-    }
-    
-    if (sentencesPos == std::string::npos) {
-        LOG_INFO("Qishui Music", "No sentences found in lyrics response");
-        // Log some content around potential lyrics markers
-        size_t lyricPos = lyricsResp.find("\"lyric");
-        if (lyricPos != std::string::npos) {
-            std::string sample = lyricsResp.substr(lyricPos, (std::min)((size_t)300, lyricsResp.length() - lyricPos));
-            LOG_INFO("Qishui Music", "Found 'lyric' marker: %s", sample.c_str());
-        }
-        return lyrics;
-    }
-    
-    // Log sentences content for debugging
-    std::string sentencesSample = lyricsResp.substr(sentencesPos, (std::min)((size_t)500, lyricsResp.length() - sentencesPos));
-    LOG_INFO("Qishui Music", "Sentences sample: %s", sentencesSample.c_str());
-    
-    // Parse each sentence using bracket counting for proper JSON parsing
-    size_t pos = sentencesPos + 13;  // skip "sentences":[
-    
-    while (pos < lyricsResp.length()) {
-        // Skip whitespace and commas
-        while (pos < lyricsResp.length() && (lyricsResp[pos] == ' ' || lyricsResp[pos] == '\t' || lyricsResp[pos] == ',' || lyricsResp[pos] == '\n' || lyricsResp[pos] == '\r')) {
-            pos++;
-        }
-        
-        // Check for end of array
-        if (pos >= lyricsResp.length() || lyricsResp[pos] == ']') break;
-        
-        // Find start of sentence object
-        if (lyricsResp[pos] != '{') {
-            pos++;
-            continue;
-        }
-        
-        // Find end of sentence object using bracket counting
-        size_t objStart = pos;
-        int depth = 0;
-        bool inString = false;
-        while (pos < lyricsResp.length()) {
-            char c = lyricsResp[pos];
-            if (c == '"' && (pos == 0 || lyricsResp[pos-1] != '\\')) {
-                inString = !inString;
-            } else if (!inString) {
-                if (c == '{') depth++;
-                else if (c == '}') {
-                    depth--;
-                    if (depth == 0) {
-                        pos++;  // include the closing }
-                        break;
-                    }
-                }
-            }
-            pos++;
-        }
-        
-        std::string sentenceObj = lyricsResp.substr(objStart, pos - objStart);
-        
-        // Extract startMs
-        int startMs = -1;
-        size_t startMsPos = sentenceObj.find("\"startMs\":");
-        if (startMsPos != std::string::npos) {
-            size_t msStart = startMsPos + 10;
-            // Skip whitespace
-            while (msStart < sentenceObj.length() && (sentenceObj[msStart] == ' ' || sentenceObj[msStart] == '\t')) {
-                msStart++;
-            }
-            startMs = atoi(sentenceObj.c_str() + msStart);
-        }
-        
-        // Extract sentence-level text (not from words array)
-        // Find "text":" that appears BEFORE "words":[
-        std::string sentenceText;
-        size_t wordsArrayPos = sentenceObj.find("\"words\":[");
-        
-        size_t textSearchPos = 0;
-        while (textSearchPos < sentenceObj.length()) {
-            size_t textPos = sentenceObj.find("\"text\":\"", textSearchPos);
-            if (textPos == std::string::npos) break;
-            
-            // Check if this text is inside words array
-            if (wordsArrayPos != std::string::npos && textPos > wordsArrayPos) {
-                // This text is inside words array, skip it
-                textSearchPos = textPos + 8;
-                continue;
-            }
-            
-            // This is the sentence-level text
-            size_t textStart = textPos + 8;
-            size_t textEnd = sentenceObj.find("\"", textStart);
-            if (textEnd != std::string::npos) {
-                sentenceText = sentenceObj.substr(textStart, textEnd - textStart);
-                break;
-            }
-            break;
-        }
-        
-        // Skip metadata lines (作曲, 作词, etc.)
-        if (!sentenceText.empty() && startMs >= 0) {
-            // Skip if it looks like metadata
-            bool isMetadata = (sentenceText.find("作曲") != std::string::npos ||
-                               sentenceText.find("作词") != std::string::npos ||
-                               sentenceText.find("编曲") != std::string::npos ||
-                               sentenceText.find("浣滄洸") != std::string::npos ||  // UTF-8 作曲
-                               sentenceText.find("浣滆瘝") != std::string::npos ||  // UTF-8 作词
-                               sentenceText.find("缂栨洸") != std::string::npos);   // UTF-8 编曲
-            
-            if (!isMetadata) {
-                moekoe::LyricLine line;
-                line.startTime = startMs;
-                line.text = Utf8ToWstring(sentenceText);
-                lyrics.push_back(line);
-            }
-        }
-    }
-    
-    // Sort by time
-    std::sort(lyrics.begin(), lyrics.end(), [](const moekoe::LyricLine& a, const moekoe::LyricLine& b) {
-        return a.startTime < b.startTime;
-    });
-    
-    LOG_INFO("Qishui Music", "Parsed %zu lyric lines", lyrics.size());
-    
-    // Log first few lyrics for debugging
-    for (size_t i = 0; i < (std::min)((size_t)5, lyrics.size()); i++) {
-        LOG_INFO("Qishui Music", "Lyric[%zu]: time=%d ms, text='%s'", 
-                 i, lyrics[i].startTime, WstringToUtf8(lyrics[i].text).c_str());
-    }
-    
-    return lyrics;
-}
-
-// Check for updates from GitHub
-bool CheckForUpdate(bool manualCheck = false) {
-    if (g_checkingUpdate) return false;
-    g_checkingUpdate = true;
-    g_manualCheckUpdate = manualCheck;
-    g_latestChangelog.clear();
-    
-    HINTERNET hSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) { g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
-    
-    // Set timeouts: 5s connect, 10s receive
-    DWORD timeout = 5000;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    timeout = 10000;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
-    
-    HINTERNET hConnect = WinHttpConnect(hSession, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
-    
-    // 使用自动检测的仓库地址
-    std::string repo = g_autoDetectedRepo.empty() ? GITHUB_REPO : g_autoDetectedRepo;
-    std::string path = "/repos/" + repo + "/releases/latest";
-    std::wstring wpath(path.begin(), path.end());
-    
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); g_checkingUpdate = false; g_updateCheckComplete = true; return false; }
-    
-    BOOL bResult = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (bResult) bResult = WinHttpReceiveResponse(hRequest, NULL);
-    
-    if (bResult) {
-        DWORD dwSize = 0;
-        std::string response;
-        do {
-            DWORD dwDownloaded = 0;
-            char buffer[4096];
-            if (WinHttpReadData(hRequest, buffer, sizeof(buffer), &dwDownloaded)) {
-                response.append(buffer, dwDownloaded);
-            }
-        } while (WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0);
-        
-        // Parse JSON for tag_name and assets
-        size_t tagPos = response.find("\"tag_name\"");
-        if (tagPos != std::string::npos) {
-            size_t start = response.find("\"", tagPos + 11) + 1;
-            size_t end = response.find("\"", start);
-            if (start != std::string::npos && end != std::string::npos) {
-                std::string tag = response.substr(start, end - start);
-                // Remove 'v' prefix if present
-                if (!tag.empty() && tag[0] == 'v') tag = tag.substr(1);
-                
-                int len = MultiByteToWideChar(CP_UTF8, 0, tag.c_str(), -1, NULL, 0);
-                g_latestVersion.resize(len - 1);
-                MultiByteToWideChar(CP_UTF8, 0, tag.c_str(), -1, &g_latestVersion[0], len);
-                g_latestVersion.resize(len - 1);
-                
-                int latestVer = ParseVersion(g_latestVersion);
-                // Check if newer and not skipped
-                g_updateAvailable = (latestVer > APP_VERSION_NUM) && (g_latestVersion != g_skipVersion);
-            }
-        }
-        
-        // Parse release body (changelog)
-        size_t bodyPos = response.find("\"body\"");
-        if (bodyPos != std::string::npos) {
-            size_t start = response.find("\"", bodyPos + 7) + 1;
-            size_t end = response.find("\",\"", start);
-            if (end == std::string::npos) end = response.find("\"}", start);
-            if (start != std::string::npos && end != std::string::npos) {
-                std::string body = response.substr(start, end - start);
-                // Unescape JSON string
-                std::string unescaped;
-                for (size_t i = 0; i < body.size(); i++) {
-                    if (body[i] == '\\' && i + 1 < body.size()) {
-                        char next = body[i + 1];
-                        if (next == 'n') { unescaped += '\n'; i++; }
-                        else if (next == 'r') { unescaped += '\r'; i++; }
-                        else if (next == 't') { unescaped += '\t'; i++; }
-                        else if (next == '"') { unescaped += '"'; i++; }
-                        else if (next == '\\') { unescaped += '\\'; i++; }
-                        else if (next == 'u' && i + 5 < body.size()) {
-                            std::string hex = body.substr(i + 2, 4);
-                            try {
-                                int cp = std::stoi(hex, nullptr, 16);
-                                if (cp < 0x80) {
-                                    unescaped += (char)cp;
-                                } else if (cp < 0x800) {
-                                    unescaped += (char)(0xC0 | (cp >> 6));
-                                    unescaped += (char)(0x80 | (cp & 0x3F));
-                                } else {
-                                    unescaped += (char)(0xE0 | (cp >> 12));
-                                    unescaped += (char)(0x80 | ((cp >> 6) & 0x3F));
-                                    unescaped += (char)(0x80 | (cp & 0x3F));
-                                }
-                                i += 5;
-                            } catch (...) { unescaped += body[i]; }
-                        } else { unescaped += body[i]; }
-                    } else {
-                        unescaped += body[i];
-                    }
-                }
-                int len = MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, NULL, 0);
-                g_latestChangelog.resize(len - 1);
-                MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, &g_latestChangelog[0], len);
-                g_latestChangelog.resize(len - 1);
-            }
-        }
-        
-        // Find download URL for .exe and SHA256
-        size_t assetsPos = response.find("\"assets\"");
-        if (assetsPos != std::string::npos) {
-            // Find .exe download URL
-            size_t exePos = response.find(".exe\"", assetsPos);
-            if (exePos != std::string::npos) {
-                size_t urlStart = response.rfind("\"browser_download_url\"", exePos);
-                if (urlStart != std::string::npos) {
-                    urlStart = response.find("\"", urlStart + 22) + 1;
-                    size_t urlEnd = response.find("\"", urlStart);
-                    if (urlStart != std::string::npos && urlEnd != std::string::npos) {
-                        std::string url = response.substr(urlStart, urlEnd - urlStart);
-                        int len = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, NULL, 0);
-                        g_downloadUrl.resize(len - 1);
-                        MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, &g_downloadUrl[0], len);
-                    }
-                }
-            }
-            // Find SHA256 checksum file URL
-            g_downloadSha256Url.clear();
-            size_t sha256Pos = response.find(".sha256\"", assetsPos);
-            if (sha256Pos != std::string::npos) {
-                size_t shaUrlStart = response.rfind("\"browser_download_url\"", sha256Pos);
-                if (shaUrlStart != std::string::npos && shaUrlStart > assetsPos) {
-                    shaUrlStart = response.find("\"", shaUrlStart + 22) + 1;
-                    size_t shaUrlEnd = response.find("\"", shaUrlStart);
-                    if (shaUrlStart != std::string::npos && shaUrlEnd != std::string::npos) {
-                        std::string shaUrl = response.substr(shaUrlStart, shaUrlEnd - shaUrlStart);
-                        int len = MultiByteToWideChar(CP_UTF8, 0, shaUrl.c_str(), -1, NULL, 0);
-                        g_downloadSha256Url.resize(len - 1);
-                        MultiByteToWideChar(CP_UTF8, 0, shaUrl.c_str(), -1, &g_downloadSha256Url[0], len);
-                    }
-                }
-            }
-        }
-    }
-    
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
-    g_checkingUpdate = false;
-    g_updateCheckComplete = true;
-    g_lastUpdateCheck = GetTickCount();
-    return true;
-}
-
-// Auto-update: download and replace
-int g_downloadProgress = 0;
-
-bool DownloadAndInstallUpdate() {
-    if (g_downloadUrl.empty()) return false;
-    
-    g_downloadingUpdate = true;
-    g_downloadProgress = 0;
-    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
-    
-    // Get temp path
-    wchar_t tempPath[MAX_PATH];
-    GetTempPathW(MAX_PATH, tempPath);
-    wchar_t tempFile[MAX_PATH];
-    swprintf_s(tempFile, L"%sVRCLyricsDisplay_new.exe", tempPath);
-    
-    // Download file
-    HINTERNET hSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) { g_downloadingUpdate = false; return false; }
-    
-    // Set timeouts: 10s connect, 60s receive (for large files)
-    DWORD timeout = 10000;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    timeout = 60000;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
-    
-    // Parse URL
-    std::string url = WstringToUtf8(g_downloadUrl);
-    std::string host, path;
-    size_t pos = url.find("://");
-    if (pos != std::string::npos) {
-        std::string afterProto = url.substr(pos + 3);
-        size_t slashPos = afterProto.find("/");
-        if (slashPos != std::string::npos) {
-            host = afterProto.substr(0, slashPos);
-            path = afterProto.substr(slashPos);
-        } else {
-            host = afterProto;
-            path = "/";
-        }
-    }
-    
-    std::wstring whost = Utf8ToWstring(host);
-    std::wstring wpath = Utf8ToWstring(path);
-    
-    HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); g_downloadingUpdate = false; return false; }
-    
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wpath.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); g_downloadingUpdate = false; return false; }
-    
-    BOOL bResult = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (bResult) bResult = WinHttpReceiveResponse(hRequest, NULL);
-    
-    if (!bResult) {
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
-        g_downloadingUpdate = false;
-        return false;
-    }
-    
-    // Get file size
-    DWORD contentLength = 0;
-    DWORD sizeLen = sizeof(contentLength);
-    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &contentLength, &sizeLen, WINHTTP_NO_HEADER_INDEX);
-    
-    // Download to file
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, tempFile, L"wb") != 0 || !f) {
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
-        g_downloadingUpdate = false;
-        return false;
-    }
-    
-    DWORD totalRead = 0;
-    DWORD dwSize = 0;
-    do {
-        DWORD dwDownloaded = 0;
-        char buffer[8192];
-        if (WinHttpReadData(hRequest, buffer, sizeof(buffer), &dwDownloaded)) {
-            fwrite(buffer, 1, dwDownloaded, f);
-            totalRead += dwDownloaded;
-            if (contentLength > 0) {
-                g_downloadProgress = (int)(totalRead * 100 / contentLength);
-                if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
-            }
-        }
-    } while (WinHttpQueryDataAvailable(hRequest, &dwSize) && dwSize > 0);
-    
-    fclose(f);
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
-    g_downloadingUpdate = false;
-    
-    if (totalRead < 10000) {
-        // Download too small, probably failed
-        DeleteFileW(tempFile);
-        return false;
-    }
-    
-    // Verify SHA256 if available
-    if (!g_downloadSha256Url.empty()) {
-        // Download SHA256 checksum file
-        std::string sha256Content;
-        HINTERNET hShaSession = WinHttpOpen(L"VRChatLyricsDisplay/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-        if (hShaSession) {
-            DWORD timeout = 5000;
-            WinHttpSetOption(hShaSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-            WinHttpSetOption(hShaSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-            
-            std::string shaUrl = WstringToUtf8(g_downloadSha256Url);
-            size_t pos = shaUrl.find("://");
-            if (pos != std::string::npos) {
-                std::string afterProto = shaUrl.substr(pos + 3);
-                size_t slashPos = afterProto.find("/");
-                if (slashPos != std::string::npos) {
-                    std::string host = afterProto.substr(0, slashPos);
-                    std::string path = afterProto.substr(slashPos);
-                    std::wstring whost = Utf8ToWstring(host);
-                    std::wstring wpath = Utf8ToWstring(path);
-                    
-                    HINTERNET hShaConnect = WinHttpConnect(hShaSession, whost.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-                    if (hShaConnect) {
-                        HINTERNET hShaRequest = WinHttpOpenRequest(hShaConnect, L"GET", wpath.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-                        if (hShaRequest && WinHttpSendRequest(hShaRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(hShaRequest, NULL)) {
-                            DWORD dwSize = 0;
-                            do {
-                                DWORD dwDownloaded = 0;
-                                char buffer[1024];
-                                if (WinHttpReadData(hShaRequest, buffer, sizeof(buffer), &dwDownloaded)) {
-                                    sha256Content.append(buffer, dwDownloaded);
-                                }
-                            } while (WinHttpQueryDataAvailable(hShaRequest, &dwSize) && dwSize > 0);
-                            WinHttpCloseHandle(hShaRequest);
-                        }
-                        WinHttpCloseHandle(hShaConnect);
-                    }
-                }
-            }
-            WinHttpCloseHandle(hShaSession);
-        }
-        
-        // Parse SHA256 (first 64 hex characters)
-        if (sha256Content.length() >= 64) {
-            std::string expectedSha256 = sha256Content.substr(0, 64);
-            // Convert to lowercase
-            for (char& c : expectedSha256) { if (c >= 'A' && c <= 'F') c += 32; }
-            
-            // Calculate actual SHA256
-            std::string actualSha256 = CalculateSHA256(tempFile);
-            
-            if (actualSha256 != expectedSha256) {
-                // SHA256 mismatch - delete downloaded file
-                DeleteFileW(tempFile);
-                return false;
-            }
-        } else {
-            // SHA256 URL was set but we couldn't download the checksum
-            // Fail the update for safety
-            LOG_ERROR("Update", "SHA256 checksum file download failed, aborting update for safety");
-            DeleteFileW(tempFile);
-            return false;
-        }
-    }
-    
-    // Get current exe path
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    
-    // Create update batch script
-    wchar_t batchPath[MAX_PATH];
-    swprintf_s(batchPath, L"%supdate_vrclayrics.bat", tempPath);
-    FILE* batch = nullptr;
-    if (_wfopen_s(&batch, batchPath, L"w") != 0 || !batch) {
-        DeleteFileW(tempFile);
-        return false;
-    }
-    
-    // Batch script: wait for program to exit, then replace exe
-    fprintf(batch, "@echo off\n");
-    fprintf(batch, "echo Updating VRCLyricsDisplay...\n");
-    fprintf(batch, "echo Waiting for program to close...\n");
-    fprintf(batch, ":waitloop\n");
-    fprintf(batch, "tasklist /FI \"IMAGENAME eq VRCLyricsDisplay.exe\" 2>NUL | find /I \"VRCLyricsDisplay.exe\">NUL\n");
-    fprintf(batch, "if \"%%ERRORLEVEL%%\"==\"0\" (\n");
-    fprintf(batch, "    timeout /t 1 /nobreak >NUL\n");
-    fprintf(batch, "    goto waitloop\n");
-    fprintf(batch, ")\n");
-    fprintf(batch, "echo Replacing executable...\n");
-    fprintf(batch, "move /Y \"%ls\" \"%ls\"\n", tempFile, exePath);
-    fprintf(batch, "if \"%%ERRORLEVEL%%\"==\"0\" (\n");
-    fprintf(batch, "    echo Update successful! Starting program...\n");
-    fprintf(batch, "    start \"\" \"%ls\"\n", exePath);
-    fprintf(batch, ") else (\n");
-    fprintf(batch, "    echo Update failed. Please update manually.\n");
-    fprintf(batch, "    pause\n");
-    fprintf(batch, ")\n");
-    fprintf(batch, "del \"%%~f0\"\n");  // Self-delete batch file
-    fclose(batch);
-    
-    // Run batch script
-    ShellExecuteW(NULL, L"open", batchPath, NULL, tempPath, SW_SHOWNORMAL);
-    
-    return true;
-}
+// ParseVersion / CalculateSHA256 已移至 common/utils.cpp
+// SearchLyricsForQQMusic / SearchLyricsForQishuiMusic 已移至 core/lyrics_search.cpp
+// CheckForUpdate / DownloadAndInstallUpdate 已移至 core/update_checker.cpp
 
 // Button animations
-Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim, g_btnAutoDetectAnim, g_btnShowOrderAnim, g_btnMinimalAnim;
+Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim, g_btnAutoDetectAnim, g_btnShowOrderAnim, g_btnMinimalAnim, g_btnToolboxAnim;
 bool g_btnThemeHover = false;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
-bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false, g_hotkeyBoxHover = false, g_btnMinimalHover = false;
+bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false, g_hotkeyBoxHover = false, g_btnMinimalHover = false, g_btnToolboxHover = false;
 
 // Minimal mode - 只显示歌名和时长
 bool g_minimalMode = false;
+std::wstring g_minimalLastSongKey;     // 极简模式下上次发送的歌曲标识
+bool g_minimalOscSent = false;         // 极简模式下是否已发送OSC
+int g_minimalDots = 1;                 // 极简模式点的数量 (1-4)
+DWORD g_minimalDotsLastUpdate = 0;     // 上次更新点的时间
+const DWORD MINIMAL_DOTS_INTERVAL = 1500; // 极简模式OSC发送间隔 (ms)，避免VRChat发言限制
+int g_minimalScrollOffset = 0;         // 极简模式歌名滚动偏移
+DWORD g_minimalScrollLastUpdate = 0;   // 上次滚动更新时间
+const DWORD MINIMAL_SCROLL_INTERVAL = 1500; // 歌名滚动间隔 (ms)
 
 // Checkbox hover states for settings tab
 bool g_checkboxHover[7] = {false, false, false, false, false, false, false};  // 暂停统计, 自动更新, 显示平台, 最小化到托盘, 启动最小化, 开机自启, 管理员启动
@@ -2520,169 +691,16 @@ MMRESULT g_mediaTimer = 0;
 volatile bool g_mediaTimerRunning = false;
 const int TIMER_INTERVAL_MS = 16;  // 约60fps
 
-// 粒子系统
-struct Particle {
-    float x, y;           // 位置
-    float vx, vy;         // 速度
-    float life;           // 生命值 (0-1)
-    float maxLife;        // 最大生命
-    int size;             // 大小
-    COLORREF color;       // 颜色
-};
+// 粒子系统（类型定义在 overlay_window.h）
 std::vector<Particle> g_particles;
 bool g_particleBurst = false;  // 触发粒子爆发
-
-// 沙漏粒子
-struct SandParticle {
-    float x, y;
-    float vy;
-    int size;
-    COLORREF color;
-};
 std::vector<SandParticle> g_sandParticles;
 
 // Last displayed values (for reducing redraws)
 std::wstring g_lastDisplayTitle, g_lastDisplayArtist, g_lastDisplayLyric;
 double g_lastDisplayProgress = -1;
 
-// 计算字符串的UTF-8字节数
-size_t Utf8ByteLength(const std::wstring& s) {
-    int len = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    return (len > 0) ? (len - 1) : 0;  // len包含null终止符
-}
-
-// 截断字符串到指定UTF-8字节数
-std::wstring TruncateToBytes(const std::wstring& s, size_t maxBytes) {
-    size_t currentBytes = Utf8ByteLength(s);
-    if (currentBytes <= maxBytes) return s;
-    
-    // 二分查找截断位置
-    size_t left = 0, right = s.length();
-    while (left < right) {
-        size_t mid = (left + right + 1) / 2;
-        size_t bytes = Utf8ByteLength(s.substr(0, mid));
-        if (bytes <= maxBytes - 2) {  // 留出".."的空间
-            left = mid;
-        } else {
-            right = mid - 1;
-        }
-    }
-    return s.substr(0, left) + L"..";
-}
-
-// 极简模式歌曲名截断：中文最多3个字，外语最多6个字符
-std::wstring TruncateMinimalTitle(const std::wstring& title) {
-    if (title.empty()) return L"";
-    
-    int chineseCount = 0;
-    int otherCount = 0;
-    std::wstring result;
-    
-    for (wchar_t c : title) {
-        // 判断是否为中文字符（CJK范围）
-        bool isChinese = (c >= 0x4E00 && c <= 0x9FFF) || 
-                         (c >= 0x3400 && c <= 0x4DBF) ||
-                         (c >= 0x20000 && c <= 0x2A6DF) ||
-                         (c >= 0x2A700 && c <= 0x2B73F);
-        
-        if (isChinese) {
-            if (chineseCount >= 3) continue;  // 中文已满3个
-            chineseCount++;
-        } else if (c != L' ' && c != L'\t') {
-            if (otherCount >= 6) continue;  // 非中文已满6个
-            otherCount++;
-        }
-        
-        result += c;
-    }
-    
-    return result;
-}
-
-// 智能截断歌名（处理括号）
-// 返回: pair<mainTitle, bracketContent>
-std::pair<std::wstring, std::wstring> SmartTruncateTitle(const std::wstring& title, size_t maxMainBytes, size_t maxBracketBytes) {
-    std::wstring mainTitle = title;
-    std::wstring bracketContent;
-    
-    // 提取括号内容
-    size_t bracketStart = title.find_first_of(L"([({");
-    size_t bracketEnd = title.find_last_of(L")]})");
-    
-    if (bracketStart != std::wstring::npos && bracketEnd != std::wstring::npos && bracketEnd > bracketStart) {
-        mainTitle = title.substr(0, bracketStart);
-        // 去除末尾空格
-        while (!mainTitle.empty() && (mainTitle.back() == L' ' || mainTitle.back() == L'\t')) {
-            mainTitle.pop_back();
-        }
-        bracketContent = title.substr(bracketStart + 1, bracketEnd - bracketStart - 1);
-    }
-    
-    size_t mainBytes = Utf8ByteLength(mainTitle);
-    size_t bracketBytes = Utf8ByteLength(bracketContent);
-    
-    // 如果主标题很短但括号内容很长，去除括号
-    if (!bracketContent.empty() && mainBytes < 12 && bracketBytes > maxBracketBytes) {
-        bracketContent.clear();
-    }
-    // 如果有足够空间，保留括号内容
-    else if (!bracketContent.empty() && bracketBytes <= maxBracketBytes) {
-        // 保留括号内容
-    }
-    else {
-        bracketContent.clear();
-    }
-    
-    // 截断主标题
-    if (mainBytes > maxMainBytes) {
-        mainTitle = TruncateToBytes(mainTitle, maxMainBytes);
-    }
-    
-    // 截断括号内容
-    if (!bracketContent.empty() && Utf8ByteLength(bracketContent) > maxBracketBytes) {
-        bracketContent = TruncateToBytes(bracketContent, maxBracketBytes);
-    }
-    
-    return {mainTitle, bracketContent};
-}
-
-// 提取第一个歌手名（处理多歌手情况）
-std::wstring GetFirstArtist(const std::wstring& artist) {
-    if (artist.empty()) return L"";
-    
-    // 常见分隔符: , / & 、 ,
-    size_t pos = artist.find_first_of(L",/&、,;");
-    if (pos != std::wstring::npos) {
-        std::wstring first = artist.substr(0, pos);
-        // 去除末尾空格
-        while (!first.empty() && (first.back() == L' ' || first.back() == L'\t')) {
-            first.pop_back();
-        }
-        return first;
-    }
-    return artist;
-}
-
-std::wstring TruncateStr(const std::wstring& s, size_t maxLen) {
-    if (s.length() <= maxLen) return s;
-    if (maxLen <= 2) return s.substr(0, maxLen);
-    return s.substr(0, maxLen - 2) + L"..";
-}
-
-std::wstring FormatTime(double seconds) {
-    int m = (int)seconds / 60;
-    int s = (int)seconds % 60;
-    wchar_t buf[16];
-    swprintf_s(buf, L"%d:%02d", m, s);
-    return buf;
-}
-
-std::wstring BuildProgressBar(double progress, int bars) {
-    std::wstring bar;
-    int filled = (int)(progress * bars);
-    for (int i = 0; i < bars; i++) bar += (i < filled) ? L"\x2588" : L"\x2591";
-    return bar;
-}
+// BuildProgressBar 已移至 ui/draw_helpers.cpp
 
 void UpdatePerfStats() {
     // 从异步线程获取最新数据
@@ -2728,34 +746,7 @@ void UpdatePerfStats() {
 
 // 注：SendSystemOSCMessage 已被 OSCManager::sendSystemMessage 取代
 
-std::string WstringToUtf8(const std::wstring& wstr) {
-    if (wstr.empty()) return "";
-    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return "";
-    std::string result(len - 1, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &result[0], len, nullptr, nullptr);
-    return result;
-}
-
-std::wstring Utf8ToWstring(const std::string& str) {
-    if (str.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
-    if (len <= 0) return L"";
-    std::wstring result(len - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
-    return result;
-}
-
-int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
-    if (!text || length <= 0) return 0;
-
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SIZE size;
-    GetTextExtentPoint32W(hdc, text, length, &size);
-    SelectObject(hdc, oldFont);
-
-    return size.cx;
-}
+// WstringToUtf8, Utf8ToWstring, GetTextWidth 已移至 ui/draw_helpers.cpp
 
 std::wstring BuildPerformanceOSCMessage(int type) {
     // 极简模式：单行显示 C R G 占用率（按 display_modules 顺序）
@@ -2930,685 +921,12 @@ std::wstring BuildPerformanceOSCMessage(int type) {
     return msg;
 }
 
-// 自动检测系统信息（CPU、GPU名称），限制名称长度
-std::wstring DetectCpuName() {
-    std::wstring cpuName = L"CPU";
-    
-    // 从注册表读取CPU名称
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, 
-        L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 
-        0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        wchar_t value[256] = {0};
-        DWORD size = sizeof(value);
-        if (RegQueryValueExW(hKey, L"ProcessorNameString", nullptr, nullptr, 
-                             (LPBYTE)value, &size) == ERROR_SUCCESS) {
-            cpuName = value;
-        }
-        RegCloseKey(hKey);
-    }
-    
-    // 提取核心型号
-    // Intel格式: Intel(R) Core(TM) i5-12600KF CPU @ 3.70GHz
-    // AMD格式: AMD Ryzen 7 5800X 8-Core Processor
-    
-    std::wstring result;
-    
-    // 查找 Intel i3/i5/i7/i9 模式
-    size_t intelPos = cpuName.find(L"i3");
-    if (intelPos == std::wstring::npos) intelPos = cpuName.find(L"i5");
-    if (intelPos == std::wstring::npos) intelPos = cpuName.find(L"i7");
-    if (intelPos == std::wstring::npos) intelPos = cpuName.find(L"i9");
-    
-    if (intelPos != std::wstring::npos) {
-        // 从 i3/i5/i7/i9 开始提取，到空格或结尾
-        size_t endPos = cpuName.find(L' ', intelPos);
-        if (endPos == std::wstring::npos) endPos = cpuName.length();
-        result = cpuName.substr(intelPos, endPos - intelPos);
-    }
-    
-    // 如果没找到Intel模式，查找AMD Ryzen模式
-    if (result.empty()) {
-        size_t amdPos = cpuName.find(L"Ryzen");
-        if (amdPos != std::wstring::npos) {
-            // Ryzen 后面跟着 R3/R5/R7/R9 或数字
-            size_t start = amdPos;
-            size_t endPos = cpuName.find(L"-Core", start);
-            if (endPos == std::wstring::npos) {
-                // 找到型号后第一个空格后第二个空格（如 "Ryzen 7 5800X"）
-                size_t space1 = cpuName.find(L' ', start);
-                if (space1 != std::wstring::npos) {
-                    size_t space2 = cpuName.find(L' ', space1 + 1);
-                    if (space2 != std::wstring::npos) {
-                        size_t space3 = cpuName.find(L' ', space2 + 1);
-                        if (space3 != std::wstring::npos) {
-                            endPos = space3;
-                        } else {
-                            endPos = cpuName.length();
-                        }
-                    }
-                }
-            }
-            if (endPos != std::wstring::npos && endPos > start) {
-                result = cpuName.substr(start, endPos - start);
-                // 移除空格
-                std::wstring tmp;
-                for (wchar_t c : result) {
-                    if (c != L' ') tmp += c;
-                }
-                result = tmp;
-            }
-        }
-    }
-    
-    // 如果都没找到，尝试简单提取
-    if (result.empty()) {
-        // 移除常见前缀和空格
-        std::wstring prefixes[] = {
-            L"Intel(R) ", L"Intel ", L"AMD ", L"CPU ", L"Processor ", L"(R) ", L"(TM) "
-        };
-        for (const auto& prefix : prefixes) {
-            size_t pos = cpuName.find(prefix);
-            if (pos != std::wstring::npos) {
-                cpuName.erase(pos, prefix.length());
-            }
-        }
-        // 取第一个词
-        size_t spacePos = cpuName.find(L' ');
-        if (spacePos != std::wstring::npos) {
-            result = cpuName.substr(0, spacePos);
-        } else {
-            result = cpuName;
-        }
-    }
-    
-    // 限制长度：最多10个字符
-    if (result.length() > 10) {
-        result = result.substr(0, 10);
-    }
-    
-    return result.empty() ? L"CPU" : result;
-}
+// DetectCpuName / DetectGpuName 已移至 core/hardware_detect.cpp
+// LoadNoLyricMessages / LoadConfig / SaveConfig / CheckAutoStart / SetAutoStart 已移至 common/config_manager.cpp
 
-std::wstring DetectGpuName() {
-    std::wstring gpuName = L"GPU";
-    
-    // 使用DXGI获取GPU名称（已有DXGI依赖）
-    IDXGIFactory1* pFactory = nullptr;
-    if (CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&pFactory) == S_OK) {
-        IDXGIAdapter1* pAdapter = nullptr;
-        for (UINT i = 0; pFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; i++) {
-            DXGI_ADAPTER_DESC1 desc;
-            if (pAdapter->GetDesc1(&desc) == S_OK) {
-                // 跳过软件渲染器（Microsoft Basic Render）
-                if (desc.VendorId != 0x1414) {
-                    gpuName = desc.Description;
-                    pAdapter->Release();
-                    break;
-                }
-            }
-            pAdapter->Release();
-        }
-        pFactory->Release();
-    }
-    
-    // 提取核心型号
-    // NVIDIA格式: NVIDIA GeForce RTX 4070 SUPER
-    // AMD格式: AMD Radeon RX 7800 XT, AMD Radeon RX Vega 56, AMD Radeon VII
-    // Intel格式: Intel(R) Arc(R) A770 Graphics
-    
-    std::wstring result;
-    
-    // 查找 NVIDIA RTX/GTX 模式
-    size_t rtxPos = gpuName.find(L"RTX");
-    size_t gtxPos = gpuName.find(L"GTX");
-    
-    if (rtxPos != std::wstring::npos) {
-        // 从 RTX 开始提取，取到结尾（移除空格）
-        std::wstring sub = gpuName.substr(rtxPos);
-        for (wchar_t c : sub) {
-            if (c != L' ') result += c;
-        }
-    } else if (gtxPos != std::wstring::npos) {
-        // 从 GTX 开始提取
-        std::wstring sub = gpuName.substr(gtxPos);
-        for (wchar_t c : sub) {
-            if (c != L' ') result += c;
-        }
-    }
-    
-    // 查找 AMD 模式（RX系列、Vega、Radeon VII等）
-    if (result.empty()) {
-        // AMD RX 系列 (RX 7800 XT, RX 6800等)
-        size_t rxPos = gpuName.find(L"RX ");
-        if (rxPos != std::wstring::npos) {
-            std::wstring sub = gpuName.substr(rxPos);
-            for (wchar_t c : sub) {
-                if (c != L' ') result += c;
-            }
-        }
-    }
-    
-    if (result.empty()) {
-        // AMD Vega 系列 (Radeon RX Vega 56/64, Radeon Vega)
-        size_t vegaPos = gpuName.find(L"Vega");
-        if (vegaPos != std::wstring::npos) {
-            std::wstring sub = gpuName.substr(vegaPos);
-            for (wchar_t c : sub) {
-                if (c != L' ') result += c;
-            }
-        }
-    }
-    
-    if (result.empty()) {
-        // AMD Radeon VII
-        size_t viiPos = gpuName.find(L"Radeon VII");
-        if (viiPos != std::wstring::npos) {
-            result = L"RadeonVII";
-        }
-    }
-    
-    if (result.empty()) {
-        // AMD R7/R9 系列 (R7 370, R9 390等)
-        size_t r7Pos = gpuName.find(L"R7 ");
-        size_t r9Pos = gpuName.find(L"R9 ");
-        if (r7Pos != std::wstring::npos) {
-            std::wstring sub = gpuName.substr(r7Pos);
-            for (wchar_t c : sub) {
-                if (c != L' ') result += c;
-            }
-        } else if (r9Pos != std::wstring::npos) {
-            std::wstring sub = gpuName.substr(r9Pos);
-            for (wchar_t c : sub) {
-                if (c != L' ') result += c;
-            }
-        }
-    }
-    
-    // 查找 Intel Arc 模式
-    if (result.empty()) {
-        size_t arcPos = gpuName.find(L"Arc");
-        if (arcPos != std::wstring::npos) {
-            // 从 Arc 开始提取
-            std::wstring sub = gpuName.substr(arcPos);
-            for (wchar_t c : sub) {
-                if (c != L' ') result += c;
-            }
-        }
-    }
-    
-    // 如果都没找到，简单移除前缀和空格
-    if (result.empty()) {
-        std::wstring prefixes[] = {
-            L"NVIDIA ", L"GeForce ", L"AMD ", L"Radeon ", L"ATI ", 
-            L"Intel(R) ", L"Intel ", L"Arc(R) "
-        };
-        for (const auto& prefix : prefixes) {
-            size_t pos = gpuName.find(prefix);
-            if (pos != std::wstring::npos) {
-                gpuName.erase(pos, prefix.length());
-            }
-        }
-        // 取型号部分（通常是第一个词或第一个词+数字）
-        for (wchar_t c : gpuName) {
-            if (c != L' ') result += c;
-        }
-    }
-    
-    // 限制长度：最多10个字符
-    if (result.length() > 10) {
-        result = result.substr(0, 10);
-    }
-    
-    return result.empty() ? L"GPU" : result;
-}
+// Forward declaration
 
-std::vector<std::wstring> LoadNoLyricMessages(const wchar_t* configPath) {
-    std::vector<std::wstring> msgs;
-    FILE* f = _wfopen(configPath, L"rb");
-    if (!f) return msgs;
-    
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    std::string content(len, 0);
-    fread(&content[0], 1, len, f);
-    fclose(f);
-    
-    size_t pos = content.find("\"no_lyric_messages\"");
-    if (pos == std::string::npos) return msgs;
-    pos = content.find('[', pos);
-    if (pos == std::string::npos) return msgs;
-    size_t end = content.find(']', pos);
-    if (end == std::string::npos) return msgs;
-    
-    std::string arr = content.substr(pos, end - pos + 1);
-    size_t start = 0;
-    while ((start = arr.find('"', start)) != std::string::npos) {
-        size_t endQ = arr.find('"', start + 1);
-        if (endQ == std::string::npos) break;
-        std::string msg8 = arr.substr(start + 1, endQ - start - 1);
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, msg8.c_str(), -1, nullptr, 0);
-        if (wlen > 0) {
-            std::wstring wmsg(wlen - 1, 0);
-            MultiByteToWideChar(CP_UTF8, 0, msg8.c_str(), -1, &wmsg[0], wlen);
-            msgs.push_back(wmsg);
-        }
-        start = endQ + 1;
-    }
-    return msgs;
-}
-
-void LoadConfig(const wchar_t* path) {
-    FILE* f = _wfopen(path, L"rb");
-    if (!f) return;
-    
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    
-    std::string content(len, 0);
-    fread(&content[0], 1, len, f);
-    fclose(f);
-    
-    auto getStr = [&](const char* key) -> std::wstring {
-        std::string search = std::string("\"") + key + "\"";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) return L"";
-        pos = content.find('"', pos + search.size());
-        if (pos == std::string::npos) return L"";
-        size_t end = content.find('"', pos + 1);
-        if (end == std::string::npos) return L"";
-        std::string val = content.substr(pos + 1, end - pos - 1);
-        // Unescape basic JSON escape sequences
-        std::string unescaped;
-        for (size_t i = 0; i < val.size(); i++) {
-            if (val[i] == '\\' && i + 1 < val.size()) {
-                char next = val[i + 1];
-                if (next == 'n') { unescaped += '\n'; i++; }
-                else if (next == 'r') { unescaped += '\r'; i++; }
-                else if (next == 't') { unescaped += '\t'; i++; }
-                else if (next == '"') { unescaped += '"'; i++; }
-                else if (next == '\\') { unescaped += '\\'; i++; }
-                else { unescaped += val[i]; }
-            } else {
-                unescaped += val[i];
-            }
-        }
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, nullptr, 0);
-        if (wlen <= 0) return L"";
-        std::wstring wval(wlen - 1, 0);
-        MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, &wval[0], wlen);
-        return wval;
-    };
-    
-    auto getInt = [&](const char* key, int def) -> int {
-        std::string search = std::string("\"") + key + "\"";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) return def;
-        pos = content.find(':', pos);
-        if (pos == std::string::npos) return def;
-        // Skip whitespace
-        while (pos < content.size() && (content[pos] == ':' || content[pos] == ' ' || content[pos] == '\t' || content[pos] == '\n' || content[pos] == '\r')) {
-            pos++;
-        }
-        if (pos >= content.size()) return def;
-        return atoi(content.c_str() + pos);
-    };
-    
-    auto getBool = [&](const char* key, bool def) -> bool {
-        std::string search = std::string("\"") + key + "\"";
-        size_t pos = content.find(search);
-        if (pos == std::string::npos) return def;
-        // Find the colon after the key
-        size_t colonPos = content.find(':', pos);
-        if (colonPos == std::string::npos) return def;
-        // Find the value after the colon (skip whitespace)
-        size_t valStart = colonPos + 1;
-        while (valStart < content.size() && (content[valStart] == ' ' || content[valStart] == '\t' || content[valStart] == '\n' || content[valStart] == '\r')) {
-            valStart++;
-        }
-        if (valStart >= content.size()) return def;
-        // Check for "true" at valStart
-        if (valStart + 4 <= content.size() && content.compare(valStart, 4, "true") == 0) {
-            return true;
-        }
-        // Check for "false" at valStart
-        if (valStart + 5 <= content.size() && content.compare(valStart, 5, "false") == 0) {
-            return false;
-        }
-        return def;  // Value not found or invalid
-    };
-    
-    std::wstring ip = getStr("ip");
-    if (!ip.empty()) g_oscIp = ip;
-    int port = getInt("port", 0);
-    if (port > 0) g_oscPort = port;
-    g_moekoePort = getInt("moekoe_port", 6520);
-    g_oscEnabled = getBool("osc_enabled", true);
-    g_minimizeToTray = getBool("minimize_to_tray", true);
-    g_startMinimized = getBool("start_minimized", false);
-    g_showPerfOnPause = getBool("show_perf_on_pause", true);
-    g_autoUpdate = getBool("auto_update", true);
-    g_showPlatform = getBool("show_platform", true);
-    g_performanceMode = getInt("performance_mode", 0);
-    g_minimalMode = getBool("minimal_mode", false);  // 极简模式
-    // g_darkMode固定为true，不再从配置加载
-
-    // Apply theme
-    UpdateThemeColors();
-
-    // Auto-start: sync with registry (registry is source of truth)
-    g_autoStart = CheckAutoStart();
-    // Run as admin: load from config
-    g_runAsAdmin = getBool("run_as_admin", false);
-    
-    // Load window size and position
-    int winW = getInt("win_width", 0);
-    int winH = getInt("win_height", 0);
-    if (winW >= WIN_W_MIN) g_winW = winW;
-    if (winH >= WIN_H_MIN) g_winH = winH;
-    g_winX = getInt("win_x", -1);
-    g_winY = getInt("win_y", -1);
-    
-    // Load skipped version
-    g_skipVersion = getStr("skip_version");
-    
-    // Load hotkey config
-    g_oscPauseHotkey = getInt("osc_pause_hotkey", VK_F10);
-    g_oscPauseHotkeyMods = getInt("osc_pause_hotkey_mods", 0);
-    
-    // Load CPU/GPU display names
-    std::wstring cpuName = getStr("cpu_name");
-    if (!cpuName.empty()) g_cpuDisplayName = cpuName;
-    std::wstring gpuName = getStr("gpu_name");
-    if (!gpuName.empty()) g_gpuDisplayName = gpuName;
-    std::wstring ramName = getStr("ram_name");
-    if (!ramName.empty()) g_ramDisplayName = ramName;
-    
-    // Initialize display modules with default config
-    InitDefaultDisplayModules();
-    
-    // Load display_modules configuration from JSON
-    {
-        size_t dmPos = content.find("\"display_modules\"");
-        if (dmPos != std::string::npos) {
-            // 找到 display_modules 数组（新格式）
-            size_t arrStart = content.find('[', dmPos);
-            if (arrStart != std::string::npos) {
-                // 找到匹配的数组结束括号
-                int bracketCount = 1;
-                size_t arrEnd = arrStart + 1;
-                while (arrEnd < content.size() && bracketCount > 0) {
-                    if (content[arrEnd] == '[') bracketCount++;
-                    else if (content[arrEnd] == ']') bracketCount--;
-                    arrEnd++;
-                }
-                
-                std::string arrContent = content.substr(arrStart, arrEnd - arrStart);
-                
-                // 解析每个模块对象
-                std::vector<DisplayModule> loadedModules;
-                size_t searchPos = 0;
-                
-                while ((searchPos = arrContent.find("{", searchPos)) != std::string::npos) {
-                    // 找到模块对象的结束
-                    int braceCount = 1;
-                    size_t objEnd = searchPos + 1;
-                    while (objEnd < arrContent.size() && braceCount > 0) {
-                        if (arrContent[objEnd] == '{') braceCount++;
-                        else if (arrContent[objEnd] == '}') braceCount--;
-                        objEnd++;
-                    }
-                    
-                    std::string modContent = arrContent.substr(searchPos, objEnd - searchPos);
-                    
-                    // 解析 key
-                    DisplayModule mod;
-                    size_t keyPos = modContent.find("\"key\"");
-                    if (keyPos != std::string::npos) {
-                        size_t keyStart = modContent.find('"', keyPos + 6);
-                        if (keyStart != std::string::npos) {
-                            size_t keyEnd = modContent.find('"', keyStart + 1);
-                            if (keyEnd != std::string::npos) {
-                                std::string keyVal = modContent.substr(keyStart + 1, keyEnd - keyStart - 1);
-                                int wlen = MultiByteToWideChar(CP_UTF8, 0, keyVal.c_str(), -1, nullptr, 0);
-                                if (wlen > 0) {
-                                    std::wstring wkey(wlen - 1, 0);
-                                    MultiByteToWideChar(CP_UTF8, 0, keyVal.c_str(), -1, &wkey[0], wlen);
-                                    mod.key = wkey;
-                                }
-                            }
-                        }
-                    }
-                    
-                    // 解析 enabled
-                    size_t enabledPos = modContent.find("\"enabled\"");
-                    if (enabledPos != std::string::npos) {
-                        size_t colonPos = modContent.find(':', enabledPos);
-                        if (colonPos != std::string::npos) {
-                            size_t valStart = colonPos + 1;
-                            while (valStart < modContent.size() && (modContent[valStart] == ' ' || modContent[valStart] == '\t')) valStart++;
-                            if (valStart + 4 <= modContent.size() && modContent.compare(valStart, 4, "true") == 0) {
-                                mod.enabled = true;
-                            } else if (valStart + 5 <= modContent.size() && modContent.compare(valStart, 5, "false") == 0) {
-                                mod.enabled = false;
-                            }
-                        }
-                    }
-                    
-                    // 解析 sub_modules 数组
-                    size_t subArrPos = modContent.find("\"sub_modules\"");
-                    if (subArrPos != std::string::npos) {
-                        size_t subArrStart = modContent.find('[', subArrPos);
-                        if (subArrStart != std::string::npos) {
-                            int subBracketCount = 1;
-                            size_t subArrEnd = subArrStart + 1;
-                            while (subArrEnd < modContent.size() && subBracketCount > 0) {
-                                if (modContent[subArrEnd] == '[') subBracketCount++;
-                                else if (modContent[subArrEnd] == ']') subBracketCount--;
-                                subArrEnd++;
-                            }
-                            
-                            std::string subArr = modContent.substr(subArrStart, subArrEnd - subArrStart);
-                            
-                            size_t subSearchPos = 0;
-                            while ((subSearchPos = subArr.find("{", subSearchPos)) != std::string::npos) {
-                                size_t subObjEnd = subArr.find("}", subSearchPos);
-                                if (subObjEnd == std::string::npos) break;
-                                
-                                std::string subObj = subArr.substr(subSearchPos, subObjEnd - subSearchPos + 1);
-                                
-                                SubModuleInfo subMod;
-                                size_t typePos = subObj.find("\"type\"");
-                                if (typePos != std::string::npos) {
-                                    size_t typeStart = subObj.find('"', typePos + 6);
-                                    if (typeStart != std::string::npos) {
-                                        size_t typeEnd = subObj.find('"', typeStart + 1);
-                                        if (typeEnd != std::string::npos) {
-                                            std::string typeVal = subObj.substr(typeStart + 1, typeEnd - typeStart - 1);
-                                            if (typeVal == "usage") subMod.type = SUBMOD_USAGE;
-                                            else if (typeVal == "temp") subMod.type = SUBMOD_TEMP;
-                                            else if (typeVal == "vram") subMod.type = SUBMOD_VRAM;
-                                        }
-                                    }
-                                }
-                                
-                                size_t subEnabledPos = subObj.find("\"enabled\"");
-                                if (subEnabledPos != std::string::npos) {
-                                    size_t colonPos = subObj.find(':', subEnabledPos);
-                                    if (colonPos != std::string::npos) {
-                                        size_t valStart = colonPos + 1;
-                                        while (valStart < subObj.size() && (subObj[valStart] == ' ' || subObj[valStart] == '\t')) valStart++;
-                                        if (valStart + 4 <= subObj.size() && subObj.compare(valStart, 4, "true") == 0) {
-                                            subMod.enabled = true;
-                                        } else if (valStart + 5 <= subObj.size() && subObj.compare(valStart, 5, "false") == 0) {
-                                            subMod.enabled = false;
-                                        }
-                                    }
-                                }
-                                
-                                switch (subMod.type) {
-                                    case SUBMOD_USAGE: subMod.name = L"使用率"; break;
-                                    case SUBMOD_TEMP: subMod.name = L"温度"; break;
-                                    case SUBMOD_VRAM: subMod.name = L"显存"; break;
-                                }
-                                
-                                mod.subModules.push_back(subMod);
-                                subSearchPos = subObjEnd + 1;
-                            }
-                        }
-                    }
-                    
-                    if (!mod.key.empty()) {
-                        loadedModules.push_back(mod);
-                    }
-                    
-                    searchPos = objEnd + 1;
-                }
-                
-                if (!loadedModules.empty()) {
-                    g_displayModules = loadedModules;
-                }
-            }
-        }
-    }
-    
-    // 同步名称到模块
-    for (auto& mod : g_displayModules) {
-        if (mod.key == L"cpu") mod.name = g_cpuDisplayName;
-        else if (mod.key == L"gpu") mod.name = g_gpuDisplayName;
-        else if (mod.key == L"ram") mod.name = g_ramDisplayName;
-        
-        // 设置子项默认可用性（配置文件不保存 available 字段）
-        for (auto& sub : mod.subModules) {
-            // 根据类型设置默认可用性
-            if (mod.key == L"cpu") {
-                sub.available = (sub.type == SUBMOD_USAGE);  // CPU使用率始终可用
-            } else if (mod.key == L"gpu") {
-                sub.available = (sub.type == SUBMOD_VRAM);   // 显存始终可用（DXGI）
-            } else if (mod.key == L"ram") {
-                sub.available = (sub.type == SUBMOD_USAGE);  // RAM使用量始终可用
-            }
-        }
-    }
-    
-    // 异步更新温度等传感器的可用性
-    UpdateDisplayModuleAvailability();
-    
-    // Initialize system info expand animation based on performance mode
-    if (g_performanceMode == 1) {
-        // Performance mode: fully expanded
-        g_systemInfoExpandAnim.value = 1.0;
-        g_systemInfoExpandAnim.target = 1.0;
-    } else {
-        // Music mode: fully collapsed
-        g_systemInfoExpandAnim.value = 0.0;
-        g_systemInfoExpandAnim.target = 0.0;
-    }
-}
-
-// Escape special characters for JSON string values
-std::string JsonEscape(const std::wstring& wstr) {
-    // Convert to UTF-8 first
-    int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return "";
-    std::string utf8(len - 1, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &utf8[0], len, nullptr, nullptr);
-    
-    // Escape special characters
-    std::string result;
-    result.reserve(utf8.size() * 2);
-    for (char c : utf8) {
-        switch (c) {
-            case '"': result += "\\\""; break;
-            case '\\': result += "\\\\"; break;
-            case '\n': result += "\\n"; break;
-            case '\r': result += "\\r"; break;
-            case '\t': result += "\\t"; break;
-            default: result += c; break;
-        }
-    }
-    return result;
-}
-
-void SaveConfig(const wchar_t* path) {
-    FILE* f = _wfopen(path, L"wb");
-    if (!f) return;
-    fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%s\",\n    \"port\": %d\n  },\n", JsonEscape(g_oscIp).c_str(), g_oscPort);
-    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n  \"run_as_admin\": %s,\n  \"performance_mode\": %d,\n  \"minimal_mode\": %s,\n",
-            g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false",
-            g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
-            g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
-            "true", g_autoStart ? "true" : "false", g_runAsAdmin ? "true" : "false", g_performanceMode,
-            g_minimalMode ? "true" : "false");  // g_darkMode固定为true
-    fprintf(f, "  \"cpu_name\": \"%s\",\n  \"gpu_name\": \"%s\",\n  \"ram_name\": \"%s\",\n",
-            JsonEscape(g_cpuDisplayName).c_str(), JsonEscape(g_gpuDisplayName).c_str(), JsonEscape(g_ramDisplayName).c_str());
-    
-    // Save display_modules
-    fprintf(f, "  \"display_modules\": [\n");
-    for (size_t i = 0; i < g_displayModules.size(); i++) {
-        const auto& mod = g_displayModules[i];
-        fprintf(f, "    {\n");
-        fprintf(f, "      \"key\": \"%s\",\n", JsonEscape(mod.key).c_str());
-        fprintf(f, "      \"enabled\": %s,\n", mod.enabled ? "true" : "false");
-        fprintf(f, "      \"sub_modules\": [\n");
-        for (size_t j = 0; j < mod.subModules.size(); j++) {
-            const char* subName = "";
-            switch (mod.subModules[j].type) {
-                case SUBMOD_USAGE: subName = "usage"; break;
-                case SUBMOD_TEMP: subName = "temp"; break;
-                case SUBMOD_VRAM: subName = "vram"; break;
-            }
-            fprintf(f, "        {\"type\": \"%s\", \"enabled\": %s}", subName, mod.subModules[j].enabled ? "true" : "false");
-            if (j < mod.subModules.size() - 1) fprintf(f, ",\n");
-            else fprintf(f, "\n");
-        }
-        fprintf(f, "      ]\n");
-        fprintf(f, "    }%s\n", (i < g_displayModules.size() - 1) ? "," : "");
-    }
-    fprintf(f, "  ],\n");
-    
-    fprintf(f, "  \"win_width\": %d,\n  \"win_height\": %d,\n  \"win_x\": %d,\n  \"win_y\": %d,\n",
-            g_winW, g_winH, g_winX, g_winY);
-    fprintf(f, "  \"osc_pause_hotkey\": %d,\n  \"osc_pause_hotkey_mods\": %d,\n",
-            g_oscPauseHotkey, g_oscPauseHotkeyMods);
-    fprintf(f, "  \"skip_version\": \"%s\"\n}\n", JsonEscape(g_skipVersion).c_str());
-    fclose(f);
-}
-
-// Auto-start with Windows (Registry)
-bool CheckAutoStart() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 
-                      0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-        return false;
-    }
-    wchar_t value[MAX_PATH] = {0};
-    DWORD size = MAX_PATH * sizeof(wchar_t);
-    LRESULT result = RegQueryValueExW(hKey, L"VRCLyricsDisplay", nullptr, nullptr, 
-                                       (LPBYTE)value, &size);
-    RegCloseKey(hKey);
-    return result == ERROR_SUCCESS && wcslen(value) > 0;
-}
-
-void SetAutoStart(bool enable) {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 
-                      0, KEY_WRITE, &hKey) != ERROR_SUCCESS) {
-        return;
-    }
-    if (enable) {
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-        RegSetValueExW(hKey, L"VRCLyricsDisplay", 0, REG_SZ, 
-                       (const BYTE*)exePath, (DWORD)(wcslen(exePath) + 1) * sizeof(wchar_t));
-    } else {
-        RegDeleteValueW(hKey, L"VRCLyricsDisplay");
-    }
-    RegCloseKey(hKey);
-}
+// LoadConfig / SaveConfig / CheckAutoStart / SetAutoStart / JsonEscape 已移至 common/config_manager.cpp
 
 // Forward declaration
 bool IsRunningAsAdmin();
@@ -3946,8 +1264,20 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
     
     // === 极简模式：只显示歌名 ===
     if (g_minimalMode) {
-        std::wstring shortTitle = TruncateMinimalTitle(info.title);
-        return L"\x6B63\x5728\x542C:" + shortTitle;  // 正在听:歌名
+        // 静态常量：避免每次创建字符串
+        static const wchar_t* MINIMAL_DOTS[] = { L".", L"..", L"...", L"...." };
+        static const std::wstring PREFIX = L"\x6B63\x5728\x542C:";  // 正在听:
+        
+        // 判断是否需要滚动
+        if (NeedsMinimalScroll(info.title)) {
+            // 滚动模式：只显示滚动歌名，无点数
+            std::wstring shortTitle = GetScrollingMinimalTitle(info.title, g_minimalScrollOffset);
+            return PREFIX + shortTitle;  // 正在听:歌名
+        } else {
+            // 点数模式：显示截断歌名 + 点数动画
+            std::wstring shortTitle = TruncateMinimalTitle(info.title);
+            return PREFIX + shortTitle + MINIMAL_DOTS[g_minimalDots - 1];  // 正在听:歌名...
+        }
     }
     
     const size_t MAX_MSG_LEN = 144;
@@ -4293,745 +1623,13 @@ void QueueUpdate(const moekoe::SongInfo& info, int platform) {
     LeaveCriticalSection(&g_cs);
 }
 
-// Enable blur behind effect (Windows 10/11)
-void EnableBlurBehind(HWND hwnd) {
-    typedef struct _ACCENT_POLICY {
-        int AccentState;
-        int AccentFlags;
-        int GradientColor;
-        int AnimationId;
-    } ACCENT_POLICY;
-    
-    HMODULE hUser = LoadLibraryW(L"user32.dll");
-    if (!hUser) return;
-    
-    typedef BOOL(WINAPI* SetWindowCompositionAttribute_t)(HWND, void*);
-    auto fn = (SetWindowCompositionAttribute_t)GetProcAddress(hUser, "SetWindowCompositionAttribute");
-    
-    if (fn) {
-        // 固定使用深色模式毛玻璃
-        ACCENT_POLICY policy = { 4, 2, (COLOR_GLASS_TINT & 0xFFFFFF) | (GLASS_ALPHA << 24), 0 };
-        struct _WINDOWCOMPOSITIONATTRIBDATA {
-            int Attrib;
-            void* pvData;
-            int cbData;
-        } data = { 19, &policy, sizeof(policy) };
-        fn(hwnd, &data);
-    }
-    
-    FreeLibrary(hUser);
-}
+// EnableBlurBehind / UpdateWindowSystemTheme / IsRunningAsAdmin / CreateRoundRectPath / TrayIcon 已移至 ui/window_utils.cpp
 
-// Create a rounded window region for the main window
-HRGN CreateRoundedWindowRegion(HWND hwnd, int cornerRadius = 12) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    
-    // 创建圆角矩形区域
-    HRGN hrgn = CreateRoundRectRgn(
-        rc.left, rc.top, rc.right, rc.bottom,
-        cornerRadius, cornerRadius
-    );
-    
-    return hrgn;
-}
+// ============================================================================
+// 绘制辅助函数已移至 ui/draw_helpers.h/cpp
+// ============================================================================
 
-// Update window system theme (title bar color, rounded corners)
-void UpdateWindowSystemTheme(HWND hwnd) {
-    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
-    if (hDwm) {
-        typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
-        auto fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
-        if (fn) {
-            // DWMWA_WINDOW_CORNER_PREFERENCE = 33
-            // 0=DEFAULT, 1=DONOTROUND, 2=ROUND, 3=ROUNDSMALL
-            int corner = 2;  // ROUND - 使用系统圆角
-            fn(hwnd, 33, &corner, sizeof(corner));
-            // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            BOOL dark = TRUE;  // 固定深色模式
-            fn(hwnd, 20, &dark, sizeof(dark));
-        }
-        FreeLibrary(hDwm);
-    }
-}
-
-// Check if running as administrator
-bool IsRunningAsAdmin() {
-    BOOL isAdmin = FALSE;
-    PSID adminGroup = nullptr;
-    SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
-    
-    if (AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID, 
-                                  DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
-        CheckTokenMembership(nullptr, adminGroup, &isAdmin);
-        FreeSid(adminGroup);
-    }
-    return isAdmin == TRUE;
-}
-
-// Restart as administrator
-void RestartAsAdmin(HWND hwnd) {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    
-    SHELLEXECUTEINFOW sei = {0};
-    sei.cbSize = sizeof(sei);
-    sei.lpVerb = L"runas";
-    sei.lpFile = exePath;
-    sei.nShow = SW_SHOWNORMAL;
-    
-    if (ShellExecuteExW(&sei)) {
-        // Release mutex before closing to allow new instance to start
-        if (g_mutex) {
-            ReleaseMutex(g_mutex);
-            CloseHandle(g_mutex);
-            g_mutex = nullptr;
-        }
-        PostMessage(hwnd, WM_CLOSE, 0, 0);
-    }
-}
-
-void CreateTrayIcon(HWND hwnd) {
-    memset(&g_nid, 0, sizeof(g_nid));
-    g_nid.cbSize = sizeof(g_nid);
-    g_nid.hWnd = hwnd;
-    g_nid.uID = TRAY_ICON_ID;
-    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_nid.szTip, L"VRChat Lyrics Display");
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
-}
-
-void RemoveTrayIcon() { Shell_NotifyIconW(NIM_DELETE, &g_nid); }
-void UpdateTrayTip(const wchar_t* text) { wcscpy_s(g_nid.szTip, text); Shell_NotifyIconW(NIM_MODIFY, &g_nid); }
-
-// 创建圆角矩形路径的辅助函数
-void CreateRoundRectPath(Gdiplus::GraphicsPath* path, const Gdiplus::RectF& rect, int radius) {
-    Gdiplus::REAL d = (Gdiplus::REAL)(radius * 2);
-    path->AddArc(rect.X, rect.Y, d, d, 180.0f, 90.0f);
-    path->AddArc(rect.X + rect.Width - d, rect.Y, d, d, 270.0f, 90.0f);
-    path->AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0.0f, 90.0f);
-    path->AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90.0f, 90.0f);
-    path->CloseFigure();
-}
-
-// 使用 GDI+ 绘制抗锯齿圆角矩形
-void DrawRoundRect(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color) {
-    Graphics graphics(hdc);
-    graphics.SetSmoothingMode(SmoothingModeHighQuality);
-    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    
-    // 创建圆角矩形路径
-    GraphicsPath path;
-    int d = radius * 2;
-    path.AddArc(x, y, d, d, 180, 90);
-    path.AddArc(x + w - d, y, d, d, 270, 90);
-    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-    path.AddArc(x, y + h - d, d, d, 90, 90);
-    path.CloseFigure();
-    
-    // 填充
-    SolidBrush brush(Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
-    graphics.FillPath(&brush, &path);
-}
-
-void DrawRoundRectWithBorder(HDC hdc, int x, int y, int w, int h, int radius, COLORREF fillColor, COLORREF borderColor) {
-    Graphics graphics(hdc);
-    graphics.SetSmoothingMode(SmoothingModeHighQuality);
-    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    
-    // 创建圆角矩形路径
-    GraphicsPath path;
-    int d = radius * 2;
-    path.AddArc(x, y, d, d, 180, 90);
-    path.AddArc(x + w - d, y, d, d, 270, 90);
-    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-    path.AddArc(x, y + h - d, d, d, 90, 90);
-    path.CloseFigure();
-    
-    // 填充
-    SolidBrush brush(Color(255, GetRValue(fillColor), GetGValue(fillColor), GetBValue(fillColor)));
-    graphics.FillPath(&brush, &path);
-    
-    // 边框
-    Pen pen(Color(255, GetRValue(borderColor), GetGValue(borderColor), GetBValue(borderColor)), 2);
-    graphics.DrawPath(&pen, &path);
-}
-
-// 绘制半透明圆角矩形（毛玻璃效果）
-void DrawRoundRectAlpha(HDC hdc, int x, int y, int w, int h, int radius, COLORREF color, int alpha) {
-    Graphics graphics(hdc);
-    graphics.SetSmoothingMode(SmoothingModeHighQuality);
-    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    
-    // 创建圆角矩形路径
-    GraphicsPath path;
-    int d = radius * 2;
-    path.AddArc(x, y, d, d, 180, 90);
-    path.AddArc(x + w - d, y, d, d, 270, 90);
-    path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-    path.AddArc(x, y + h - d, d, d, 90, 90);
-    path.CloseFigure();
-    
-    // 填充（带透明度）
-    SolidBrush brush(Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color)));
-    graphics.FillPath(&brush, &path);
-}
-
-void DrawTextCentered(HDC hdc, const wchar_t* text, int cx, int y, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
-    TextOutW(hdc, cx - sz.cx / 2, y, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
-}
-
-void DrawTextLeft(HDC hdc, const wchar_t* text, int x, int y, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    TextOutW(hdc, x, y, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
-}
-
-// Draw text vertically centered in a given rect area (for checkboxes)
-void DrawTextVCentered(HDC hdc, const wchar_t* text, int x, int y, int h, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
-    TextOutW(hdc, x, y + (h - sz.cy) / 2, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
-}
-
-// Draw text right-aligned and vertically centered
-void DrawTextVCenteredRight(HDC hdc, const wchar_t* text, int rightX, int y, int h, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
-    TextOutW(hdc, rightX - sz.cx, y + (h - sz.cy) / 2, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
-}
-
-// Draw text centered both horizontally and vertically (for buttons)
-void DrawTextCenteredBoth(HDC hdc, const wchar_t* text, int x, int y, int w, int h, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SIZE sz; GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &sz);
-    TextOutW(hdc, x + (w - sz.cx) / 2, y + (h - sz.cy) / 2, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
-}
-
-// === Custom Dialog Implementation ===
-LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            // Enable blur behind effect for dialog
-            EnableBlurBehind(hwnd);
-            SetTimer(hwnd, 1, 16, nullptr);
-            
-            // 初始化弹窗动画
-            g_dialogAnimComplete = false;
-            g_dialogFadeAnim.value = 0.0;
-            g_dialogFadeAnim.target = 1.0;
-            g_dialogFadeAnim.speed = 0.1;
-            g_dialogScaleAnim.value = 0.92;
-            g_dialogScaleAnim.target = 1.0;
-            g_dialogScaleAnim.speed = 0.15;
-            
-            // 初始透明度设为一个小值，确保窗口可见性
-            // 0会导致某些情况下窗口无法正确绘制
-            SetLayeredWindowAttributes(hwnd, 0, 1, LWA_ALPHA);
-            return 0;
-        }
-        case WM_TIMER: {
-            // 更新弹窗动画
-            if (!g_dialogAnimComplete) {
-                g_dialogFadeAnim.update();
-                g_dialogScaleAnim.update();
-                
-                BYTE alpha = (BYTE)(g_dialogFadeAnim.value * 255);
-                SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
-                
-                if (!g_dialogFadeAnim.isActive() && !g_dialogScaleAnim.isActive()) {
-                    g_dialogAnimComplete = true;
-                }
-            }
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd, &ps);
-            
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            int w = rc.right - rc.left;
-            int h = rc.bottom - rc.top;
-            
-            HDC memDC = CreateCompatibleDC(hdc);
-            HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
-            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
-            
-            // 应用缩放动画（从中心向外扩展）
-            double scale = g_dialogScaleAnim.value;
-            int drawW = (int)(w * scale);
-            int drawH = (int)(h * scale);
-            int offsetX = (w - drawW) / 2;
-            int offsetY = (h - drawH) / 2;
-            
-            // 先填充背景
-            HBRUSH bgBrush = CreateSolidBrush(COLOR_BG);
-            FillRect(memDC, &rc, bgBrush);
-            DeleteObject(bgBrush);
-            
-            // 创建临时DC绘制原始内容
-            HDC tempDC = CreateCompatibleDC(hdc);
-            HBITMAP tempBmp = CreateCompatibleBitmap(hdc, w, h);
-            HBITMAP oldTempBmp = (HBITMAP)SelectObject(tempDC, tempBmp);
-            
-            // 在临时DC上绘制原始尺寸内容
-            // Card with rounded corners
-            DrawRoundRect(tempDC, 0, 0, w, h, 16, COLOR_CARD);
-            
-            // Accent bar - color based on type
-            COLORREF accentColor = COLOR_ACCENT;
-            if (g_dialogConfig.type == DIALOG_ERROR) accentColor = COLOR_ERROR;
-            else if (g_dialogConfig.type == DIALOG_CONFIRM) accentColor = COLOR_WARNING;
-            DrawRoundRect(tempDC, 0, 0, 5, h, 2, accentColor);
-            
-            // Title
-            SetTextColor(tempDC, COLOR_TEXT);
-            SetBkMode(tempDC, TRANSPARENT);
-            HFONT titleFont = g_fontSubtitle ? g_fontSubtitle : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HFONT oldFont = (HFONT)SelectObject(tempDC, titleFont);
-            if (!g_dialogConfig.title.empty()) {
-                TextOutW(tempDC, 30, 25, g_dialogConfig.title.c_str(), (int)g_dialogConfig.title.length());
-            }
-            SelectObject(tempDC, oldFont);
-            
-            // Content with word wrap
-            HFONT contentFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            oldFont = (HFONT)SelectObject(tempDC, contentFont);
-            int lineY = 70;
-            int lineH = 32;
-            int maxWidth = w - 60;  // 减去左右边距
-            
-            std::wstring content = g_dialogConfig.content;
-            size_t pos = 0;
-            while (pos < content.length()) {
-                size_t nextPos = content.find(L'\n', pos);
-                if (nextPos == std::wstring::npos) nextPos = content.length();
-                std::wstring line = content.substr(pos, nextPos - pos);
-                pos = nextPos + 1;
-                
-                // 如果这一行太长，需要自动换行
-                if (line.length() > 0) {
-                    SIZE textSize;
-                    GetTextExtentPoint32W(tempDC, line.c_str(), (int)line.length(), &textSize);
-                    
-                    if (textSize.cx > maxWidth && line.length() > 1) {
-                        // 需要换行，按字符分割
-                        std::wstring wrappedLine;
-                        for (size_t i = 0; i < line.length(); i++) {
-                            std::wstring testLine = wrappedLine + line[i];
-                            GetTextExtentPoint32W(tempDC, testLine.c_str(), (int)testLine.length(), &textSize);
-                            
-                            if (textSize.cx > maxWidth && !wrappedLine.empty()) {
-                                // 输出当前行
-                                TextOutW(tempDC, 30, lineY, wrappedLine.c_str(), (int)wrappedLine.length());
-                                lineY += lineH;
-                                wrappedLine = line[i];
-                            } else {
-                                wrappedLine += line[i];
-                            }
-                        }
-                        // 输出最后一行
-                        if (!wrappedLine.empty()) {
-                            TextOutW(tempDC, 30, lineY, wrappedLine.c_str(), (int)wrappedLine.length());
-                            lineY += lineH;
-                        }
-                    } else {
-                        // 行长度合适，直接输出
-                        TextOutW(tempDC, 30, lineY, line.c_str(), (int)line.length());
-                        lineY += lineH;
-                    }
-                }
-            }
-            SelectObject(tempDC, oldFont);
-            
-            // Buttons
-            int btnW = 110, btnH = 42;
-            int btnY = h - 65;
-            int btn1X, btn2X, btn3X;
-            
-            if (g_dialogConfig.hasBtn3) {
-                btnW = 100;
-                int totalW = btnW * 3 + 30;
-                btn1X = (w - totalW) / 2;
-                btn2X = btn1X + btnW + 10;
-                btn3X = btn2X + btnW + 10;
-            } else if (g_dialogConfig.hasBtn2) {
-                btn1X = w/2 - btnW - 15;
-                btn2X = w/2 + 15;
-            } else {
-                btn1X = w/2 - btnW/2;
-                btn2X = btn1X;
-                btn3X = btn1X;
-            }
-            
-            // Button 1
-            COLORREF btn1Bg = (g_dialogBtnHover == 0) ? RGB(110, 190, 255) : COLOR_ACCENT;
-            if (g_dialogConfig.type == DIALOG_ERROR) btn1Bg = (g_dialogBtnHover == 0) ? RGB(255, 120, 120) : COLOR_ERROR;
-            DrawRoundRect(tempDC, btn1X, btnY, btnW, btnH, 8, btn1Bg);
-            HFONT btnFont = g_fontNormal ? g_fontNormal : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            oldFont = (HFONT)SelectObject(tempDC, btnFont);
-            SetTextColor(tempDC, RGB(0, 0, 0));
-            RECT btn1Rc = {btn1X, btnY, btn1X + btnW, btnY + btnH};
-            if (!g_dialogConfig.btn1Text.empty()) {
-                DrawTextW(tempDC, g_dialogConfig.btn1Text.c_str(), (int)g_dialogConfig.btn1Text.length(), &btn1Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
-            
-            // Button 2
-            if (g_dialogConfig.hasBtn2) {
-                COLORREF btn2Bg = (g_dialogBtnHover == 1) ? COLOR_BTN_HOVER : COLOR_BTN_BG;
-                DrawRoundRect(tempDC, btn2X, btnY, btnW, btnH, 8, btn2Bg);
-                HPEN borderPen = CreatePen(PS_SOLID, 1, COLOR_BORDER);
-                HPEN oldPen = (HPEN)SelectObject(tempDC, borderPen);
-                SelectObject(tempDC, GetStockObject(NULL_BRUSH));
-                RoundRect(tempDC, btn2X, btnY, btn2X + btnW, btnY + btnH, 16, 16);
-                SelectObject(tempDC, oldPen);
-                DeleteObject(borderPen);
-                SetTextColor(tempDC, COLOR_TEXT);
-                RECT btn2Rc = {btn2X, btnY, btn2X + btnW, btnY + btnH};
-                if (!g_dialogConfig.btn2Text.empty()) {
-                    DrawTextW(tempDC, g_dialogConfig.btn2Text.c_str(), (int)g_dialogConfig.btn2Text.length(), &btn2Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-            }
-            
-            // Button 3
-            if (g_dialogConfig.hasBtn3) {
-                COLORREF btn3Bg = (g_dialogBtnHover == 2) ? COLOR_BTN_HOVER : COLOR_BTN_BG;
-                DrawRoundRect(tempDC, btn3X, btnY, btnW, btnH, 8, btn3Bg);
-                SetTextColor(tempDC, COLOR_TEXT_DIM);
-                RECT btn3Rc = {btn3X, btnY, btn3X + btnW, btnY + btnH};
-                if (!g_dialogConfig.btn3Text.empty()) {
-                    DrawTextW(tempDC, g_dialogConfig.btn3Text.c_str(), (int)g_dialogConfig.btn3Text.length(), &btn3Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-            }
-            
-            SelectObject(tempDC, oldFont);
-            
-            // 缩放并复制到目标DC（从中心扩展）
-            SetStretchBltMode(memDC, HALFTONE);
-            StretchBlt(memDC, offsetX, offsetY, drawW, drawH, tempDC, 0, 0, w, h, SRCCOPY);
-            
-            // 清理临时DC
-            SelectObject(tempDC, oldTempBmp);
-            DeleteObject(tempBmp);
-            DeleteDC(tempDC);
-            
-            BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
-            SelectObject(memDC, oldBmp);
-            DeleteObject(memBmp);
-            DeleteDC(memDC);
-            
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        case WM_MOUSEMOVE: {
-            int x = LOWORD(lParam), y = HIWORD(lParam);
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            int w = rc.right - rc.left;
-            int h = rc.bottom - rc.top;
-            
-            int btnW = 110, btnH = 42;
-            int btnY = h - 65;
-            int btn1X, btn2X, btn3X;
-            
-            if (g_dialogConfig.hasBtn3) {
-                btnW = 100;
-                int totalW = btnW * 3 + 30;
-                btn1X = (w - totalW) / 2;
-                btn2X = btn1X + btnW + 10;
-                btn3X = btn2X + btnW + 10;
-            } else if (g_dialogConfig.hasBtn2) {
-                btn1X = w/2 - btnW - 15;
-                btn2X = w/2 + 15;
-                btn3X = btn2X;
-            } else {
-                btn1X = w/2 - btnW/2;
-                btn2X = btn1X;
-                btn3X = btn1X;
-            }
-            
-            int oldHover = g_dialogBtnHover;
-            if (x >= btn1X && x < btn1X + btnW && y >= btnY && y < btnY + btnH) {
-                g_dialogBtnHover = 0;
-            } else if (g_dialogConfig.hasBtn2 && x >= btn2X && x < btn2X + btnW && y >= btnY && y < btnY + btnH) {
-                g_dialogBtnHover = 1;
-            } else if (g_dialogConfig.hasBtn3 && x >= btn3X && x < btn3X + btnW && y >= btnY && y < btnY + btnH) {
-                g_dialogBtnHover = 2;
-            } else {
-                g_dialogBtnHover = -1;
-            }
-            if (oldHover != g_dialogBtnHover) InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
-        case WM_LBUTTONUP: {
-            int x = LOWORD(lParam), y = HIWORD(lParam);
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            int w = rc.right - rc.left;
-            int h = rc.bottom - rc.top;
-            
-            int btnW = 110, btnH = 42;
-            int btnY = h - 65;
-            int btn1X, btn2X, btn3X;
-            
-            if (g_dialogConfig.hasBtn3) {
-                btnW = 100;
-                int totalW = btnW * 3 + 30;
-                btn1X = (w - totalW) / 2;
-                btn2X = btn1X + btnW + 10;
-                btn3X = btn2X + btnW + 10;
-            } else if (g_dialogConfig.hasBtn2) {
-                btn1X = w/2 - btnW - 15;
-                btn2X = w/2 + 15;
-                btn3X = btn2X;
-            } else {
-                btn1X = w/2 - btnW/2;
-                btn2X = btn1X;
-                btn3X = btn1X;
-            }
-            
-            if (x >= btn1X && x < btn1X + btnW && y >= btnY && y < btnY + btnH) {
-                g_dialogResult = 1;
-                g_dialogClosed = true;
-                DestroyWindow(hwnd);
-            } else if (g_dialogConfig.hasBtn2 && x >= btn2X && x < btn2X + btnW && y >= btnY && y < btnY + btnH) {
-                g_dialogResult = 2;
-                g_dialogClosed = true;
-                DestroyWindow(hwnd);
-            } else if (g_dialogConfig.hasBtn3 && x >= btn3X && x < btn3X + btnW && y >= btnY && y < btnY + btnH) {
-                g_dialogResult = 3;
-                g_dialogClosed = true;
-                DestroyWindow(hwnd);
-            }
-            return 0;
-        }
-        case WM_KEYDOWN: {
-            if (wParam == VK_ESCAPE) {
-                g_dialogResult = false;
-                g_dialogClosed = true;
-                DestroyWindow(hwnd);
-            } else if (wParam == VK_RETURN) {
-                g_dialogResult = true;
-                g_dialogClosed = true;
-                DestroyWindow(hwnd);
-            }
-            return 0;
-        }
-        case WM_DESTROY: {
-            KillTimer(hwnd, 1);
-            g_dialogHwnd = nullptr;
-            // Don't call PostQuitMessage - it would affect the main window's message loop
-            // The dialog's message loop exits via g_dialogClosed flag
-            return 0;
-        }
-        case WM_CLOSE: {
-            g_dialogResult = 0;
-            g_dialogClosed = true;
-            DestroyWindow(hwnd);
-            return 0;
-        }
-    }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
-int ShowCustomDialog(const DialogConfig& config) {
-    g_dialogConfig = config;
-    g_dialogBtnHover = -1;
-    
-    // Calculate dialog size based on content
-    int lineCount = 1;
-    for (size_t i = 0; i < config.content.length(); i++) {
-        if (config.content[i] == L'\n') lineCount++;
-    }
-    g_dialogWidth = 520;
-    g_dialogHeight = 160 + lineCount * 32 + 30;
-    if (g_dialogHeight < 220) g_dialogHeight = 220;
-    
-    // Register window class (only once)
-    static bool registered = false;
-    if (!registered) {
-        WNDCLASSEXW wc = {0};
-        wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = DialogProc;
-        wc.hInstance = GetModuleHandleW(nullptr);
-        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-        wc.lpszClassName = L"VRCLyricsDialog_Class";
-        RegisterClassExW(&wc);
-        registered = true;
-    }
-    
-    // Center on parent window (or screen if no parent)
-    int x, y;
-    if (g_hwnd && IsWindow(g_hwnd)) {
-        RECT parentRect;
-        GetWindowRect(g_hwnd, &parentRect);
-        int parentW = parentRect.right - parentRect.left;
-        int parentH = parentRect.bottom - parentRect.top;
-        x = parentRect.left + (parentW - g_dialogWidth) / 2;
-        y = parentRect.top + (parentH - g_dialogHeight) / 2;
-    } else {
-        // Fallback to screen center
-        int screenW = GetSystemMetrics(SM_CXSCREEN);
-        int screenH = GetSystemMetrics(SM_CYSCREEN);
-        x = (screenW - g_dialogWidth) / 2;
-        y = (screenH - g_dialogHeight) / 2;
-    }
-    
-    g_dialogHwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        L"VRCLyricsDialog_Class",
-        config.title.c_str(),
-        WS_POPUP,
-        x, y, g_dialogWidth, g_dialogHeight,
-        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-    
-    if (!g_dialogHwnd) {
-        // Window creation failed
-        return false;
-    }
-    
-    // Rounded corners
-    typedef HRESULT(WINAPI* DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
-    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
-    if (hDwm) {
-        auto fn = (DwmSetWindowAttribute_t)GetProcAddress(hDwm, "DwmSetWindowAttribute");
-        if (fn) {
-            int corner = 2;
-            fn(g_dialogHwnd, 33, &corner, sizeof(corner));
-        }
-        FreeLibrary(hDwm);
-    }
-    
-    // 初始化弹窗动画
-    g_dialogFadeAnim.value = 0.0;
-    g_dialogFadeAnim.target = 1.0;
-    g_dialogFadeAnim.speed = 0.12;
-    g_dialogScaleAnim.value = 0.85;
-    g_dialogScaleAnim.target = 1.0;
-    g_dialogScaleAnim.speed = 0.18;
-    g_dialogAnimComplete = false;
-    
-    SetLayeredWindowAttributes(g_dialogHwnd, 0, 1, LWA_ALPHA);  // 初始透明度为1，避免黑屏
-    ShowWindow(g_dialogHwnd, SW_SHOW);
-    SetForegroundWindow(g_dialogHwnd);
-    UpdateWindow(g_dialogHwnd);
-    
-    // Message loop - process messages for this dialog
-    MSG msg;
-    g_dialogClosed = false;
-    while (!g_dialogClosed && g_dialogHwnd) {
-        // 使用 PeekMessage 避免阻塞，确保定时器消息能被处理
-        if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) {
-                PostQuitMessage((int)msg.wParam);
-                break;
-            }
-            if (!IsDialogMessageW(g_dialogHwnd, &msg)) {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        } else {
-            // 没有消息时让出 CPU
-            WaitMessage();
-        }
-    }
-    
-    // Ensure dialog is destroyed
-    if (g_dialogHwnd && IsWindow(g_dialogHwnd)) {
-        DestroyWindow(g_dialogHwnd);
-        g_dialogHwnd = nullptr;
-    }
-    
-    return g_dialogResult;
-}
-
-// Convenience functions
-bool ShowInfoDialog(const std::wstring& title, const std::wstring& content) {
-    DialogConfig config;
-    config.type = DIALOG_INFO;
-    config.title = title;
-    config.content = content;
-    config.btn1Text = L"\x786E\x5B9A";  // 确定
-    config.hasBtn2 = false;
-    return ShowCustomDialog(config) > 0;
-}
-
-bool ShowErrorDialog(const std::wstring& title, const std::wstring& content) {
-    DialogConfig config;
-    config.type = DIALOG_ERROR;
-    config.title = title;
-    config.content = content;
-    config.btn1Text = L"\x786E\x5B9A";  // 确定
-    config.hasBtn2 = false;
-    return ShowCustomDialog(config) > 0;
-}
-
-bool ShowConfirmDialog(const std::wstring& title, const std::wstring& content, const std::wstring& btnYes, const std::wstring& btnNo) {
-    DialogConfig config;
-    config.type = DIALOG_CONFIRM;
-    config.title = title;
-    config.content = content;
-    config.btn1Text = btnYes;
-    config.btn2Text = btnNo;
-    config.hasBtn2 = true;
-    return ShowCustomDialog(config) == 1;
-}
-
-// Update dialog with 3 buttons: Update | Cancel | Skip this version
-// Returns: 0=cancel/closed, 1=update, 2=cancel, 3=skip
-int ShowUpdateDialog(const std::wstring& title, const std::wstring& content) {
-    DialogConfig config;
-    config.type = DIALOG_UPDATE;
-    config.title = title;
-    config.content = content;
-    config.btn1Text = L"\x66F4\x65B0";  // 更新
-    config.btn2Text = L"\x53D6\x6D88";  // 取消
-    config.btn3Text = L"\x8DF3\x8FC7";  // 跳过
-    config.hasBtn2 = true;
-    config.hasBtn3 = true;
-    return ShowCustomDialog(config);
-}
-
-bool ShowFirstRunDialog() {
-    DialogConfig config;
-    config.type = DIALOG_INFO;
-    config.title = L"VRChat Lyrics Display";
-    
-    // Check if running as admin
-    bool isAdmin = IsRunningAsAdmin();
-    std::wstring content;
-    if (!isAdmin) {
-        content = L"\x5EFA\x8BAE\x4EE5\x7BA1\x7406\x5458\x8EAB\x4EFD\x8FD0\x884C\x4EE5\x4FDD\x8BC1\x529F\x80FD\x6B63\x5E38\n\n";
-    }
-    content += L"\x8BF7\x9009\x62E9\x5173\x95ED\x65B9\x5F0F:\n";
-    content += L"\x2022 \x6700\x5C0F\x5316\x5230\x6258\x76D8 \x2212 \x7EE7\x7EED\x540E\x53F0\x8FD0\x884C\n";
-    content += L"\x2022 \x76F4\x63A5\x9000\x51FA \x2212 \x5173\x95ED\x7A0B\x5E8F\n\n";
-    content += L"\x53EF\x5728\x8BBE\x7F6E\x4E2D\x968F\x65F6\x66F4\x6539";
-    config.content = content;
-    config.btn1Text = L"\x6258\x76D8";  // 托盘
-    config.btn2Text = L"\x9000\x51FA";    // 退出
-    config.hasBtn2 = true;
-    int result = ShowCustomDialog(config);
-    // 按钮1(托盘)返回1 -> true，按钮2(退出)返回2 -> false
-    return result == 1;
-}
-// === End Custom Dialog ===
+// === Custom Dialog Implementation 已移至 ui/custom_dialog.cpp ===
 
 // === Tray Menu Window ===
 const int TRAY_MENU_W = 150;
@@ -5321,14 +1919,7 @@ void ShowTrayMenu(int x, int y) {
 }
 // === End Tray Menu Window ===
 
-void DrawTextRight(HDC hdc, const wchar_t* text, int rightX, int y, COLORREF color, HFONT font) {
-    SetTextColor(hdc, color); SetBkMode(hdc, TRANSPARENT);
-    HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    SIZE size;
-    GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &size);
-    TextOutW(hdc, rightX - size.cx, y, text, (int)wcslen(text));
-    SelectObject(hdc, oldFont);
-}
+// DrawTextRight 已移至 ui/draw_helpers.h/cpp
 
 void DrawButtonAnim(HDC hdc, int x, int y, int w, int h, const wchar_t* text, Animation& anim, bool accent = false) {
     double hover = anim.value;
@@ -5502,57 +2093,58 @@ void OnPaint(HWND hwnd) {
         DrawRoundRect(memDC, btnX, btnY, btnSize, btnSize, 6, RGB(r, g, b));
         
         // 绘制旋转的图标
-        if (g_checkingUpdate) {
-            // 使用GDI+绘制旋转的搜索图标
+        // 使用GDI+绘制更新按钮（合并 Graphics 对象复用）
+        {
             Gdiplus::Graphics graphics(memDC);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
             graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
             
-            // 设置旋转中心并旋转
-            Gdiplus::Matrix matrix;
-            int centerX = btnX + btnSize / 2;
-            int centerY = btnY + btnSize / 2;
-            matrix.RotateAt((Gdiplus::REAL)g_updateRotation, Gdiplus::PointF((Gdiplus::REAL)centerX, (Gdiplus::REAL)centerY));
-            graphics.SetTransform(&matrix);
-            
-            // 绘制搜索图标 (🔍)
-            Gdiplus::SolidBrush textBrush(Gdiplus::Color(180, 180, 190));  // 固定深色模式颜色
-            Gdiplus::FontFamily fontFamily(L"Segoe UI Emoji");
-            Gdiplus::Font font(&fontFamily, 16, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-            Gdiplus::StringFormat format;
-            format.SetAlignment(Gdiplus::StringAlignmentCenter);
-            format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-            Gdiplus::RectF rectF((Gdiplus::REAL)btnX, (Gdiplus::REAL)btnY, (Gdiplus::REAL)btnSize, (Gdiplus::REAL)btnSize);
-            graphics.DrawString(L"\U0001F50D", -1, &font, rectF, &format, &textBrush);
-        } else {
-            // 正常绘制图标 - 正确居中
-            HFONT oldFont = (HFONT)SelectObject(memDC, g_fontNormal);
-            SIZE sz; GetTextExtentPoint32W(memDC, updateIcon, (int)wcslen(updateIcon), &sz);
-            TextOutW(memDC, btnX + (btnSize - sz.cx) / 2, btnY + (btnSize - sz.cy) / 2, updateIcon, (int)wcslen(updateIcon));
-            SelectObject(memDC, oldFont);
-        }
-        
-        // 新版本小绿点提示
-        if (g_updateAvailable && !g_downloadingUpdate) {
-            int dotSize = 10;
-            int dotX = btnX + btnSize - dotSize / 2;
-            int dotY = btnY - dotSize / 2 + 2;
-            
-            // 使用GDI+绘制发光效果的绿点
-            Gdiplus::Graphics graphics(memDC);
-            graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-            
-            // 发光效果
-            for (int i = 3; i >= 0; i--) {
-                int glowSize = dotSize + i * 3;
-                int alpha = 80 - i * 20;
-                Gdiplus::SolidBrush glowBrush(Gdiplus::Color(alpha, 80, 200, 120));
-                graphics.FillEllipse(&glowBrush, dotX - glowSize/2 + dotSize/2, dotY - glowSize/2 + dotSize/2, glowSize, glowSize);
+            if (g_checkingUpdate) {
+                // 设置旋转中心并旋转
+                Gdiplus::Matrix matrix;
+                int centerX = btnX + btnSize / 2;
+                int centerY = btnY + btnSize / 2;
+                matrix.RotateAt((Gdiplus::REAL)g_updateRotation, Gdiplus::PointF((Gdiplus::REAL)centerX, (Gdiplus::REAL)centerY));
+                graphics.SetTransform(&matrix);
+                
+                // 绘制搜索图标 (🔍)
+                Gdiplus::SolidBrush textBrush(Gdiplus::Color(180, 180, 190));  // 固定深色模式颜色
+                Gdiplus::FontFamily fontFamily(L"Segoe UI Emoji");
+                Gdiplus::Font font(&fontFamily, 16, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                Gdiplus::StringFormat format;
+                format.SetAlignment(Gdiplus::StringAlignmentCenter);
+                format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+                Gdiplus::RectF rectF((Gdiplus::REAL)btnX, (Gdiplus::REAL)btnY, (Gdiplus::REAL)btnSize, (Gdiplus::REAL)btnSize);
+                graphics.DrawString(L"\U0001F50D", -1, &font, rectF, &format, &textBrush);
+            } else {
+                // 正常绘制图标 - 正确居中
+                HFONT oldFont = (HFONT)SelectObject(memDC, g_fontNormal);
+                SIZE sz; GetTextExtentPoint32W(memDC, updateIcon, (int)wcslen(updateIcon), &sz);
+                TextOutW(memDC, btnX + (btnSize - sz.cx) / 2, btnY + (btnSize - sz.cy) / 2, updateIcon, (int)wcslen(updateIcon));
+                SelectObject(memDC, oldFont);
             }
             
-            // 绿点
-            Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 80, 200, 120));
-            graphics.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
+            // 新版本小绿点提示（复用同一个 Graphics 对象）
+            if (g_updateAvailable && !g_downloadingUpdate) {
+                int dotSize = 10;
+                int dotX = btnX + btnSize - dotSize / 2;
+                int dotY = btnY - dotSize / 2 + 2;
+                
+                // 重置变换（绿点不需要旋转）
+                graphics.ResetTransform();
+                
+                // 发光效果
+                for (int i = 3; i >= 0; i--) {
+                    int glowSize = dotSize + i * 3;
+                    int alpha = 80 - i * 20;
+                    Gdiplus::SolidBrush glowBrush(Gdiplus::Color(alpha, 80, 200, 120));
+                    graphics.FillEllipse(&glowBrush, dotX - glowSize/2 + dotSize/2, dotY - glowSize/2 + dotSize/2, glowSize, glowSize);
+                }
+                
+                // 绿点
+                Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 80, 200, 120));
+                graphics.FillEllipse(&dotBrush, dotX, dotY, dotSize, dotSize);
+            }
         }
     }
 
@@ -5777,6 +2369,11 @@ void OnPaint(HWND hwnd) {
         int minimalBtnY = g_neteaseConnected ? (btnY + 48) : (launchBtnY + 44);
         DrawButtonAnim(memDC, CARD_PADDING + 18, minimalBtnY, leftColW - 36, 36,
             g_minimalMode ? L"\x6B63\x5E38\x6A21\x5F0F" : L"\x6781\x7B80\x6A21\x5F0F", g_btnMinimalAnim, g_minimalMode);
+        
+        // === Toolbox Button ===
+        int toolboxBtnY = minimalBtnY + 44;
+        DrawButtonAnim(memDC, CARD_PADDING + 18, toolboxBtnY, leftColW - 36, 36,
+            L"\x5DE5\x5177\x7BB1", g_btnToolboxAnim, false);  // 工具箱
         
         // === Platform Selection Dropdown Menu (draw LAST so it's on top) ===
         if (isMenuVisible) {
@@ -6506,9 +3103,13 @@ void OnPaint(HWND hwnd) {
     SelectClipRgn(memDC, rightClip);
     
     // Get current data and build SongInfo for preview
+    // 优化：一次获取所有需要的数据，减少临界区持锁时间
     moekoe::SongInfo previewInfo;
+    DWORD now = GetTickCount();
+    bool needUpdate = false;
     
     EnterCriticalSection(&g_cs);
+    // 一次性复制所有需要的数据
     previewInfo.title = g_pendingTitle;
     previewInfo.artist = g_pendingArtist;
     previewInfo.duration = g_pendingDuration;
@@ -6516,36 +3117,16 @@ void OnPaint(HWND hwnd) {
     previewInfo.isPlaying = g_pendingIsPlaying;
     previewInfo.hasData = !g_pendingTitle.empty();
     previewInfo.lyrics = g_pendingLyrics;
+    // 同时检查是否需要更新预览
+    needUpdate = g_cachedPreviewMsg.empty() || 
+                 (now - g_lastPreviewUpdate) >= PREVIEW_UPDATE_INTERVAL ||
+                 g_playStateChanged;
     LeaveCriticalSection(&g_cs);
     
     // Format OSC message using the actual function
     std::wstring oscMessage;
     
-    // Use cached preview message with rate limiting
-    DWORD now = GetTickCount();
-    bool needUpdate = false;
-    
-    EnterCriticalSection(&g_cs);
-    // Update preview if: first time, interval passed, or play state changed
-    if (g_cachedPreviewMsg.empty() || 
-        (now - g_lastPreviewUpdate) >= PREVIEW_UPDATE_INTERVAL ||
-        g_playStateChanged) {
-        needUpdate = true;
-    }
-    LeaveCriticalSection(&g_cs);
-    
     if (needUpdate) {
-        moekoe::SongInfo previewInfo;
-        EnterCriticalSection(&g_cs);
-        previewInfo.title = g_pendingTitle;
-        previewInfo.artist = g_pendingArtist;
-        previewInfo.duration = g_pendingDuration;
-        previewInfo.currentTime = g_pendingCurrentTime;
-        previewInfo.isPlaying = g_pendingIsPlaying;
-        previewInfo.hasData = !g_pendingTitle.empty();
-        previewInfo.lyrics = g_pendingLyrics;
-        LeaveCriticalSection(&g_cs);
-        
         // 根据显示模式选择预览消息
         if (g_performanceMode == 1) {
             g_cachedPreviewMsg = BuildPerformanceOSCMessage(0);
@@ -7025,28 +3606,9 @@ void Connect() {
     }, nullptr, 0, nullptr);
 }
 
-// 检测网易云进程是否在运行
-bool IsNeteaseRunning() {
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return false;
-    
-    bool found = false;
-    PROCESSENTRY32W pe = {sizeof(pe)};
-    if (Process32FirstW(hSnapshot, &pe)) {
-        do {
-            if (_wcsicmp(pe.szExeFile, L"cloudmusic.exe") == 0) {
-                found = true;
-                break;
-            }
-        } while (Process32NextW(hSnapshot, &pe));
-    }
-    CloseHandle(hSnapshot);
-    return found;
-}
+// IsNeteaseRunning 已移至 common/utils.cpp
 
-bool IsInRect(int x, int y, int rx, int ry, int rw, int rh) {
-    return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
-}
+// IsInRect 函数已移至 ui/draw_helpers.h
 
 bool IsAnimationActive() {
     // Check if any animation is still updating
@@ -7061,6 +3623,8 @@ bool IsAnimationActive() {
     if (g_btnThemeAnim.isActive()) return true;
     if (g_btnAutoDetectAnim.isActive()) return true;
     if (g_btnShowOrderAnim.isActive()) return true;
+    if (g_btnMinimalAnim.isActive()) return true;
+    if (g_btnToolboxAnim.isActive()) return true;
     
     // 窗口启动动画
     if (!g_startupAnimComplete) return true;
@@ -7111,6 +3675,7 @@ void UpdateAnimations() {
     g_btnAutoDetectAnim.setTarget(g_autoDetectHover ? 1.0 : 0.0);
     g_btnShowOrderAnim.setTarget(g_showOrderHover ? 1.0 : 0.0);
     g_btnMinimalAnim.setTarget(g_btnMinimalHover ? 1.0 : 0.0);
+    g_btnToolboxAnim.setTarget(g_btnToolboxHover ? 1.0 : 0.0);
     g_btnConnectAnim.update();
     g_btnApplyAnim.update();
     g_btnCloseAnim.update();
@@ -7122,6 +3687,7 @@ void UpdateAnimations() {
     g_btnAutoDetectAnim.update();
     g_btnShowOrderAnim.update();
     g_btnMinimalAnim.update();
+    g_btnToolboxAnim.update();
     
     // 窗口启动动画（缩放）- 简化版本，不再使用淡入
     if (!g_startupAnimComplete) {
@@ -9074,7 +5640,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             bool oldConnect = g_btnConnectHover, oldApply = g_btnApplyHover;
             bool oldClose = g_btnCloseHover, oldMin = g_btnMinHover, oldUpdate = g_btnUpdateHover, oldLaunch = g_btnLaunchHover;
-            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover, oldTheme = g_btnThemeHover, oldHotkeyBox = g_hotkeyBoxHover;
+            bool oldExportLog = g_btnExportLogHover, oldAdmin = g_btnAdminHover, oldTheme = g_btnThemeHover, oldHotkeyBox = g_hotkeyBoxHover, oldToolbox = g_btnToolboxHover;
             bool oldTabHover[3] = {g_tabHover[0], g_tabHover[1], g_tabHover[2]};
 
             // Tab hover detection
@@ -9101,6 +5667,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int btnY = platformBoxY + platformBoxH + menuExtraSpace + 10;  // Connect button
                 int launchBtnY = btnY + 48;  // Launch Netease button
                 int minimalBtnY = g_neteaseConnected ? (btnY + 48) : (launchBtnY + 44);  // Minimal button
+                int toolboxBtnY = minimalBtnY + 44;  // Toolbox button
                 
                 // Platform box hover
                 bool oldPlatformBoxHover = g_platformBoxHover;
@@ -9125,11 +5692,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_btnMinimalHover = false;
                     g_btnConnectHover = false;
                     g_btnLaunchHover = false;
+                    g_btnToolboxHover = false;
                 } else {
                     // Only detect button hovers when menu is closed
                     g_btnMinimalHover = IsInRect(x, y, CARD_PADDING + 18, minimalBtnY, leftColW - 36, 36);
                     g_btnConnectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 40);
                     g_btnLaunchHover = !g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36);
+                    g_btnToolboxHover = IsInRect(x, y, CARD_PADDING + 18, toolboxBtnY, leftColW - 36, 36);
                 }
                 g_btnExportLogHover = false;
                 g_btnAdminHover = false;
@@ -9177,6 +5746,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_btnMinimalHover = false;
                 g_btnConnectHover = false;
                 g_btnLaunchHover = false;
+                g_btnToolboxHover = false;
                 // Settings tab positions (calculated same as drawing code):
                 // rowY starts at contentY + 55
                 int ipRowY = rowY;
@@ -9238,7 +5808,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (oldConnect != g_btnConnectHover || oldApply != g_btnApplyHover ||
                 oldClose != g_btnCloseHover || oldMin != g_btnMinHover || oldUpdate != g_btnUpdateHover ||
                 oldLaunch != g_btnLaunchHover || oldExportLog != g_btnExportLogHover ||
-                oldTheme != g_btnThemeHover ||
+                oldTheme != g_btnThemeHover || g_btnToolboxHover != oldToolbox ||
                 oldTabHover[0] != g_tabHover[0] || oldTabHover[1] != g_tabHover[1] || oldTabHover[2] != g_tabHover[2] ||
                 g_btnAdminHover != oldAdmin || g_charProgressHover != oldCharProgressHover || g_hotkeyBoxHover != oldHotkeyBox) {
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -9394,6 +5964,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int btnY = platformBoxY + platformBoxH + menuExtraSpace + 10;  // Connect button
                 int launchBtnY = btnY + 48;  // Launch Netease button
                 int minimalBtnY = g_neteaseConnected ? (btnY + 48) : (launchBtnY + 44);  // Minimal button
+                int toolboxBtnY = minimalBtnY + 44;  // Toolbox button
                 
                 // Platform menu item click (if menu is open) - menu is BELOW the box
                 if (g_platformMenuOpen) {
@@ -9464,6 +6035,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_displayConfigChanged = true;  // 强制重新发送 OSC
                     g_cachedPreviewMsg.clear();  // 清除预览缓存
                     InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                
+                // Toolbox button
+                if (IsInRect(x, y, CARD_PADDING + 18, toolboxBtnY, leftColW - 36, 36)) {
+                    ShowInfoDialog(L"工具箱", L"功能开发中");
                     return 0;
                 }
                 
@@ -10341,9 +6918,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 g_lastTimerTick = now;
                 
-                // 定期发送 OSC 消息（性能模式和音乐模式都需要）
-                static DWORD lastOscTimerSend = 0;
-                if (!OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
+                // === 极简模式：滚动或点数动画 ===
+                if (g_minimalMode && !OSCManager::instance().isPaused()) {
+                    bool needsScroll = NeedsMinimalScroll(g_pendingTitle);
+                    bool shouldSendOSC = false;
+                    
+                    if (needsScroll) {
+                        // 歌名超限：滚动效果 (每500ms)
+                        if (now - g_minimalScrollLastUpdate >= MINIMAL_SCROLL_INTERVAL) {
+                            g_minimalScrollLastUpdate = now;
+                            g_minimalScrollOffset++;
+                            // 重置滚动偏移，循环滚动
+                            if (g_minimalScrollOffset >= (int)g_pendingTitle.length()) {
+                                g_minimalScrollOffset = 0;
+                            }
+                            shouldSendOSC = true;
+                        }
+                    } else {
+                        // 歌名未超限：点数动画 (每1500ms)
+                        if (now - g_minimalDotsLastUpdate >= MINIMAL_DOTS_INTERVAL) {
+                            g_minimalDotsLastUpdate = now;
+                            g_minimalDots = (g_minimalDots % 4) + 1;  // 1 -> 2 -> 3 -> 4 -> 1 循环
+                            shouldSendOSC = true;
+                        }
+                    }
+                    
+                    // 发送 OSC 消息
+                    if (shouldSendOSC && !g_pendingTitle.empty()) {
+                        moekoe::SongInfo info;
+                        info.hasData = true;
+                        info.title = g_pendingTitle;
+                        info.isPlaying = g_pendingIsPlaying;
+                        std::wstring oscMsg = FormatOSCMessage(info);
+                        
+                        // 使用 force 发送，跳过去重
+                        if (OSCManager::instance().sendMessageForce(oscMsg)) {
+                            g_lastOscMessage = oscMsg;
+                        }
+                    }
+                }
+                // === 普通模式：定期发送 OSC 消息 ===
+                else {
+                    static DWORD lastOscTimerSend = 0;
+                    if (!OSCManager::instance().isPaused() && (now - lastOscTimerSend >= OSC_MIN_INTERVAL)) {
                     std::wstring oscMsg;
                     if (g_performanceMode == 1) {
                         oscMsg = BuildPerformanceOSCMessage(0);
@@ -10362,6 +6979,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (OSCManager::instance().sendMessage(oscMsg)) {
                         g_lastOscMessage = oscMsg;
                         lastOscTimerSend = now;
+                    }
                     }
                 }
                 
@@ -11081,54 +7699,9 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                 }
             }
             
-            // 优先级4: nvidia-smi命令行（备用方案）
-            if (gpuUsage == 0 && g_gpuVendor == GPU_NVIDIA) {
-                STARTUPINFOW si = { sizeof(si)};
-                PROCESS_INFORMATION pi = {0};
-                SECURITY_ATTRIBUTES sa = { sizeof(sa)};
-                HANDLE hReadPipe, hWritePipe;
-                
-                si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-                si.wShowWindow = SW_HIDE;
-                CreatePipe(&hReadPipe, &hWritePipe, &sa, 0);
-                SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-                si.hStdOutput = hWritePipe;
-                si.hStdError = hWritePipe;
-                
-                wchar_t cmd[] = L"nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits";
-                
-                if (CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-                    CloseHandle(hWritePipe);
-                    
-                    char buffer[512];
-                    DWORD bytesRead;
-                    std::string output;
-                    
-                    while (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
-                        buffer[bytesRead] = '\0';
-                        output += buffer;
-                    }
-                    
-                    CloseHandle(hReadPipe);
-                    WaitForSingleObject(pi.hProcess, 2000);
-                    CloseHandle(pi.hProcess);
-                    CloseHandle(pi.hThread);
-                    
-                    // 解析输出：格式 "45, 2048, 8192"
-                    if (!output.empty()) {
-                        int memUsed = 0, memTotal = 0;
-                        if (sscanf_s(output.c_str(), "%d, %d, %d", &gpuUsage, &memUsed, &memTotal) >= 1) {
-                            if (memTotal > 0) {
-                                gpuVramUsed = (DWORD64)memUsed * 1024 * 1024;
-                                gpuVramTotal = (DWORD64)memTotal * 1024 * 1024;
-                            }
-                            char smiMsg[128];
-                            sprintf_s(smiMsg, "nvidia-smi: GPU=%d%%, VRAM=%d/%d MB", gpuUsage, memUsed, memTotal);
-                            LOG_DEBUG("PerfMonitor", "%s", smiMsg);
-                        }
-                    }
-                }
-            }
+            // 优先级4: nvidia-smi命令行 - 已禁用（可能导致阻塞，NVML已足够）
+            // 如果 NVML 和 DXGI 都不可用，GPU 使用率将显示 N/A
+            // nvidia-smi 调用在后台线程中仍可能阻塞，不值得冒险
             
             // 优先级5: LibreHardwareMonitor WMI（最后保底）
             if ((gpuUsage == 0 || gpuVramUsed == 0) && lhmInitialized && pLhmServices) {
@@ -11142,7 +7715,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                     if (SUCCEEDED(hr) && pEnum) {
                         IWbemClassObject* pObj = nullptr;
                         ULONG uReturn = 0;
-                        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                        if (pEnum->Next(5000, 1, &pObj, &uReturn) == S_OK) {
                             VARIANT vt;
                             VariantInit(&vt);
                             if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
@@ -11165,7 +7738,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                     if (SUCCEEDED(hr) && pEnum) {
                         IWbemClassObject* pObj = nullptr;
                         ULONG uReturn = 0;
-                        if (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                        if (pEnum->Next(5000, 1, &pObj, &uReturn) == S_OK) {
                             VARIANT vt;
                             VariantInit(&vt);
                             if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
@@ -11203,7 +7776,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                 if (SUCCEEDED(hr) && pEnum) {
                     IWbemClassObject* pObj = nullptr;
                     ULONG uReturn = 0;
-                    while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                    while (pEnum->Next(5000, 1, &pObj, &uReturn) == S_OK) {
                         VARIANT vt;
                         VariantInit(&vt);
                         if (SUCCEEDED(pObj->Get(L"CurrentTemperature", 0, &vt, 0, 0)) && vt.vt == VT_I4) {
@@ -11234,7 +7807,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                 if (SUCCEEDED(hr) && pEnum) {
                     IWbemClassObject* pObj = nullptr;
                     ULONG uReturn = 0;
-                    while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                    while (pEnum->Next(5000, 1, &pObj, &uReturn) == S_OK) {
                         VARIANT vt;
                         VariantInit(&vt);
                         if (SUCCEEDED(pObj->Get(L"Value", 0, &vt, 0, 0)) && vt.vt == VT_R4) {
@@ -11264,7 +7837,7 @@ DWORD WINAPI WorkerThread_PerfMonitor(LPVOID param) {
                 if (SUCCEEDED(hr) && pEnum) {
                     IWbemClassObject* pObj = nullptr;
                     ULONG uReturn = 0;
-                    while (pEnum->Next(WBEM_INFINITE, 1, &pObj, &uReturn) == S_OK) {
+                    while (pEnum->Next(5000, 1, &pObj, &uReturn) == S_OK) {
                         VARIANT vtName, vtValue;
                         VariantInit(&vtName);
                         VariantInit(&vtValue);
