@@ -3,8 +3,8 @@
 #define _WIN32_IE 0x0600
 
 // Version info
-#define APP_VERSION "0.4.0"
-#define APP_VERSION_NUM 400  // 0.4.0 -> 0*10000 + 4*100 + 0 = 400
+#define APP_VERSION "0.4.1"
+#define APP_VERSION_NUM 401  // 0.4.1 -> 0*10000 + 4*100 + 1 = 401
 #define GITHUB_REPO "pcwl049/VRChat-lyrics-display"
 #define GITHUB_API_URL "https://api.github.com/repos/pcwl049/VRChat-lyrics-display/releases/latest"
 
@@ -18,6 +18,8 @@
 #include <psapi.h>
 #include <dxgi1_4.h>
 #include <wbemidl.h>
+#include <mmsystem.h>  // timeSetEvent
+#pragma comment(lib, "winmm.lib")  // 多媒体定时器库
 #include <cstdio>
 #include <mutex>
 #include <atomic>
@@ -346,7 +348,13 @@ public:
         if (timeSinceLastSend < OSC_MIN_INTERVAL) {
             Sleep(OSC_MIN_INTERVAL - timeSinceLastSend);
         }
-        m_sender->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
+        // 根据极简模式发送不同的退出消息
+        extern bool g_minimalMode;
+        if (g_minimalMode) {
+            m_sender->sendChatbox(L"·");
+        } else {
+            m_sender->sendChatbox(L"VRCLyricsDisplay\n\x6B22\x8FCE\x4E0B\x6B21\x4F7F\x7528\x54E6~");
+        }
         m_lastSendTime = GetTickCount();
         LOG_INFO("OSCManager", "Goodbye message sent");
     }
@@ -908,6 +916,19 @@ int g_tabSlideDirection = 0;  // -1 = left, 1 = right
 Animation g_displayModeSlideAnim;  // 显示模式滑动动画
 int g_prevDisplayMode = 0;  // 显示模式滑动动画的前一个模式
 Animation g_systemInfoExpandAnim;  // 系统信息展开动画
+
+// OSC 消息展开动画
+Animation g_oscMsgExpandH;  // 水平展开 (0->1)
+Animation g_oscMsgExpandV;  // 垂直展开 (0->1)
+bool g_oscMsgExpanding = false;  // 是否正在展开
+std::wstring g_oscMsgExpandContent;  // 展开的消息内容
+
+// OSC 暂停提示展开动画
+Animation g_oscPauseExpandH;  // 水平展开 (0->1)
+Animation g_oscPauseExpandV;  // 垂直展开 (0->1)
+bool g_oscPauseExpanding = false;  // 是否正在展开
+bool g_oscPauseClosing = false;  // 是否正在关闭（收起动画）
+Animation g_oscPauseCloseAnim;  // 关闭动画进度
 
 // Global state
 CRITICAL_SECTION g_cs;
@@ -2192,10 +2213,13 @@ bool DownloadAndInstallUpdate() {
 }
 
 // Button animations
-Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim, g_btnAutoDetectAnim, g_btnShowOrderAnim;
+Animation g_btnConnectAnim, g_btnApplyAnim, g_btnCloseAnim, g_btnMinAnim, g_btnUpdateAnim, g_btnLaunchAnim, g_btnExportLogAnim, g_btnThemeAnim, g_btnAutoDetectAnim, g_btnShowOrderAnim, g_btnMinimalAnim;
 bool g_btnThemeHover = false;
 bool g_btnConnectHover = false, g_btnApplyHover = false;
-bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false, g_hotkeyBoxHover = false;
+bool g_btnCloseHover = false, g_btnMinHover = false, g_btnUpdateHover = false, g_btnLaunchHover = false, g_btnExportLogHover = false, g_btnAdminHover = false, g_hotkeyBoxHover = false, g_btnMinimalHover = false;
+
+// Minimal mode - 只显示歌名和时长
+bool g_minimalMode = false;
 
 // Checkbox hover states for settings tab
 bool g_checkboxHover[7] = {false, false, false, false, false, false, false};  // 暂停统计, 自动更新, 显示平台, 最小化到托盘, 启动最小化, 开机自启, 管理员启动
@@ -2491,6 +2515,11 @@ volatile bool g_overlayAnimRunning = false;  // 动画线程运行标志
 float g_overlayFallOffset = 0.0f;  // 下落动画偏移量
 bool g_overlayShrinking = false;   // 是否正在收缩阶段
 
+// 多媒体定时器（独立于消息队列，解决 WM_TIMER 优先级问题）
+MMRESULT g_mediaTimer = 0;
+volatile bool g_mediaTimerRunning = false;
+const int TIMER_INTERVAL_MS = 16;  // 约60fps
+
 // 粒子系统
 struct Particle {
     float x, y;           // 位置
@@ -2539,6 +2568,35 @@ std::wstring TruncateToBytes(const std::wstring& s, size_t maxBytes) {
         }
     }
     return s.substr(0, left) + L"..";
+}
+
+// 极简模式歌曲名截断：中文最多3个字，外语最多6个字符
+std::wstring TruncateMinimalTitle(const std::wstring& title) {
+    if (title.empty()) return L"";
+    
+    int chineseCount = 0;
+    int otherCount = 0;
+    std::wstring result;
+    
+    for (wchar_t c : title) {
+        // 判断是否为中文字符（CJK范围）
+        bool isChinese = (c >= 0x4E00 && c <= 0x9FFF) || 
+                         (c >= 0x3400 && c <= 0x4DBF) ||
+                         (c >= 0x20000 && c <= 0x2A6DF) ||
+                         (c >= 0x2A700 && c <= 0x2B73F);
+        
+        if (isChinese) {
+            if (chineseCount >= 3) continue;  // 中文已满3个
+            chineseCount++;
+        } else if (c != L' ' && c != L'\t') {
+            if (otherCount >= 6) continue;  // 非中文已满6个
+            otherCount++;
+        }
+        
+        result += c;
+    }
+    
+    return result;
 }
 
 // 智能截断歌名（处理括号）
@@ -2700,7 +2758,29 @@ int GetTextWidth(HDC hdc, const wchar_t* text, HFONT font, int length) {
 }
 
 std::wstring BuildPerformanceOSCMessage(int type) {
-    // 一次性显示所有硬件信息（新格式）- 使用 g_displayModules 顺序
+    // 极简模式：单行显示 C R G 占用率（按 display_modules 顺序）
+    if (g_minimalMode) {
+        std::wstring msg;
+        int gpuVal = g_latestPerfData.gpuUsageValid ? g_latestPerfData.gpuUsage : 0;
+        
+        // 按 g_displayModules 顺序显示
+        for (const auto& mod : g_displayModules) {
+            if (!mod.enabled) continue;
+            
+            if (mod.key == L"cpu") {
+                msg += L"C " + std::to_wstring((int)g_cpuUsage) + L"% ";
+            } else if (mod.key == L"ram") {
+                msg += L"R " + std::to_wstring((int)g_ramUsage) + L"% ";
+            } else if (mod.key == L"gpu") {
+                msg += L"G " + std::to_wstring(gpuVal) + L"% ";
+            }
+        }
+        // 移除末尾空格
+        if (!msg.empty() && msg.back() == L' ') msg.pop_back();
+        return msg;
+    }
+    
+    // 正常模式：一次性显示所有硬件信息（新格式）- 使用 g_displayModules 顺序
     std::wstring msg;
     
     // 确保 g_displayModules 不为空
@@ -3213,6 +3293,7 @@ void LoadConfig(const wchar_t* path) {
     g_autoUpdate = getBool("auto_update", true);
     g_showPlatform = getBool("show_platform", true);
     g_performanceMode = getInt("performance_mode", 0);
+    g_minimalMode = getBool("minimal_mode", false);  // 极简模式
     // g_darkMode固定为true，不再从配置加载
 
     // Apply theme
@@ -3456,11 +3537,12 @@ void SaveConfig(const wchar_t* path) {
     FILE* f = _wfopen(path, L"wb");
     if (!f) return;
     fprintf(f, "{\n  \"osc\": {\n    \"ip\": \"%s\",\n    \"port\": %d\n  },\n", JsonEscape(g_oscIp).c_str(), g_oscPort);
-    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n  \"run_as_admin\": %s,\n  \"performance_mode\": %d,\n",
+    fprintf(f, "  \"moekoe_port\": %d,\n  \"osc_enabled\": %s,\n  \"minimize_to_tray\": %s,\n  \"start_minimized\": %s,\n  \"show_perf_on_pause\": %s,\n  \"auto_update\": %s,\n  \"show_platform\": %s,\n  \"dark_mode\": %s,\n  \"auto_start\": %s,\n  \"run_as_admin\": %s,\n  \"performance_mode\": %d,\n  \"minimal_mode\": %s,\n",
             g_moekoePort, g_oscEnabled ? "true" : "false", g_minimizeToTray ? "true" : "false",
             g_startMinimized ? "true" : "false", g_showPerfOnPause ? "true" : "false",
             g_autoUpdate ? "true" : "false", g_showPlatform ? "true" : "false",
-            "true", g_autoStart ? "true" : "false", g_runAsAdmin ? "true" : "false", g_performanceMode);  // g_darkMode固定为true
+            "true", g_autoStart ? "true" : "false", g_runAsAdmin ? "true" : "false", g_performanceMode,
+            g_minimalMode ? "true" : "false");  // g_darkMode固定为true
     fprintf(f, "  \"cpu_name\": \"%s\",\n  \"gpu_name\": \"%s\",\n  \"ram_name\": \"%s\",\n",
             JsonEscape(g_cpuDisplayName).c_str(), JsonEscape(g_gpuDisplayName).c_str(), JsonEscape(g_ramDisplayName).c_str());
     
@@ -3860,6 +3942,12 @@ std::wstring FormatOSCMessage(const moekoe::SongInfo& info) {
         } else {
             return L"\x7B49\x5F85\x97F3\x4E50\x64AD\x653E...";  // 等待音乐播放...
         }
+    }
+    
+    // === 极简模式：只显示歌名 ===
+    if (g_minimalMode) {
+        std::wstring shortTitle = TruncateMinimalTitle(info.title);
+        return L"\x6B63\x5728\x542C:" + shortTitle;  // 正在听:歌名
     }
     
     const size_t MAX_MSG_LEN = 144;
@@ -4445,10 +4533,10 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_dialogAnimComplete = false;
             g_dialogFadeAnim.value = 0.0;
             g_dialogFadeAnim.target = 1.0;
-            g_dialogFadeAnim.speed = 0.15;
+            g_dialogFadeAnim.speed = 0.1;
             g_dialogScaleAnim.value = 0.92;
             g_dialogScaleAnim.target = 1.0;
-            g_dialogScaleAnim.speed = 0.2;
+            g_dialogScaleAnim.speed = 0.15;
             
             // 初始透明度设为一个小值，确保窗口可见性
             // 0会导致某些情况下窗口无法正确绘制
@@ -4833,10 +4921,10 @@ int ShowCustomDialog(const DialogConfig& config) {
     // 初始化弹窗动画
     g_dialogFadeAnim.value = 0.0;
     g_dialogFadeAnim.target = 1.0;
-    g_dialogFadeAnim.speed = 0.2;
+    g_dialogFadeAnim.speed = 0.12;
     g_dialogScaleAnim.value = 0.85;
     g_dialogScaleAnim.target = 1.0;
-    g_dialogScaleAnim.speed = 0.25;
+    g_dialogScaleAnim.speed = 0.18;
     g_dialogAnimComplete = false;
     
     SetLayeredWindowAttributes(g_dialogHwnd, 0, 1, LWA_ALPHA);  // 初始透明度为1，避免黑屏
@@ -5325,8 +5413,26 @@ void DrawProgressBar(HDC hdc, int x, int y, int w, int h, double progress) {
 }
 
 void OnPaint(HWND hwnd) {
+    // 诊断日志：确认 WM_PAINT 被调用
+    static int paintCount = 0;
+    paintCount++;
+    if (paintCount % 60 == 0) {
+        LOG_INFO("OnPaint", "Paint #%d, g_oscPaused=%d, g_overlayActive=%d", 
+                 paintCount, g_oscPaused, g_overlayActive);
+    }
+    
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
+    
+    // 诊断：检查无效区域
+    static int lastLoggedPaint = 0;
+    paintCount++;
+    if (paintCount - lastLoggedPaint >= 60) {
+        lastLoggedPaint = paintCount;
+        LOG_INFO("OnPaint", "ps.rcPaint=(%d,%d,%d,%d), hdc=%p, ps.fErase=%d", 
+                 ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right, ps.rcPaint.bottom,
+                 hdc, ps.fErase);
+    }
     
     RECT rc; GetClientRect(hwnd, &rc);
     int w = rc.right - rc.left;
@@ -5655,16 +5761,22 @@ void OnPaint(HWND hwnd) {
         }
         
         // === Connect Button ===
-        rowY += 80 + menuExtraSpace;  // Push down if menu is open (increased spacing)
-        DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 40, 
+        // 按钮在平台框底部之后 (platformBoxY + platformBoxH + menuExtraSpace + 间距)
+        int btnY = platformBoxY + platformBoxH + menuExtraSpace + 10;
+        DrawButtonAnim(memDC, CARD_PADDING + 18, btnY, leftColW - 36, 40, 
             g_isConnected ? L"\x91CD\x65B0\x8FDE\x63A5" : L"\x8FDE\x63A5", g_btnConnectAnim, g_isConnected);
         
         // === Launch Netease Button (only when Netease not connected) ===
+        int launchBtnY = btnY + 48;
         if (!g_neteaseConnected) {
-            rowY += 48;
-            DrawButtonAnim(memDC, CARD_PADDING + 18, rowY, leftColW - 36, 36,
+            DrawButtonAnim(memDC, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36,
                 L"\x542F\x52A8\x7F51\x6613\x4E91\x97F3\x4E50", g_btnLaunchAnim, false);
         }
+        
+        // === Minimal Mode Toggle Button ===
+        int minimalBtnY = g_neteaseConnected ? (btnY + 48) : (launchBtnY + 44);
+        DrawButtonAnim(memDC, CARD_PADDING + 18, minimalBtnY, leftColW - 36, 36,
+            g_minimalMode ? L"\x6B63\x5E38\x6A21\x5F0F" : L"\x6781\x7B80\x6A21\x5F0F", g_btnMinimalAnim, g_minimalMode);
         
         // === Platform Selection Dropdown Menu (draw LAST so it's on top) ===
         if (isMenuVisible) {
@@ -6448,6 +6560,102 @@ void OnPaint(HWND hwnd) {
     int msgY = contentY + 55;
     int msgX = rightColX + 18;
     int lineHeight = 28;
+    
+    // === 暂停状态显示（带展开/收起动画）===
+    int pauseBoxH = 45;  // 高度
+    bool showPauseBox = false;
+    double pauseAnimProgress = 0.0;  // 用于计算 msgY 的偏移
+    
+    // 检查是否应该显示暂停提示（展开中或完全展开或收起中）
+    if ((g_oscPaused && g_oscPauseEndTime > 0 && (int)((g_oscPauseEndTime - GetTickCount()) / 1000) > 0) || g_oscPauseClosing) {
+        showPauseBox = true;
+        if (g_oscPauseClosing) {
+            // 收起动画：从 1 -> 0
+            pauseAnimProgress = 1.0 - g_oscPauseCloseAnim.value;
+        } else {
+            // 展开动画
+            pauseAnimProgress = g_oscPauseExpanding ? g_oscPauseExpandV.value : 1.0;
+        }
+    }
+    
+    if (showPauseBox && pauseAnimProgress > 0.01) {
+        DWORD now = GetTickCount();
+        int remainingSecs = g_oscPaused ? (int)((g_oscPauseEndTime - now) / 1000) : 0;
+        
+        // 计算暂停提示框的尺寸
+        int pauseBoxW = rightColW - 36;  // 宽度
+        int pauseBoxX = msgX - 5;
+        int pauseBoxY = msgY - 5;
+        int pauseCenterX = pauseBoxX + pauseBoxW / 2;
+        int pauseCenterY = pauseBoxY + pauseBoxH / 2;
+        
+        // 展开动画进度
+        double hProgress = g_oscPauseClosing ? (1.0 - g_oscPauseCloseAnim.value) : (g_oscPauseExpanding ? g_oscPauseExpandH.value : 1.0);
+        double vProgress = pauseAnimProgress;
+        
+        // 从中心向两边展开的宽度
+        int drawW = (int)(pauseBoxW * hProgress);
+        // 从线条向下展开的高度
+        int drawH = (int)(pauseBoxH * vProgress + 4 * (1.0 - vProgress));  // 最小4像素（线条）
+        
+        // 计算绘制区域（从中心扩展）
+        int drawX = pauseCenterX - drawW / 2;
+        int drawY = pauseCenterY - drawH / 2;
+        
+        // 绘制暂停状态背景（带圆角）
+        {
+            Graphics graphics(memDC);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            
+            // 背景色（深红色调）
+            int bgAlpha = (int)(255 * vProgress);
+            Color bgColor(bgAlpha, 50, 25, 30);
+            SolidBrush bgBrush(bgColor);
+            
+            // 绘制圆角矩形
+            int cornerRadius = 8;
+            GraphicsPath path;
+            int d = cornerRadius * 2;
+            
+            if (drawW > d && drawH > d) {
+                path.AddArc(drawX, drawY, d, d, 180, 90);
+                path.AddLine(drawX + cornerRadius, drawY, drawX + drawW - cornerRadius, drawY);
+                path.AddArc(drawX + drawW - d, drawY, d, d, 270, 90);
+                path.AddLine(drawX + drawW, drawY + cornerRadius, drawX + drawW, drawY + drawH - cornerRadius);
+                path.AddArc(drawX + drawW - d, drawY + drawH - d, d, d, 0, 90);
+                path.AddLine(drawX + drawW - cornerRadius, drawY + drawH, drawX + cornerRadius, drawY + drawH);
+                path.AddArc(drawX, drawY + drawH - d, d, d, 90, 90);
+                path.CloseFigure();
+                graphics.FillPath(&bgBrush, &path);
+            }
+        }
+        
+        // 只有当垂直展开进度足够大时才绘制文本
+        if (vProgress > 0.5 && remainingSecs > 0) {
+            // 文字淡入效果
+            int textAlpha = (int)((vProgress - 0.5) * 2 * 255);
+            
+            // 绘制暂停文本（使用 Alpha 混合）
+            wchar_t pauseText[64];
+            swprintf_s(pauseText, L"\u23F8 OSC \u6682\u505C\u4E2D... %d\u79D2", remainingSecs);
+            
+            // 计算文本颜色（带淡入）
+            COLORREF textColor = RGB(
+                (255 * textAlpha + GetRValue(COLOR_WARNING) * (255 - textAlpha)) / 255,
+                (180 * textAlpha + GetGValue(COLOR_WARNING) * (255 - textAlpha)) / 255,
+                (80 * textAlpha + GetBValue(COLOR_WARNING) * (255 - textAlpha)) / 255
+            );
+            
+            // 文本位置（相对于展开区域居中）
+            int textX = drawX + 10;
+            int textY = drawY + (drawH - 28) / 2;  // 垂直居中
+            DrawTextLeft(memDC, pauseText, textX, textY, textColor, g_fontNormal);
+        }
+        
+        // msgY 根据动画进度平滑下移
+        msgY += (int)((pauseBoxH + 10) * pauseAnimProgress);
+    }
+    
     int maxLines = (previewH - 100) / lineHeight;  // Leave more space at bottom
     // 修正宽度计算：面板宽度减去左右边距（18+18=36），再留一些安全边距
     int maxTextWidth = rightColW - 50;  // 更保守的宽度计算
@@ -6675,7 +6883,22 @@ void OnPaint(HWND hwnd) {
     // === Author display at window bottom right ===
     DrawTextRight(memDC, L"by \x6C90\x98CE", w - CARD_PADDING - 18, h - 25, COLOR_TEXT_DIM, g_fontSmall);
     
-    BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+    // 执行 BitBlt 并验证结果
+    BOOL bitBltResult = BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+    
+    // 强制刷新 GDI 缓冲区
+    GdiFlush();
+    
+    // 诊断日志：确认 BitBlt 执行
+    static int lastLoggedBlt = 0;
+    static int bltCount = 0;
+    bltCount++;
+    if (bltCount - lastLoggedBlt >= 60 || g_oscPaused) {
+        lastLoggedBlt = bltCount;
+        LOG_INFO("OnPaint", "BitBlt result=%d, w=%d, h=%d, g_oscPaused=%d", 
+                 bitBltResult, w, h, g_oscPaused);
+    }
+    
     SelectObject(memDC, oldBmp);
     DeleteObject(memBmp);
     DeleteDC(memDC);
@@ -6862,6 +7085,16 @@ bool IsAnimationActive() {
     // 主题切换过渡
     if (g_themeTransition.isActive()) return true;
     
+    // OSC 暂停状态 - 需要持续更新倒计时显示
+    if (g_oscPaused) return true;
+    
+    // Overlay 窗口激活状态 - 需要持续更新
+    if (g_overlayHwnd && g_overlayActive) return true;
+    
+    // OSC 暂停提示展开/关闭动画
+    if (g_oscPauseExpanding) return true;
+    if (g_oscPauseClosing) return true;
+    
     return false;
 }
 
@@ -6877,6 +7110,7 @@ void UpdateAnimations() {
     g_btnThemeAnim.setTarget(g_btnThemeHover ? 1.0 : 0.0);
     g_btnAutoDetectAnim.setTarget(g_autoDetectHover ? 1.0 : 0.0);
     g_btnShowOrderAnim.setTarget(g_showOrderHover ? 1.0 : 0.0);
+    g_btnMinimalAnim.setTarget(g_btnMinimalHover ? 1.0 : 0.0);
     g_btnConnectAnim.update();
     g_btnApplyAnim.update();
     g_btnCloseAnim.update();
@@ -6887,6 +7121,7 @@ void UpdateAnimations() {
     g_btnThemeAnim.update();
     g_btnAutoDetectAnim.update();
     g_btnShowOrderAnim.update();
+    g_btnMinimalAnim.update();
     
     // 窗口启动动画（缩放）- 简化版本，不再使用淡入
     if (!g_startupAnimComplete) {
@@ -6969,6 +7204,32 @@ void UpdateAnimations() {
     
     // 主题切换过渡动画
     g_themeTransition.update();
+    
+    // OSC 暂停提示展开动画
+    if (g_oscPauseExpanding) {
+        g_oscPauseExpandH.update();
+        g_oscPauseExpandV.update();
+        
+        // 水平展开完成后，开始垂直展开
+        if (!g_oscPauseExpandH.isActive() && g_oscPauseExpandH.value >= 0.99) {
+            g_oscPauseExpandV.target = 1.0;
+        }
+        
+        // 垂直展开完成后，结束动画
+        if (!g_oscPauseExpandV.isActive() && g_oscPauseExpandV.value >= 0.99) {
+            g_oscPauseExpanding = false;
+        }
+    }
+    
+    // OSC 暂停提示关闭动画
+    if (g_oscPauseClosing) {
+        g_oscPauseCloseAnim.update();
+        
+        // 关闭动画完成后，重置状态
+        if (!g_oscPauseCloseAnim.isActive() && g_oscPauseCloseAnim.value >= 0.99) {
+            g_oscPauseClosing = false;
+        }
+    }
 }
 
 // 前向声明
@@ -7000,66 +7261,18 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
                 
                 // Check if modifiers match
                 if (mods == g_oscPauseHotkeyMods) {
-                    // Toggle pause state using OSCManager
-                    bool isReallyPaused = OSCManager::instance().isPaused();
+                    // 在低级钩子中只设置状态和发送 PostMessage，避免阻塞消息循环
+                    // 所有可能阻塞的操作都通过 PostMessage 异步执行
                     
-                    if (isReallyPaused) {
-                        // 真正在暂停中 - 取消暂停，触发粒子爆发
-                        LOG_INFO("Hotkey", "Canceling OSC pause (low-level hook)");
-                        
-                        // 发送恢复消息提示
-                        OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
-                        
-                        // 保存当前进度值（用于关闭动画期间的粒子效果）
-                        DWORD now = GetTickCount();
-                        if (g_oscPauseEndTime > now) {
-                            g_closeProgress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
-                        } else {
-                            g_closeProgress = 0.0f;
-                        }
-                        
-                        // 触发粒子爆炸（在进度条末端）
-                        TriggerParticleBurstAtProgressEnd();
-                        
-                        OSCManager::instance().resume();
-                        g_oscPaused = false;
-                        g_oscPauseEndTime = 0;
-                        
-                        // 延迟关闭动画（等待粒子效果播放）
-                        // 粒子效果约 2-3 秒，延迟 1.5 秒后开始关闭
-                        if (g_overlayHwnd && !g_overlayClosing) {
-                            g_overlayCloseDelayTime = GetTickCount() + 1500;  // 1.5秒后开始关闭
-                        }
+                    if (OSCManager::instance().isPaused()) {
+                        // 取消暂停 - 使用 PostMessage 异步处理
+                        PostMessage(g_hwnd, WM_USER + 202, 0, 0);
                     } else if (g_overlayHwnd && (g_overlayClosing || g_overlayCloseDelayTime > 0)) {
-                        // 正在关闭动画中或等待关闭，加速关闭
-                        LOG_INFO("Hotkey", "Accelerating overlay close");
-                        DestroyWindow(g_overlayHwnd);
-                        g_overlayHwnd = nullptr;
-                        g_overlayActive = false;
-                        g_overlayClosing = false;
-                        g_overlayCloseDelayTime = 0;
-                        g_overlayExpandAnim = 0.0f;
-                        g_particles.clear();
-                        g_sandParticles.clear();
+                        // 加速关闭 - 使用 PostMessage 异步处理
+                        PostMessage(g_hwnd, WM_USER + 203, 0, 0);
                     } else {
-                        // Start pause
-                        OSCManager::instance().pause(OSC_PAUSE_DURATION);
-                        g_oscPaused = true;
-                        g_oscPauseEndTime = GetTickCount() + OSC_PAUSE_DURATION * 1000;
-                        g_overlayClosing = false;
-                        LOG_INFO("Hotkey", "OSC paused for 30 seconds (low-level hook)");
-                        
-                        // 发送暂停消息提示
-                        OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
-                        
-                        // 使用 PostMessage 异步创建 overlay 窗口
-                        // 在低级钩子中直接调用 CreateWindowExW 可能会阻塞消息循环
+                        // 开始暂停 - 使用 PostMessage 异步处理
                         PostMessage(g_hwnd, WM_USER + 201, 0, 0);
-                    }
-                    
-                    // Redraw main window
-                    if (g_hwnd) {
-                        InvalidateRect(g_hwnd, nullptr, FALSE);
                     }
                     return 1; // Consume the key
                 }
@@ -7075,8 +7288,8 @@ void UpdateParticles() {
     for (auto it = g_particles.begin(); it != g_particles.end();) {
         it->x += it->vx;
         it->y += it->vy;
-        it->vy += 0.25f; // 重力（减小让粒子飘得更久）
-        it->life -= 0.012f;  // 减慢衰减速度，让粒子持续更久
+        it->vy += 0.15f; // 重力（减小让粒子飘得更久）
+        it->life -= 0.008f;  // 减慢衰减速度，让粒子持续更久
         
         if (it->life <= 0) {
             it = g_particles.erase(it);
@@ -7088,7 +7301,7 @@ void UpdateParticles() {
     // 更新沙漏粒子
     for (auto it = g_sandParticles.begin(); it != g_sandParticles.end();) {
         it->y += it->vy;
-        it->vy += 0.12f; // 重力（减小）
+        it->vy += 0.08f; // 重力（减小）
         
         if (it->y > 80) { // 超出进度条范围
             it = g_sandParticles.erase(it);
@@ -7108,11 +7321,11 @@ void TriggerParticleBurst(int centerX, int centerY) {
         p.x = (float)centerX;
         p.y = (float)centerY;
         
-        // 放射状速度 - 大幅扩大范围
+        // 放射状速度 - 减慢速度
         float angle = (rand() % 360) * 3.14159f / 180.0f;
-        float speed = 5.0f + (rand() % 350) / 10.0f;  // 5 to 40 (更快更远)
+        float speed = 2.0f + (rand() % 200) / 10.0f;  // 2 to 22 (减慢)
         p.vx = cosf(angle) * speed;
-        p.vy = sinf(angle) * speed - 6.0f;  // 向上偏移更多
+        p.vy = sinf(angle) * speed - 3.0f;  // 向上偏移更多
         p.life = 2.5f + (rand() % 100) / 100.0f;  // 2.5 to 3.5
         p.maxLife = p.life;
         p.size = rand() % 10 + 4;  // 4 to 13 (更大)
@@ -7129,13 +7342,13 @@ void TriggerParticleBurst(int centerX, int centerY) {
         g_particles.push_back(p);
     }
     
-    // 小粒子火花 - 扩大显示范围
+    // 小粒子火花 - 减慢速度
     for (int i = 0; i < 60; i++) {  // 增加数量
         Particle p;
         p.x = (float)centerX + (rand() % 80 - 40);  // 扩大生成范围 ±40
         p.y = (float)centerY + (rand() % 80 - 40);
-        p.vx = ((rand() % 500) - 250) / 10.0f;  // -25 to 25 (更快)
-        p.vy = ((rand() % 400) - 300) / 10.0f;  // -30 to 10 (向上更快)
+        p.vx = ((rand() % 300) - 150) / 10.0f;  // -15 to 15 (减慢)
+        p.vy = ((rand() % 250) - 200) / 10.0f;  // -20 to 5 (减慢)
         p.life = 1.2f + (rand() % 80) / 100.0f;  // 1.2 to 2.0
         p.maxLife = p.life;
         p.size = rand() % 4 + 2;  // 2 to 5 (稍大)
@@ -7396,10 +7609,47 @@ void DrawOverlayNow(HWND hwnd) {
     ReleaseDC(hwnd, hdc);
 }
 
+// 多媒体定时器回调函数 - 独立于消息队列，解决 WM_TIMER 优先级问题
+void CALLBACK MediaTimerCallback(UINT uTimerID, UINT uMsg, DWORD_PTR dwUser, DWORD_PTR dw1, DWORD_PTR dw2) {
+    // 通过 PostMessage 发送定时器消息到主窗口，确保在消息队列中处理
+    if (g_hwnd && IsWindow(g_hwnd)) {
+        PostMessage(g_hwnd, WM_TIMER, 1, 0);
+    }
+}
+
+// 启动多媒体定时器
+void StartMediaTimer() {
+    if (g_mediaTimer != 0) {
+        return;  // 已经在运行
+    }
+    g_mediaTimerRunning = true;
+    g_mediaTimer = timeSetEvent(TIMER_INTERVAL_MS, 0, MediaTimerCallback, 0, TIME_PERIODIC);
+    LOG_INFO("MediaTimer", "Started, timerID=%u", g_mediaTimer);
+}
+
+// 停止多媒体定时器
+void StopMediaTimer() {
+    if (g_mediaTimer != 0) {
+        timeKillEvent(g_mediaTimer);
+        g_mediaTimer = 0;
+        g_mediaTimerRunning = false;
+        LOG_INFO("MediaTimer", "Stopped");
+    }
+}
+
 // 动画线程：独立驱动 overlay 绘制，绕过 Windows 消息队列
 DWORD WINAPI OverlayAnimThread(LPVOID param) {
+    LOG_INFO("OverlayThread", "Animation thread started");
+    static DWORD lastLogTime = 0;
+    
     while (g_overlayAnimRunning) {
         DWORD now = GetTickCount();
+        
+        // 每秒输出一次日志
+        if (now - lastLogTime >= 1000) {
+            lastLogTime = now;
+            LOG_INFO("OverlayThread", "Running, g_oscPaused=%d, g_overlayActive=%d", g_oscPaused, g_overlayActive);
+        }
         
         // 检查暂停是否自然结束（只在非关闭状态下检查）
         if (!g_overlayClosing && g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
@@ -7476,11 +7726,14 @@ DWORD WINAPI OverlayAnimThread(LPVOID param) {
 // 启动动画线程
 void StartOverlayAnimThread() {
     if (g_overlayAnimThread && g_overlayAnimRunning) {
+        LOG_INFO("OverlayThread", "Animation thread already running, skipping");
         return;  // 已经在运行
     }
     
+    LOG_INFO("OverlayThread", "Starting new animation thread");
     g_overlayAnimRunning = true;
     g_overlayAnimThread = CreateThread(nullptr, 0, OverlayAnimThread, nullptr, 0, nullptr);
+    LOG_INFO("OverlayThread", "Animation thread created, handle=%p", g_overlayAnimThread);
 }
 
 // 停止动画线程
@@ -7644,19 +7897,70 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         
         case WM_TIMER: {
-            static DWORD lastOverlayTimerLog = 0;
-            DWORD otNow = GetTickCount();
-            if (otNow - lastOverlayTimerLog >= 1000) {
-                lastOverlayTimerLog = otNow;
-                LOG_INFO("OverlayTimer", "WM_TIMER, wParam=%llu", wParam);
-            }
             if (wParam == 2) {
-                // 只负责触发重绘，所有动画逻辑由主窗口 WM_TIMER 处理
-                // 这样避免两个定时器竞争，确保状态一致
+                static DWORD lastLogTime = 0;
+                DWORD now = GetTickCount();
+                if (now - lastLogTime >= 1000) {
+                    lastLogTime = now;
+                    LOG_INFO("Overlay", "WM_TIMER tick, g_oscPaused=%d, g_overlayActive=%d", g_oscPaused, g_overlayActive);
+                }
+                
+                // 1. 更新展开动画
+                if (!g_overlayClosing && g_overlayExpandAnim < 1.0f) {
+                    g_overlayExpandAnim += 0.08f;
+                    if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
+                }
+                
+                // 2. 更新粒子
+                UpdateParticles();
+                
+                // 3. 检查延迟关闭时间
+                if (!g_overlayClosing && g_overlayCloseDelayTime > 0 && now >= g_overlayCloseDelayTime) {
+                    g_overlayCloseDelayTime = 0;
+                    g_overlayClosing = true;
+                    g_overlayShrinking = true;
+                }
+                
+                // 4. 关闭动画
+                if (g_overlayClosing) {
+                    if (g_overlayShrinking) {
+                        g_overlayExpandAnim -= 0.08f;
+                        if (g_overlayExpandAnim <= 0.0f) {
+                            g_overlayExpandAnim = 0.0f;
+                            g_overlayShrinking = false;
+                            g_overlayFallOffset = 0.0f;
+                        }
+                    } else {
+                        g_overlayFallOffset += 5.0f;
+                        if (g_overlayFallOffset > 250.0f) {
+                            // 关闭窗口
+                            KillTimer(hwnd, 2);
+                            DestroyWindow(hwnd);
+                            return 0;
+                        }
+                    }
+                }
+                
+                // 5. 检查暂停是否自然结束
+                if (!g_overlayClosing && g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
+                    LOG_INFO("Overlay", "Pause naturally ended, closing overlay. now=%u, endTime=%u", now, g_oscPauseEndTime);
+                    OSCManager::instance().resume();
+                    g_oscPaused = false;
+                    g_oscPauseEndTime = 0;
+                    g_overlayClosing = true;
+                    g_overlayShrinking = true;
+                }
+                
+                // 触发重绘
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
+        
+        case WM_CLOSE:
+            KillTimer(hwnd, 2);
+            DestroyWindow(hwnd);
+            return 0;
         
         case WM_DESTROY:
             LOG_INFO("Overlay", "WM_DESTROY start");
@@ -7733,47 +8037,35 @@ void CreateOverlayWindow() {
     SetLayeredWindowAttributes(g_overlayHwnd, RGB(1, 1, 1), 0, LWA_COLORKEY);
     LOG_INFO("Overlay", "CreateOverlayWindow: SetLayeredWindowAttributes returned");
     
-    // 不设置独立定时器，由主窗口定时器驱动重绘
-    // SetTimer(g_overlayHwnd, 2, 16, nullptr);
+    // 注意：WS_EX_NOACTIVATE 窗口不会收到 WM_TIMER 消息
+    // 使用动画线程来驱动绘制，而不是定时器
     
     // 初始化展开动画：从中间向两边展开
     g_overlayExpandAnim = 0.0f;
     g_overlayClosing = false;
     g_overlayCloseDelayTime = 0;
+    g_overlayShrinking = false;
+    g_overlayFallOffset = 0.0f;
     
-    // 不调用 ShowWindow（窗口已在创建时可见 WS_VISIBLE）
-    // 不调用 UpdateWindow（它会阻塞消息循环）
-    // 窗口会由定时器触发的 InvalidateRect 来重绘
     g_overlayActive = true;
     
-    // 确保 main window timer 仍然运行
-    LOG_INFO("Overlay", "Created overlay window, re-ensuring main timer");
-    SetTimer(g_hwnd, 1, 16, nullptr);
-    
-    // 启动动画线程
+    // 启动动画线程驱动 overlay 绘制
+    LOG_INFO("Overlay", "Starting animation thread");
     StartOverlayAnimThread();
+    
+    // 确保 main window timer 仍然运行
+    LOG_INFO("Overlay", "Re-ensuring main timer, g_hwnd=%p, calling SetTimer", g_hwnd);
+    SetTimer(g_hwnd, 1, 16, nullptr);
+    LOG_INFO("Overlay", "SetTimer returned, main timer should be running");
     
     LOG_INFO("Overlay", "Created overlay window at bottom center of screen");
 }
 
-// 销毁覆盖层窗口
+// 销毁覆盖层窗口（通过 PostMessage 异步调用）
 void DestroyOverlayWindow() {
-    // 先停止动画线程
-    StopOverlayAnimThread();
-    
     if (g_overlayHwnd) {
-        // 定时器会在WM_DESTROY中清理
-        DestroyWindow(g_overlayHwnd);
-        g_overlayHwnd = nullptr;
-        g_overlayActive = false;
-        g_overlayClosing = false;
-        g_overlayCloseDelayTime = 0;
-        g_overlayShrinking = false;
-        g_overlayFallOffset = 0.0f;
-        g_particles.clear();
-        g_sandParticles.clear();
-        g_particleBurst = false;
-        LOG_INFO("Overlay", "Destroyed overlay window via DestroyOverlayWindow()");
+        // 通过 PostMessage 异步销毁，避免阻塞
+        PostMessage(g_overlayHwnd, WM_CLOSE, 0, 0);
     }
 }
 
@@ -8707,12 +8999,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_overlayCloseDelayTime = 0;
                     LOG_INFO("OSC", "Paused for 30 seconds");
                     
-                    // 发送暂停消息提示
-                    OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                    // 发送暂停消息提示（根据极简模式）
+                    if (g_minimalMode) {
+                        OSCManager::instance().sendSystemMessage(L"已暂停");
+                    } else {
+                        OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                    }
                     
                     // 创建覆盖层窗口
                     CreateOverlayWindow();
                 }
+                g_needsRedraw = true;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -8800,8 +9097,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 double menuExpandFactor = g_menuExpandAnim.value;
                 bool isMenuVisible = g_platformMenuOpen || (g_menuExpandAnim.isActive() && menuExpandFactor > 0.01);
                 int menuExtraSpace = isMenuVisible ? (int)((g_platformCount * menuItemH + 12) * menuExpandFactor) : 0;
-                int btnY = platformRowY + 80 + menuExtraSpace;  // Match drawing position
-                int launchBtnY = btnY + 48;
+                // 按钮在平台框底部之后
+                int btnY = platformBoxY + platformBoxH + menuExtraSpace + 10;  // Connect button
+                int launchBtnY = btnY + 48;  // Launch Netease button
+                int minimalBtnY = g_neteaseConnected ? (btnY + 48) : (launchBtnY + 44);  // Minimal button
                 
                 // Platform box hover
                 bool oldPlatformBoxHover = g_platformBoxHover;
@@ -8823,10 +9122,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     
                     // When menu is open, don't detect button hovers
+                    g_btnMinimalHover = false;
                     g_btnConnectHover = false;
                     g_btnLaunchHover = false;
                 } else {
                     // Only detect button hovers when menu is closed
+                    g_btnMinimalHover = IsInRect(x, y, CARD_PADDING + 18, minimalBtnY, leftColW - 36, 36);
                     g_btnConnectHover = IsInRect(x, y, CARD_PADDING + 18, btnY, leftColW - 36, 40);
                     g_btnLaunchHover = !g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36);
                 }
@@ -8873,6 +9174,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_menuExpandAnim.target = 0.0;
                 g_platformBoxHover = false;
                 g_platformMenuHover = -1;
+                g_btnMinimalHover = false;
                 g_btnConnectHover = false;
                 g_btnLaunchHover = false;
                 // Settings tab positions (calculated same as drawing code):
@@ -8961,12 +9263,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 触发主题切换过渡动画
                 g_themeTransition.value = 0.0;
                 g_themeTransition.target = 1.0;
-                g_themeTransition.speed = 0.06;
+                g_themeTransition.speed = 0.04;
                 
                 // 添加轻微的缩放效果
                 g_windowScaleAnim.value = 0.98;
                 g_windowScaleAnim.target = 1.0;
-                g_windowScaleAnim.speed = 0.12;
+                g_windowScaleAnim.speed = 0.08;
                 
                 // 深浅色切换功能已移除，固定使用深色模式
 // g_darkMode = !g_darkMode;  // 已禁用
@@ -9058,7 +9360,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int checkboxSize = 26;
             
             // === Tab clicks ===
-            int tabW = 80;
+            int tabW = 70;
             for (int t = 0; t < 3; t++) {  // 3个标签页：主页、性能、设置
                 int tabX = CARD_PADDING + 18 + t * (tabW + 8);
                 if (IsInRect(x, y, tabX, tabY, tabW, tabH)) {
@@ -9068,7 +9370,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g_prevTab = g_currentTab;
                         g_tabSlideAnim.value = 0.0;
                         g_tabSlideAnim.target = 1.0;
-                        g_tabSlideAnim.speed = 0.12;
+                        g_tabSlideAnim.speed = 0.08;
                         g_currentTab = t;
                     }
                     InvalidateRect(hwnd, nullptr, FALSE);
@@ -9081,11 +9383,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int platformBoxX = CARD_PADDING + 18;
                 int platformBoxY = rowY + 22;
                 int platformBoxW = leftColW - 36;
-                int platformBoxH = 36;
+                int platformBoxH = 44;  // 必须与绘制代码一致
                 int menuItemH = 36;
                 int menuH = g_platformCount * menuItemH + 8;
-                int btnY = rowY + 80;  // Match drawing position (increased spacing)
-                int launchBtnY = btnY + 48;
+                // 使用动画值计算菜单空间，与绘制代码一致
+                double menuExpandFactor = g_menuExpandAnim.value;
+                bool isMenuVisible = g_platformMenuOpen || (g_menuExpandAnim.isActive() && menuExpandFactor > 0.01);
+                int menuExtraSpace = isMenuVisible ? (int)((g_platformCount * menuItemH + 12) * menuExpandFactor) : 0;
+                // 按钮在平台框底部之后
+                int btnY = platformBoxY + platformBoxH + menuExtraSpace + 10;  // Connect button
+                int launchBtnY = btnY + 48;  // Launch Netease button
+                int minimalBtnY = g_neteaseConnected ? (btnY + 48) : (launchBtnY + 44);  // Minimal button
                 
                 // Platform menu item click (if menu is open) - menu is BELOW the box
                 if (g_platformMenuOpen) {
@@ -9132,19 +9440,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // 触发菜单展开/收起动画
                     g_menuExpandAnim.value = g_platformMenuOpen ? 0.0 : 1.0;
                     g_menuExpandAnim.target = g_platformMenuOpen ? 1.0 : 0.0;
-                    g_menuExpandAnim.speed = 0.15;
+                    g_menuExpandAnim.speed = 0.1;
                     // 触发箭头旋转动画
                     g_arrowRotationAnim.value = g_platformMenuOpen ? 0.0 : 1.0;
                     g_arrowRotationAnim.target = g_platformMenuOpen ? 1.0 : 0.0;
-                    g_arrowRotationAnim.speed = 0.15;
+                    g_arrowRotationAnim.speed = 0.1;
                     // 启动每个菜单项的逐条淡入动画（延迟递增）
                     if (g_platformMenuOpen) {
                         for (int i = 0; i < g_platformCount && i < 10; i++) {
                             g_menuItemAnims[i].value = 0.0;
                             g_menuItemAnims[i].target = 1.0;
-                            g_menuItemAnims[i].speed = 0.15;  // 统一速度，通过延迟实现效果
+                            g_menuItemAnims[i].speed = 0.1;  // 统一速度，通过延迟实现效果
                         }
                     }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                
+                // Minimal mode toggle button
+                if (IsInRect(x, y, CARD_PADDING + 18, minimalBtnY, leftColW - 36, 36)) {
+                    g_minimalMode = !g_minimalMode;
+                    SaveConfig(g_configPath);  // 保存极简模式状态
+                    g_displayConfigChanged = true;  // 强制重新发送 OSC
+                    g_cachedPreviewMsg.clear();  // 清除预览缓存
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
@@ -9162,7 +9480,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     Connect();
                 }
                 // Launch Netease button (only if Netease not connected)
-                else if (!g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 32)) {
+                else if (!g_neteaseConnected && IsInRect(x, y, CARD_PADDING + 18, launchBtnY, leftColW - 36, 36)) {
                 // Find Netease Cloud Music installation path
                 wchar_t ncmPath[MAX_PATH] = {0};
                 
@@ -9920,8 +10238,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_TIMER: {
+            // 诊断：记录所有 WM_TIMER 消息
+            static int allTimerCount = 0;
+            allTimerCount++;
+            if (allTimerCount % 60 == 0) {
+                LOG_INFO("WM_TIMER", "Received timer msg, wParam=%llu, hwnd=%p, g_hwnd=%p", 
+                         wParam, hwnd, g_hwnd);
+            }
+            
             // 主定时器逻辑（timer ID = 1）
             if (wParam == 1) {
+                // 诊断日志：每次都输出，确认定时器在运行
+                static int timerCount = 0;
+                timerCount++;
+                if (timerCount % 60 == 0) {  // 每60帧（约1秒）输出一次
+                    LOG_INFO("MainTimer", "Tick #%d, g_oscPaused=%d, g_overlayActive=%d", 
+                             timerCount, g_oscPaused, g_overlayActive);
+                }
+                
                 UpdateAnimations();
                 UpdatePerfStats();
                 
@@ -9972,59 +10306,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (g_overlayHwnd && IsWindow(g_overlayHwnd) && g_overlayActive && (now - lastOverlayUpdate) >= 16) {
                     lastOverlayUpdate = now;
                     
-                    // 1. 更新展开动画
-                    if (!g_overlayClosing && g_overlayExpandAnim < 1.0f) {
-                        g_overlayExpandAnim += 0.08f;
-                        if (g_overlayExpandAnim > 1.0f) g_overlayExpandAnim = 1.0f;
-                    }
-                    
-                    // 2. 更新粒子系统
+                    // 更新粒子系统（轻量操作）
                     UpdateParticles();
                     
-                    // 3. 关闭动画处理
-                    if (g_overlayClosing) {
-                        g_overlayExpandAnim -= 0.15f;
-                        if (g_overlayExpandAnim <= 0.0f) {
-                            g_overlayExpandAnim = 0.0f;
-                            DestroyWindow(g_overlayHwnd);
-                            g_overlayHwnd = nullptr;
-                            g_overlayActive = false;
-                            g_overlayClosing = false;
-                            g_overlayCloseDelayTime = 0;
-                            g_particles.clear();
-                            g_sandParticles.clear();
-                        }
-                    }
-                    // 4. 检查延迟关闭时间
-                    else if (g_overlayCloseDelayTime > 0 && now >= g_overlayCloseDelayTime) {
-                        g_overlayCloseDelayTime = 0;
-                        g_overlayClosing = true;
-                    }
-                    // 5. 检查暂停是否自然结束
-                    else if (g_oscPaused && g_oscPauseEndTime > 0 && now >= g_oscPauseEndTime) {
-                        OSCManager::instance().resume();
-                        g_oscPaused = false;
-                        g_oscPauseEndTime = 0;
-                        DestroyWindow(g_overlayHwnd);
-                        g_overlayHwnd = nullptr;
-                        g_overlayActive = false;
-                        g_overlayClosing = false;
-                        g_particles.clear();
-                        g_sandParticles.clear();
-                    }
-                    // 6. 安全检查
-                    else if (g_overlayExpandAnim >= 1.0f) {
-                        bool hasValidProgress = (g_oscPaused && g_oscPauseEndTime > now) || 
-                                                (g_overlayCloseDelayTime > 0);
-                        if (!hasValidProgress) {
-                            g_overlayClosing = true;
-                        }
-                    }
+                    // 注意：不在这里调用 DestroyWindow，它会阻塞消息循环
+                    // 所有销毁操作都通过 PostMessage(WM_USER + 500) 异步执行
                     
-                    // 触发 overlay 重绘
-                    if (g_overlayHwnd && IsWindow(g_overlayHwnd)) {
-                        InvalidateRect(g_overlayHwnd, nullptr, FALSE);
-                    }
+                    // 触发 overlay 重绘（动画线程会处理实际的绘制）
+                    InvalidateRect(g_overlayHwnd, nullptr, FALSE);
                 }
                 
                 // 更新光标闪烁状态
@@ -10081,16 +10370,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 
                 bool animActive = IsAnimationActive();
                 
-                if (animActive) {
-                    // Animation running - need smooth updates
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                // 暂停状态或 overlay 激活时，强制每帧重绘
+                // 使用 RedrawWindow 强制同步重绘，避免消息队列阻塞
+                if (g_oscPaused || g_overlayActive || animActive) {
+                    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
                 } else if (g_needsRedraw) {
                     // Content changed - redraw once
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
                     g_needsRedraw = false;
                 } else if (now - g_lastContentChange >= IDLE_REDRAW_INTERVAL) {
                     // Periodic refresh for time display etc.
-                    InvalidateRect(hwnd, nullptr, FALSE);
+                    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
                     g_lastContentChange = now;
                 }
             }
@@ -10381,11 +10671,105 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         
         case WM_USER + 201: {
-            // 异步创建 overlay 窗口（从低级键盘钩子中 PostMessage 触发）
-            if (!g_overlayHwnd && g_oscPaused) {
+            // 低级键盘钩子请求开始暂停
+            LOG_INFO("Hotkey", "Starting OSC pause (async from low-level hook)");
+            
+            // 设置暂停状态
+            LOG_INFO("Hotkey", "Step 1: Setting pause state");
+            OSCManager::instance().pause(OSC_PAUSE_DURATION);
+            g_oscPaused = true;
+            g_oscPauseEndTime = GetTickCount() + OSC_PAUSE_DURATION * 1000;
+            g_overlayClosing = false;
+            g_overlayCloseDelayTime = 0;
+            
+            // 启动暂停提示展开动画
+            g_oscPauseExpanding = true;
+            g_oscPauseExpandH.value = 0.0;
+            g_oscPauseExpandH.target = 1.0;
+            g_oscPauseExpandH.speed = 0.04;
+            g_oscPauseExpandV.value = 0.0;
+            g_oscPauseExpandV.target = 0.0;
+            g_oscPauseExpandV.speed = 0.04;
+            
+            // 发送暂停消息提示
+            LOG_INFO("Hotkey", "Step 2: Sending system message");
+            if (g_minimalMode) {
+                OSCManager::instance().sendSystemMessage(L"已暂停");
+            } else {
+                OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+            }
+            
+            // 创建 overlay 窗口
+            LOG_INFO("Hotkey", "Step 3: Creating overlay window");
+            if (!g_overlayHwnd) {
                 CreateOverlayWindow();
                 LOG_INFO("Main", "Overlay window created asynchronously via PostMessage");
             }
+            
+            LOG_INFO("Hotkey", "Step 4: Re-ensuring main timer with SetTimer");
+            SetTimer(g_hwnd, 1, 16, nullptr);
+            LOG_INFO("Hotkey", "Step 5: SetTimer called, g_hwnd=%p", g_hwnd);
+            
+            g_needsRedraw = true;
+            // 使用 RedrawWindow 强制同步重绘
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
+            LOG_INFO("Hotkey", "Step 6: Done, returning");
+            return 0;
+        }
+        
+        case WM_USER + 202: {
+            // 低级键盘钩子请求取消暂停
+            LOG_INFO("Hotkey", "Canceling OSC pause (async from low-level hook)");
+            
+            // 发送恢复消息提示
+            OSCManager::instance().sendSystemMessage(L"OSC \x6D88\x606F\x5DF2\x5F3A\x5236\x6062\x590D~");
+            
+            // 保存当前进度值（用于关闭动画期间的粒子效果）
+            DWORD now = GetTickCount();
+            if (g_oscPauseEndTime > now) {
+                g_closeProgress = (float)(g_oscPauseEndTime - now) / (OSC_PAUSE_DURATION * 1000.0f);
+            } else {
+                g_closeProgress = 0.0f;
+            }
+            
+            // 触发粒子爆炸（在进度条末端）
+            TriggerParticleBurstAtProgressEnd();
+            
+            // 启动暂停提示关闭动画
+            g_oscPauseClosing = true;
+            g_oscPauseCloseAnim.value = 0.0;
+            g_oscPauseCloseAnim.target = 1.0;
+            g_oscPauseCloseAnim.speed = 0.1;
+            
+            OSCManager::instance().resume();
+            g_oscPaused = false;
+            g_oscPauseEndTime = 0;
+            
+            // 延迟关闭动画（等待粒子效果播放）
+            if (g_overlayHwnd && !g_overlayClosing) {
+                g_overlayCloseDelayTime = GetTickCount() + 1500;
+            }
+            
+            g_needsRedraw = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        
+        case WM_USER + 203: {
+            // 低级键盘钩子请求加速关闭 overlay
+            LOG_INFO("Hotkey", "Accelerating overlay close (async from low-level hook)");
+            if (g_overlayHwnd) {
+                DestroyWindow(g_overlayHwnd);
+                g_overlayHwnd = nullptr;
+                g_overlayActive = false;
+                g_overlayClosing = false;
+                g_overlayCloseDelayTime = 0;
+                g_overlayExpandAnim = 0.0f;
+                g_particles.clear();
+                g_sandParticles.clear();
+            }
+            g_needsRedraw = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         
@@ -10440,11 +10824,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 LOG_INFO("OSC Receiver", "OSC paused for 30 seconds");
                 
                 // 发送暂停消息提示
-                OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                if (g_minimalMode) {
+                    OSCManager::instance().sendSystemMessage(L"已暂停");
+                } else {
+                    OSCManager::instance().sendSystemMessage(L"\x6B63\x5728\x6682\x505C OSC \x53D1\x9001...\n\x8BF7\x7B49\x5F85 30 \x79D2");
+                }
                 
                 // 创建覆盖层窗口
                 CreateOverlayWindow();
             }
+            g_needsRedraw = true;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -10453,10 +10842,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 动画线程请求关闭 overlay 窗口
             LOG_INFO("Overlay", "Received close request from animation thread");
             DestroyOverlayWindow();
+            g_needsRedraw = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         
         case WM_DESTROY:
+            // 停止多媒体定时器
+            StopMediaTimer();
+            
             // Cleanup performance monitoring threads
             ShutdownPerfMonitoring();
 
@@ -11298,11 +11692,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     g_osc = OSCManager::instance().getSender();  // 兼容层
     
     Connect();
-    SetTimer(g_hwnd, 1, 16, nullptr);
+    LOG_INFO("Main", "Starting main timer, g_hwnd=%p", g_hwnd);
+    SetTimer(g_hwnd, 1, 16, nullptr);  // 保留作为备用
+    LOG_INFO("Main", "Window timer started");
+    
+    // 启动多媒体定时器（主要定时器，不受消息队列优先级影响）
+    StartMediaTimer();
+    LOG_INFO("Main", "Media timer started");
     
     // 启动时发送测试消息，确保OSC连接正常
     if (OSCManager::instance().isConnected() && OSCManager::instance().isEnabled()) {
-        OSCManager::instance().sendSystemMessage(L"VRChatlyricsdisplay\n这是一条测试消息哦~\n用于确保OSC消息可以正常使用");
+        if (g_minimalMode) {
+            OSCManager::instance().sendSystemMessage(L"已启动");
+        } else {
+            OSCManager::instance().sendSystemMessage(L"VRChatlyricsdisplay\n这是一条测试消息哦~\n用于确保OSC消息可以正常使用");
+        }
         LOG_INFO("Main", "Startup test message sent");
     }
     
@@ -11317,7 +11721,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        // 诊断日志：记录消息循环处理的消息
+        static int msgCount = 0;
+        msgCount++;
+        if (msgCount % 100 == 0) {
+            LOG_INFO("MsgLoop", "Processed #%d, msg=0x%04X, hwnd=%p", msgCount, msg.message, msg.hwnd);
+        }
+        // 特别记录 WM_TIMER 消息
+        if (msg.message == WM_TIMER) {
+            static int timerMsgCount = 0;
+            timerMsgCount++;
+            if (timerMsgCount % 60 == 0) {
+                LOG_INFO("MsgLoop-Timer", "WM_TIMER #%d received in msg loop, wParam=%llu, hwnd=%p, g_hwnd=%p", 
+                         timerMsgCount, msg.wParam, msg.hwnd, g_hwnd);
+            }
+        }
+        TranslateMessage(&msg); 
+        DispatchMessageW(&msg); 
+    }
     
     if (g_moeKoeClient) delete g_moeKoeClient;
     if (g_neteaseClient) delete g_neteaseClient;
